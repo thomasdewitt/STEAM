@@ -2,58 +2,88 @@
 
 import numpy as np
 from pathlib import Path
+from scipy.ndimage import zoom
+from scipy.signal import oaconvolve as convolve
+import netCDF4
 from .constants import (
     hurst_horizontal as H_h,
     hurst_vertical_anisotropy as H_z,
 )
-from .thermodynamics import recover_diagnostics
 
 
 def simulate(
     h_profile,
     qt_profile,
-    nx, ny, nz,
-    dx, dy, dz,
+    nx, ny,
+    dx, dy,
     outer_scale,
     spheroscale,
+    domain_height,
+    profile_dz,
+    output_path,
+    oversampling_factors=(1, 1, 1),
     surface_pressure=101325.0,
     seed=None,
-    plot_dir=None,
 ):
-    """Run STEAM cascade and recover diagnostic fields.
+    """Run STEAM cascade with coarsening, write results to NetCDF.
 
     Parameters
     ----------
-    h_profile : ndarray, shape (nz,)
-        Mean moist static energy profile [J/kg].
-    qt_profile : ndarray, shape (nz,)
-        Mean total water mixing ratio profile [kg/kg].
-    nx, ny, nz : int
-        Grid dimensions (must be powers of 2).
-    dx, dy, dz : float
-        Grid spacing [m].
+    h_profile : ndarray, shape (n_profile,)
+        Mean moist static energy profile [J/kg] at spacing profile_dz.
+    qt_profile : ndarray, shape (n_profile,)
+        Mean total water mixing ratio profile [kg/kg] at spacing profile_dz.
+    nx, ny : int
+        Horizontal grid dimensions at finest resolution.
+    dx, dy : float
+        Horizontal grid spacing at finest resolution [m].
     outer_scale : float
         Outer (largest) turbulon scale L [m]. Must be power-of-2 multiple of dx.
     spheroscale : float
         Scale at which horizontal and vertical turbulon sizes are equal [m].
+    domain_height : float
+        Vertical extent of domain [m].
+    profile_dz : float
+        Vertical spacing of input profiles [m].
+    output_path : str or Path
+        Path to write the output NetCDF file.
+    oversampling_factors : tuple of 3 ints
+        (s_x, s_y, s_z) oversampling factors.
     surface_pressure : float
         Surface pressure [Pa].
     seed : int or None
         Random seed for reproducibility.
-    plot_dir : str or Path or None
-        If provided, save diagnostic plots (A_h/A_qt and running h/qt fields)
-        for each cascade iteration to this directory.
 
     Returns
     -------
-    dict with keys: 'h', 'qt', 'T', 'qv', 'qc', 'qi', 'p' (all 3D arrays,
-    shape (nx, ny, nz)).
+    Path
+        The output_path as a Path object.
     """
+    output_path = Path(output_path)
     rng = np.random.default_rng(seed)
+    s_x, s_y, s_z = oversampling_factors
+    for s, name in zip(oversampling_factors, ('s_x', 's_y', 's_z')):
+        if not isinstance(s, int) or s < 1:
+            raise ValueError(f"{name} must be a positive integer, got {s}")
+    domain_x = nx * dx
+    domain_y = ny * dy
 
-    if plot_dir is not None:
-        plot_dir = Path(plot_dir)
-        plot_dir.mkdir(parents=True, exist_ok=True)
+    h_profile = np.asarray(h_profile, dtype=np.float32)
+    qt_profile = np.asarray(qt_profile, dtype=np.float32)
+    if h_profile.ndim != 1 or qt_profile.ndim != 1:
+        raise ValueError("h_profile and qt_profile must be 1D arrays")
+    if len(h_profile) == 0 or len(h_profile) != len(qt_profile):
+        raise ValueError(
+            f"h_profile and qt_profile must have equal nonzero length, "
+            f"got {len(h_profile)} and {len(qt_profile)}"
+        )
+    if outer_scale < dx:
+        raise ValueError(
+            f"outer_scale ({outer_scale}) must be >= dx ({dx})"
+        )
+    if domain_height <= 0:
+        raise ValueError(f"domain_height must be positive, got {domain_height}")
+    z_profile = np.arange(len(h_profile), dtype=np.float32) * profile_dz
 
     # Size classes: L, L/2, L/4, ..., dx (Apxeq:mean turbulon amplitude)
     n_classes = int(np.log2(outer_scale / dx)) + 1
@@ -63,164 +93,281 @@ def simulate(
     k_z_values = spheroscale * (k_values / spheroscale) ** H_z
 
     # Normalization factors (Apxeq:norm factor computation)
-    k_z_L = k_z_values[0]  # vertical outer scale
-    C_h_L = _compute_normalization(h_profile, k_z_L, dz)
-    C_qt_L = _compute_normalization(qt_profile, k_z_L, dz)
+    k_z_L = k_z_values[0]
+    n_large_turbulons = int(domain_height / k_z_L)
+    if n_large_turbulons < 1:
+        raise ValueError(
+            f"domain_height ({domain_height} m) is shorter than one vertical "
+            f"outer-scale turbulon ({k_z_L:.1f} m); increase domain_height or "
+            f"decrease outer_scale"
+        )
+    C_h_L = _compute_normalization(h_profile, k_z_L, profile_dz, n_large_turbulons)
+    C_qt_L = _compute_normalization(qt_profile, k_z_L, profile_dz, n_large_turbulons)
 
     # Scale-dependent amplitudes (Apxeq:mean turbulon amplitude)
-    C_h_k = C_h_L * (k_values / outer_scale) ** H_h
-    C_qt_k = C_qt_L * (k_values / outer_scale) ** H_h
+    C_h_k = np.float32(C_h_L) * (k_values / outer_scale).astype(np.float32) ** H_h
+    C_qt_k = np.float32(C_qt_L) * (k_values / outer_scale).astype(np.float32) ** H_h
 
-    # Initialize perturbation fields
-    h_perturbation = np.zeros((nx, ny, nz))
-    qt_perturbation = np.zeros((nx, ny, nz))
+    # Initialize perturbation fields (will be resized each iteration)
+    h_perturbation = None
+    qt_perturbation = None
 
-    # Broadcast mean profiles to 3D
-    h_mean = np.broadcast_to(h_profile[np.newaxis, np.newaxis, :], (nx, ny, nz))
-    qt_mean = np.broadcast_to(qt_profile[np.newaxis, np.newaxis, :], (nx, ny, nz))
-
-    # Cascade from large to small scales
     for i, k in enumerate(k_values):
-        print(f'Step {i+1}/{k_values.size}')
         k_z = k_z_values[i]
 
+        # Coarsened resolution for this scale (oversampled by s)
+        dx_k = k / s_x
+        dy_k = k / s_y
+        dz_k = k_z / s_z
+        nx_k = max(2, round(domain_x / dx_k))
+        ny_k = max(2, round(domain_y / dy_k))
+        nz_k = max(2, round(domain_height / dz_k))
+
+        print(f'Step {i+1:3d}/{k_values.size:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}):  interpolating', end='\r')
+
+        # Interpolate perturbations from previous resolution
+        if h_perturbation is None:
+            h_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
+            qt_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
+        elif h_perturbation.shape != (nx_k, ny_k, nz_k):
+            zoom_factors = (
+                nx_k / h_perturbation.shape[0],
+                ny_k / h_perturbation.shape[1],
+                nz_k / h_perturbation.shape[2],
+            )
+            h_perturbation = zoom(h_perturbation, zoom_factors, order=1).astype(np.float32)
+            qt_perturbation = zoom(qt_perturbation, zoom_factors, order=1).astype(np.float32)
+
+        # Interpolate mean profiles to current vertical grid
+        z_k = np.arange(nz_k, dtype=np.float32) * dz_k
+        h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
+        qt_mean_1d = np.interp(z_k, z_profile, qt_profile).astype(np.float32)
+        h_mean = np.broadcast_to(h_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
+        qt_mean = np.broadcast_to(qt_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
+
         # Normalized gradient (Apxeq:amplitude propto gradient normalized)
-        G_h = _normalized_gradient(h_mean + h_perturbation, dx, dy, dz)
-        G_qt = _normalized_gradient(qt_mean + qt_perturbation, dx, dy, dz)
+        print(f'Step {i+1:3d}/{k_values.size:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}):  computing gradients...', end='\r')
+        G_h = _normalized_gradient(h_mean + h_perturbation, dx_k, dy_k, dz_k)
+        G_qt = _normalized_gradient(qt_mean + qt_perturbation, dx_k, dy_k, dz_k)
 
         # Sparse noise field — same S_k for both h and qt
-        S_k = _sparse_noise(nx, ny, nz, k, k_z, dx, dz, rng)
+        S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
 
         # Amplitude arrays (Apxeq:amplitude propto gradient normalized)
         A_h = G_h * S_k * C_h_k[i]
         A_qt = G_qt * S_k * C_qt_k[i]
 
-        # Build folded 3D Mexican hat kernel (Apxeq:turbulon shape)
-        kernel_folded = _mexican_hat_kernel_folded(
-            k, spheroscale, dx, dy, dz, nx, ny,
-        )
+        # Build compact 3D Mexican hat kernel (Apxeq:turbulon shape)
+        kernel = _mexican_hat_kernel(k, spheroscale, dx_k, dy_k, dz_k, support_factor=10)
 
-        # Convolve and accumulate
-        h_perturbation += _convolve_periodic_xy_zeropad_z(A_h, kernel_folded)
-        qt_perturbation += _convolve_periodic_xy_zeropad_z(A_qt, kernel_folded)
+        # Convolve and accumulate (periodic x,y; zero-padded z)
+        print(f'Step {i+1:3d}/{k_values.size:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}):  computing convolutions...', end='\r')
+        h_perturbation += _convolve_periodic_xy_edgepad_z(A_h, kernel)
+        qt_perturbation += _convolve_periodic_xy_edgepad_z(A_qt, kernel)
+        print(f'Step {i+1:3d}/{k_values.size:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}):  done                               ')
 
-        if plot_dir is not None:
-            _save_cascade_plots(
-                i, k, k_z, A_h, A_qt,
-                h_mean, qt_mean, h_perturbation, qt_perturbation,
-                nx, ny, nz, dx, dy, dz, plot_dir,
-            )
+    # Final fields are at finest resolution (last iteration)
+    nz_final = nz_k
+    dz_final = dz_k
+    z_final = np.arange(nz_final, dtype=np.float32) * dz_final
+    h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
+    qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
 
-    # Final 3D fields
-    h_3d = np.ascontiguousarray(h_mean + h_perturbation)
-    qt_3d = np.ascontiguousarray(qt_mean + qt_perturbation)
+    h_3d = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_perturbation)
+    qt_3d = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_perturbation)
 
-    # Thermodynamic recovery
-    z_values = np.arange(nz) * dz
-    diagnostics = recover_diagnostics(h_3d, qt_3d, z_values, surface_pressure)
+    # Write NetCDF output
+    nx_final, ny_final = h_3d.shape[0], h_3d.shape[1]
+    dx_final = (nx * dx) / nx_final
+    dy_final = (ny * dy) / ny_final
+    print(f"Writing NetCDF to {output_path} ...")
+    x_coords = np.arange(nx_final, dtype=np.float32) * dx_final
+    y_coords = np.arange(ny_final, dtype=np.float32) * dy_final
 
-    return {
-        "h": h_3d,
-        "qt": qt_3d,
-        **diagnostics,
-    }
+    ds = netCDF4.Dataset(output_path, "w", format="NETCDF4")
+
+    # Dimensions
+    ds.createDimension("x", nx_final)
+    ds.createDimension("y", ny_final)
+    ds.createDimension("z", nz_final)
+    ds.createDimension("z_profile", len(h_profile))
+    ds.createDimension("k", len(k_values))
+
+    # Coordinate variables
+    x_var = ds.createVariable("x", "f4", ("x",))
+    x_var[:] = x_coords
+    x_var.units = "m"
+    x_var.long_name = "x coordinate"
+
+    y_var = ds.createVariable("y", "f4", ("y",))
+    y_var[:] = y_coords
+    y_var.units = "m"
+    y_var.long_name = "y coordinate"
+
+    z_var = ds.createVariable("z", "f4", ("z",))
+    z_var[:] = z_final
+    z_var.units = "m"
+    z_var.long_name = "z coordinate (height)"
+
+    # Data variables — chunked and compressed
+    h_var = ds.createVariable("h", "f4", ("x", "y", "z"), zlib=True, complevel=4,
+                              chunksizes=(min(64, nx_final), min(64, ny_final), nz_final))
+    h_var[:] = h_3d
+    h_var.units = "J/kg"
+    h_var.long_name = "moist static energy"
+
+    qt_var = ds.createVariable("qt", "f4", ("x", "y", "z"), zlib=True, complevel=4,
+                               chunksizes=(min(64, nx_final), min(64, ny_final), nz_final))
+    qt_var[:] = qt_3d
+    qt_var.units = "kg/kg"
+    qt_var.long_name = "total water mixing ratio"
+
+    # Profile variables
+    zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))
+    zp_var[:] = z_profile
+    zp_var.units = "m"
+
+    hp_var = ds.createVariable("h_profile", "f4", ("z_profile",))
+    hp_var[:] = h_profile
+    hp_var.units = "J/kg"
+    hp_var.long_name = "input h profile"
+
+    qtp_var = ds.createVariable("qt_profile", "f4", ("z_profile",))
+    qtp_var[:] = qt_profile
+    qtp_var.units = "kg/kg"
+    qtp_var.long_name = "input qt profile"
+
+    # 1D scale arrays
+    kv = ds.createVariable("k_values", "f4", ("k",))
+    kv[:] = k_values.astype(np.float32)
+    kv.units = "m"
+    kv.long_name = "horizontal turbulon scale classes"
+
+    kzv = ds.createVariable("k_z_values", "f4", ("k",))
+    kzv[:] = k_z_values.astype(np.float32)
+    kzv.units = "m"
+    kzv.long_name = "vertical turbulon scale classes"
+
+    chk = ds.createVariable("C_h_k", "f4", ("k",))
+    chk[:] = C_h_k
+    chk.long_name = "scale-dependent h amplitude"
+
+    cqtk = ds.createVariable("C_qt_k", "f4", ("k",))
+    cqtk[:] = C_qt_k
+    cqtk.long_name = "scale-dependent qt amplitude"
+
+    # Scalar attributes on root group
+    ds.nx = np.int32(nx_final)
+    ds.ny = np.int32(ny_final)
+    ds.dx = np.float32(dx_final)
+    ds.dy = np.float32(dy_final)
+    ds.dz = np.float32(dz_final)
+    ds.outer_scale = np.float32(outer_scale)
+    ds.spheroscale = np.float32(spheroscale)
+    ds.domain_height = np.float32(domain_height)
+    ds.profile_dz = np.float32(profile_dz)
+    ds.oversampling_factors = np.array(oversampling_factors, dtype=np.int32)
+    ds.surface_pressure = np.float32(surface_pressure)
+    ds.seed = np.int32(seed) if seed is not None else -1
+    ds.C_h_L = np.float32(C_h_L)
+    ds.C_qt_L = np.float32(C_qt_L)
+    ds.n_large_turbulons = np.int32(n_large_turbulons)
+    ds.H_h = np.float32(H_h)
+    ds.H_z = np.float32(H_z)
+
+    ds.close()
+    print(f"Written {output_path}")
+    return output_path
 
 
-def _mexican_hat_kernel_folded(k, spheroscale, dx, dy, dz, nx, ny,
-                               support_factor=5):
-    """3D Mexican hat kernel, periodically folded into (nx, ny) and shifted.
+def _mexican_hat_kernel(k, spheroscale, dx, dy, dz, support_factor=5):
+    """Compact 3D Mexican hat kernel, centered, support-sized only.
 
     (Apxeq:turbulon shape) T_k(||r||) = (1 - ||r||²/k²) exp(-||r||²/(2k²))
     (Apxeq:canonical anisotropic norm) for the metric.
 
-    Returns shape (nx, ny, knz) with center rolled to (0, 0) in x,y,
-    ready for FFT convolution. Computes the folded result directly by
-    summing over periodic tile copies, avoiding allocation of the full
-    unfolded kernel.
+    Returns shape (2*half_nx+1, 2*half_ny+1, 2*half_nz+1) with center
+    at the middle of the array. Only extends to support_factor * k
+    horizontally and support_factor * k_z vertically.
     """
     k_z = spheroscale * (k / spheroscale) ** H_z
+    half_nx = int(np.ceil(support_factor * k / dx))
+    half_ny = int(np.ceil(support_factor * k / dy))
     half_nz = int(np.ceil(support_factor * k_z / dz))
-    z_kernel = np.arange(-half_nz, half_nz + 1) * dz
-    knz = len(z_kernel)
 
-    # Number of tile copies needed in each direction
-    support_x = support_factor * k
-    support_y = support_factor * k
-    n_tiles_x = int(np.ceil(support_x / (nx * dx)))
-    n_tiles_y = int(np.ceil(support_y / (ny * dy)))
+    x = np.arange(-half_nx, half_nx + 1, dtype=np.float32) * dx
+    y = np.arange(-half_ny, half_ny + 1, dtype=np.float32) * dy
+    z = np.arange(-half_nz, half_nz + 1, dtype=np.float32) * dz
 
-    # Base grid positions (0..nx-1, 0..ny-1) in physical coords
-    x_base = np.arange(nx) * dx  # (nx,)
-    y_base = np.arange(ny) * dy  # (ny,)
+    X = x[:, None, None]
+    Y = y[None, :, None]
+    Z = z[None, None, :]
 
-    folded = np.zeros((nx, ny, knz))
+    # Anisotropic norm (Apxeq:canonical anisotropic norm)
+    r_norm_sq = spheroscale**2 * (
+        (X / spheroscale) ** 2
+        + (Y / spheroscale) ** 2
+        + (np.abs(Z) / spheroscale) ** (2.0 / H_z)
+    )
+    ratio_sq = r_norm_sq / k**2
+    kernel = ((1.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)).astype(np.float32)
 
-    for nxi in range(-n_tiles_x, n_tiles_x + 1):
-        x = x_base + nxi * nx * dx  # (nx,)
-        for nyi in range(-n_tiles_y, n_tiles_y + 1):
-            y = y_base + nyi * ny * dy  # (ny,)
-
-            X = x[:, None, None]      # (nx, 1, 1)
-            Y = y[None, :, None]      # (1, ny, 1)
-            Z = z_kernel[None, None, :]  # (1, 1, knz)
-
-            # Anisotropic norm (Apxeq:canonical anisotropic norm)
-            r_norm_sq = spheroscale**2 * (
-                (X / spheroscale) ** 2
-                + (Y / spheroscale) ** 2
-                + (np.abs(Z) / spheroscale) ** (2.0 / H_z)
-            )
-            ratio_sq = r_norm_sq / k**2
-            folded += (1.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)
-
-    # Roll so that kernel center (x=0, y=0) maps to index (0, 0).
-    # Currently x=0 is at index 0, so no roll needed.
-    return folded
+    # Force zero mean
+    kernel -= kernel.mean()
+    return kernel
 
 
-def _mexican_hat_1d(k_z, dz, support_factor=3):
-    """1D vertical Mexican hat kernel for normalization computation."""
+def _mexican_hat_1d(k_z, dz, support_factor=5):
+    """1D vertical Mexican hat kernel (max=1) for normalization computation."""
     half_nz = int(np.ceil(support_factor * k_z / dz))
     z = np.arange(-half_nz, half_nz + 1) * dz
     ratio_sq = (z / k_z) ** 2
     return (1.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)
 
 
-def _compute_normalization(profile, k_z, dz):
-    """Compute C_{Φ,L} via 1D convolution then RMS / k_z.
+def _compute_normalization(profile, k_z, dz, n_large_turbulons):
+    """Compute C_{Φ,L}: per-turbulon average response of the profile to T_L.
 
     (Apxeq:norm factor computation)
-    C_{Φ,L} = (1/k_z) * sqrt(<(T_L(x=y=0) * <Φ>_t)²>_z)
+
+    Convolves the profile with a 1D Mexican hat at the outer scale, then
+    converts the per-sample mean absolute response to a per-turbulon
+    average by scaling by n_large_turbulons / n_profile_samples. This
+    makes C_L independent of the profile sampling resolution (profile_dz).
     """
     kernel_1d = _mexican_hat_1d(k_z, dz)
-    convolved = np.convolve(profile, kernel_1d, mode="same")
-    rms = np.sqrt(np.mean(convolved**2))
-    # return rms / (100*k_z)   
-    if profile[0] < 1:
-        return rms / (10*k_z/dz)    
-    else:
-        return rms / (100*k_z/dz)
+    half = len(kernel_1d) // 2
+    padded = np.pad(profile, half, mode='edge')
+    convolved = np.convolve(padded, kernel_1d, mode='valid')
+    rms = np.mean(np.abs(convolved))
+    return rms * (n_large_turbulons / len(profile))
 
 
-def _sparse_noise(nx, ny, nz, k, k_z, dx, dz, rng):
-    """Generate sparse N(0,1) noise field.
+def _sparse_noise(nx, ny, nz, s_x, s_y, s_z, rng):
+    """Generate sparse N(0,1) noise field at oversampled resolution.
 
-    Turbulon centers are placed via linspace at exact physical spacings k and
-    k_z, then rounded to the nearest grid point. This keeps the maximum
-    positional error bounded to half a grid cell regardless of accumulation.
+    When s=1 in all dimensions, returns a full grid of random values.
+    When s>1, noise is nonzero every s grid points (one turbulon center
+    per k spacing at the oversampled resolution).
+
+    Parameters
+    ----------
+    nx, ny, nz : int
+        Grid dimensions (at oversampled resolution).
+    s_x, s_y, s_z : int
+        Oversampling factors (must be positive integers).
+    rng : numpy.random.Generator
     """
-    field = np.zeros((nx, ny, nz))
+    if s_x == 1 and s_y == 1 and s_z == 1:
+        return rng.standard_normal((nx, ny, nz), dtype=np.float32)
 
-    n_h = max(1, int(nx * dx / k))
-    n_v = max(1, int(nz * dz / k_z))
-
-    # Exact positions via linspace, then snap to nearest grid index
-    ix = np.unique(np.rint(np.linspace(0, nx - 1, n_h, endpoint=False)).astype(int))
-    iy = np.unique(np.rint(np.linspace(0, ny - 1, n_h, endpoint=False)).astype(int))
-    iz = np.unique(np.rint(np.linspace(0, nz - 1, n_v, endpoint=False)).astype(int))
-
-    noise = rng.standard_normal((len(ix), len(iy), len(iz)))
-    field[np.ix_(ix, iy, iz)] = noise
+    field = np.zeros((nx, ny, nz), dtype=np.float32)
+    ix = np.arange(0, nx, s_x)
+    iy = np.arange(0, ny, s_y)
+    iz = np.arange(0, nz, s_z)
+    field[np.ix_(ix, iy, iz)] = rng.standard_normal(
+        (len(ix), len(iy), len(iz)), dtype=np.float32,
+    )
     return field
 
 
@@ -228,14 +375,11 @@ def _normalized_gradient(field_3d, dx, dy, dz):
     """Compute |∇f| / mean(|∇f|), the normalized gradient magnitude.
 
     (Apxeq:amplitude propto gradient normalized)
-    Uses np.gradient for z (non-periodic, one-sided at boundaries) and
-    periodic central differences for x,y.
+    Uses periodic central differences for x,y and np.gradient for z
+    (one-sided at boundaries).
     """
-    # Periodic central differences in x,y
     grad_x = (np.roll(field_3d, -1, axis=0) - np.roll(field_3d, 1, axis=0)) / (2 * dx)
     grad_y = (np.roll(field_3d, -1, axis=1) - np.roll(field_3d, 1, axis=1)) / (2 * dy)
-
-    # np.gradient in z (second-order central, one-sided at boundaries)
     grad_z = np.gradient(field_3d, dz, axis=2)
 
     magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
@@ -247,105 +391,58 @@ def _normalized_gradient(field_3d, dx, dy, dz):
         return np.ones_like(magnitude)
 
 
-def _convolve_periodic_xy_zeropad_z(field, kernel_folded):
-    """FFT-based convolution: periodic in x,y, zero-padded in z.
+def _fold_kernel_to_field(kernel, field_shape):
+    """Fold a kernel larger than the field onto the field size for periodic axes.
+
+    For x and y (periodic), if the kernel extent exceeds the field size, the
+    kernel is wrapped (aliased) onto the field period and re-centered. The z
+    axis is left unchanged (handled by edge-padding the field instead).
+    """
+    result = kernel
+    for axis in (0, 1):  # periodic axes only
+        n_field = field_shape[axis]
+        n_kern = result.shape[axis]
+        if n_kern <= n_field:
+            continue
+        # Sum kernel slices that map to the same periodic index
+        folded_shape = list(result.shape)
+        folded_shape[axis] = n_field
+        folded = np.zeros(folded_shape, dtype=result.dtype)
+        center = n_kern // 2
+        for i in range(n_kern):
+            target = (i - center) % n_field
+            slc_src = [slice(None)] * 3
+            slc_dst = [slice(None)] * 3
+            slc_src[axis] = i
+            slc_dst[axis] = target
+            folded[tuple(slc_dst)] += result[tuple(slc_src)]
+        # Re-center so that index n_field//2 is the origin
+        result = np.roll(folded, n_field // 2, axis=axis)
+    return result
+
+
+def _convolve_periodic_xy_edgepad_z(field, kernel):
+    """Direct convolution: periodic in x,y, edge-padded in z.
+
+    If the kernel is larger than the field in x or y, it is first folded
+    (periodically aliased) to the field size. Then x,y are wrap-padded and
+    z is edge-padded before calling oaconvolve with mode='valid'.
 
     Parameters
     ----------
     field : ndarray, shape (nx, ny, nz)
-    kernel_folded : ndarray, shape (nx, ny, knz)
-        Pre-folded kernel with center at (0, 0) in x,y, as produced by
-        _mexican_hat_kernel_folded.
+    kernel : ndarray, shape (knx, kny, knz)
+        Compact centered kernel from _mexican_hat_kernel.
     """
-    nx, ny, nz = field.shape
-    knz = kernel_folded.shape[2]
-
-    # FFT field and kernel in x,y
-    F_field = np.fft.fft2(field, axes=(0, 1))
-    F_kernel = np.fft.fft2(kernel_folded, axes=(0, 1))
-
-    # Linear convolution along z in Fourier-xy space
-    nz_padded = nz + knz - 1
-    F_field_z = np.fft.fft(F_field, n=nz_padded, axis=2)
-    F_kernel_z = np.fft.fft(F_kernel, n=nz_padded, axis=2)
-
-    result_padded = np.fft.ifft(F_field_z * F_kernel_z, axis=2)
-
-    # Inverse FFT in x,y, take real part
-    result_padded = np.fft.ifft2(result_padded, axes=(0, 1)).real
-
-    # mode='same': take central nz slice
-    start_z = knz // 2
-    return result_padded[:, :, start_z : start_z + nz]
-
-
-def _save_cascade_plots(
-    i, k, k_z, A_h, A_qt,
-    h_mean, qt_mean, h_perturbation, qt_perturbation,
-    nx, ny, nz, dx, dy, dz, plot_dir,
-):
-    """Save diagnostic cross-section plots (xz, yz, xy) for one cascade iteration."""
-    import matplotlib.pyplot as plt
-
-    x_km = np.arange(nx) * dx / 1000
-    y_km = np.arange(ny) * dy / 1000
-    z_km = np.arange(nz) * dz / 1000
-
-    h_total = h_mean + h_perturbation
-    qt_total = qt_mean + qt_perturbation
-
-    slices = [
-        ("xz", x_km, z_km, "x [km]", "z [km]",
-         lambda f: f[:, ny // 2, :].T),
-        ("yz", y_km, z_km, "y [km]", "z [km]",
-         lambda f: f[nx // 2, :, :].T),
-        ("xy", x_km, y_km, "x [km]", "y [km]",
-         lambda f: f[:, :, nz // 2].T),
-    ]
-
-    for label, coord_h, coord_v, xlabel, ylabel, slicer in slices:
-        fig, axes = plt.subplots(2, 2, figsize=(10, 6))
-
-        # Top row: A_h, A_qt with symmetric colorscale (0 = white)
-        for ax, data, name in [
-            (axes[0, 0], slicer(A_h), "A_h"),
-            (axes[0, 1], slicer(A_qt), "A_qt"),
-        ]:
-            vlim = np.abs(data).max() or 1.0
-            im = ax.pcolormesh(
-                coord_h, coord_v, data,
-                cmap="RdBu_r", vmin=-vlim, vmax=vlim, shading="auto",
-            )
-            ax.set_title(f"{name}  (k={k:.0f} m)", fontsize=9)
-            ax.set_ylabel(ylabel)
-            plt.colorbar(im, ax=ax, pad=0.02)
-
-        # Bottom row: running h and qt
-        h_slice = slicer(h_total) / 1000
-        im2 = axes[1, 0].pcolormesh(
-            coord_h, coord_v, h_slice,
-            cmap="inferno", shading="auto",
-        )
-        axes[1, 0].set_title("h (running) [kJ/kg]", fontsize=9)
-        axes[1, 0].set_ylabel(ylabel)
-        axes[1, 0].set_xlabel(xlabel)
-        plt.colorbar(im2, ax=axes[1, 0], pad=0.02)
-
-        qt_slice = slicer(qt_total) * 1000
-        im3 = axes[1, 1].pcolormesh(
-            coord_h, coord_v, qt_slice,
-            cmap="YlGnBu", shading="auto",
-        )
-        axes[1, 1].set_title("qt (running) [g/kg]", fontsize=9)
-        axes[1, 1].set_xlabel(xlabel)
-        plt.colorbar(im3, ax=axes[1, 1], pad=0.02)
-
-        fig.suptitle(
-            f"Iteration {i} ({label}): k = {k:.0f} m, k_z = {k_z:.0f} m",
-            fontsize=11, fontweight="bold",
-        )
-        fig.tight_layout()
-        fig.savefig(
-            plot_dir / f"cascade_{label}_{i:02d}_k{k:.0f}m.png", dpi=150,
-        )
-        plt.close(fig)
+    kernel = _fold_kernel_to_field(kernel, field.shape)
+    # Asymmetric padding: total pad per axis = kernel_size - 1, to get
+    # output_size = field_size from oaconvolve mode='valid'
+    kx, ky, kz = kernel.shape
+    pad_x_l, pad_x_r = kx // 2, (kx - 1) // 2
+    pad_y_l, pad_y_r = ky // 2, (ky - 1) // 2
+    pad_z_l, pad_z_r = kz // 2, (kz - 1) // 2
+    # Wrap-pad x,y; edge-pad z, then convolve and crop
+    padded = np.pad(field, ((pad_x_l, pad_x_r), (pad_y_l, pad_y_r), (0, 0)), mode='wrap')
+    padded = np.pad(padded, ((0, 0), (0, 0), (pad_z_l, pad_z_r)), mode='edge')
+    result = convolve(padded, kernel, mode='valid')
+    return result.astype(np.float32)

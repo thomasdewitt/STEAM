@@ -1,6 +1,7 @@
 """Thermodynamic recovery of diagnostic fields from h and qt."""
 
 import numpy as np
+import netCDF4
 from .constants import (
     specific_heat_dry_air as cp,
     latent_heat_vaporization as Lv,
@@ -83,6 +84,58 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
             p[:, :, iz + 1] = p_level * np.exp(-g * dz / (Rd * Tv))
 
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
+
+
+def compute_diagnostics(nc_path, chunk_nx=64):
+    """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
+
+    Opens the file in r+ mode, reads h, qt, z, surface_pressure, and appends
+    the diagnostic variables T, qv, qc, qi, p (float32, same shape as h/qt).
+
+    Parameters
+    ----------
+    nc_path : str or Path
+        Path to the NetCDF file produced by simulate().
+    chunk_nx : int
+        Number of x-columns to process at a time.
+    """
+    ds = netCDF4.Dataset(nc_path, "r+")
+    nx = len(ds.dimensions["x"])
+    ny = len(ds.dimensions["y"])
+    nz = len(ds.dimensions["z"])
+    z_values = ds.variables["z"][:]
+    surface_pressure = float(ds.surface_pressure)
+
+    # Create output variables if they don't exist
+    diag_names = {"T": ("K", "temperature"),
+                  "qv": ("kg/kg", "water vapor mixing ratio"),
+                  "qc": ("kg/kg", "cloud liquid water mixing ratio"),
+                  "qi": ("kg/kg", "cloud ice mixing ratio"),
+                  "p": ("Pa", "pressure")}
+    for name, (units, long_name) in diag_names.items():
+        if name not in ds.variables:
+            v = ds.createVariable(name, "f4", ("x", "y", "z"), zlib=True, complevel=4,
+                                  chunksizes=(min(chunk_nx, nx), min(64, ny), nz))
+            v.units = units
+            v.long_name = long_name
+
+    h_var = ds.variables["h"]
+    qt_var = ds.variables["qt"]
+
+    for x0 in range(0, nx, chunk_nx):
+        x1 = min(x0 + chunk_nx, nx)
+        print(f"  diagnostics: x [{x0}:{x1}] / {nx}", end="\r")
+
+        h_chunk = h_var[x0:x1, :, :]
+        qt_chunk = qt_var[x0:x1, :, :]
+
+        result = recover_diagnostics(h_chunk, qt_chunk, z_values, surface_pressure)
+
+        for name in ("T", "qv", "qc", "qi", "p"):
+            ds.variables[name][x0:x1, :, :] = result[name].astype(np.float32)
+
+    ds.close()
+    print(f"  diagnostics: done, written to {nc_path}          ")
 
 
 def _saturation_vapor_pressure(T):
