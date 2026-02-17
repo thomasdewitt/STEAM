@@ -16,7 +16,7 @@ H_z = 5/9
 NX = NY = 512
 DOMAIN_SIZE = 10000
 DX = DY = DOMAIN_SIZE // NX
-OVERSAMPLING = 1
+SPARSITY = 1
 OUTER_SCALE = DOMAIN_SIZE / 1
 SPHEROSCALE = 100.0
 DOMAIN_HEIGHT = 6300.0
@@ -48,7 +48,7 @@ nc_path = simulate(
     profile_dz=PROFILE_DZ,
     output_path=OUTPUT_PATH,
     seed=SEED,
-    oversampling_factors=(OVERSAMPLING, OVERSAMPLING, 2 * OVERSAMPLING),
+    sparsity_factors=(SPARSITY, SPARSITY, 2 * SPARSITY),
 )
 
 # Read back from NetCDF

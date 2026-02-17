@@ -92,18 +92,18 @@ def test_rejects_domain_shorter_than_vertical_outer_scale(tmp_path, simple_profi
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 100, 30, tmp_path / "x.nc")
 
 
-def test_rejects_zero_oversampling(tmp_path, simple_profiles):
+def test_rejects_zero_sparsity(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="positive integer"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
-                 oversampling_factors=(0, 1, 1))
+                 sparsity_factors=(0, 1, 1))
 
 
-def test_rejects_float_oversampling(tmp_path, simple_profiles):
+def test_rejects_float_sparsity(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="positive integer"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
-                 oversampling_factors=(1.5, 1, 1))
+                 sparsity_factors=(1.5, 1, 1))
 
 
 # ===================================================================
@@ -127,7 +127,7 @@ def test_output_contains_required_attributes(small_nc):
     expected = {"nx", "ny", "dx", "dy", "dz", "outer_scale", "spheroscale",
                 "domain_height", "profile_dz", "surface_pressure", "seed",
                 "C_h_L", "C_qt_L", "n_large_turbulons", "H_h", "H_z",
-                "oversampling_factors"}
+                "sparsity_factors"}
     assert expected <= set(ds.ncattrs())
     ds.close()
 
@@ -168,7 +168,7 @@ def test_output_oversampled_dimensions(tmp_path, simple_profiles):
              outer_scale=8000, spheroscale=100,
              domain_height=3000, profile_dz=30,
              output_path=out, seed=42,
-             oversampling_factors=(2, 2, 2))
+             sparsity_factors=(2, 2, 2))
     ds = netCDF4.Dataset(out, "r")
     assert len(ds.dimensions["x"]) == 32
     assert len(ds.dimensions["y"]) == 32

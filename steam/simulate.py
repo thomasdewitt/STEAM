@@ -21,7 +21,7 @@ def simulate(
     domain_height,
     profile_dz,
     output_path,
-    oversampling_factors=(1, 1, 1),
+    sparsity_factors=(1, 1, 1),
     surface_pressure=101325.0,
     seed=None,
 ):
@@ -47,8 +47,10 @@ def simulate(
         Vertical spacing of input profiles [m].
     output_path : str or Path
         Path to write the output NetCDF file.
-    oversampling_factors : tuple of 3 ints
-        (s_x, s_y, s_z) oversampling factors.
+    sparsity_factors : tuple of 3 ints
+        (s_x, s_y, s_z) sparsity factors. Grid spacing is k/s_x, so
+        s=1 gives one grid cell per turbulon and s=2 resolves each
+        turbulon with 2 cells.
     surface_pressure : float
         Surface pressure [Pa].
     seed : int or None
@@ -61,8 +63,8 @@ def simulate(
     """
     output_path = Path(output_path)
     rng = np.random.default_rng(seed)
-    s_x, s_y, s_z = oversampling_factors
-    for s, name in zip(oversampling_factors, ('s_x', 's_y', 's_z')):
+    s_x, s_y, s_z = sparsity_factors
+    for s, name in zip(sparsity_factors, ('s_x', 's_y', 's_z')):
         if not isinstance(s, int) or s < 1:
             raise ValueError(f"{name} must be a positive integer, got {s}")
     domain_x = nx * dx
@@ -266,7 +268,7 @@ def simulate(
     ds.spheroscale = np.float32(spheroscale)
     ds.domain_height = np.float32(domain_height)
     ds.profile_dz = np.float32(profile_dz)
-    ds.oversampling_factors = np.array(oversampling_factors, dtype=np.int32)
+    ds.sparsity_factors = np.array(sparsity_factors, dtype=np.int32)
     ds.surface_pressure = np.float32(surface_pressure)
     ds.seed = np.int32(seed) if seed is not None else -1
     ds.C_h_L = np.float32(C_h_L)

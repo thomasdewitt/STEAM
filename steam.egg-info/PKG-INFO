@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: steam
+Version: 0.1.0
+Summary: Superposition of Turbulon and Eddy Atmospheric Model
+Author: Thomas DeWitt
+License: MIT
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Requires-Python: >=3.8
+Requires-Dist: numpy
+Requires-Dist: scipy
