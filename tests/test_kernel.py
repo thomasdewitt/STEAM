@@ -1,26 +1,26 @@
-"""Tests for the Mexican hat kernel."""
+"""Tests for turbulon envelope kernels."""
 
 import numpy as np
 import pytest
-from steam.simulate import _mexican_hat_kernel
+from steam.simulate import _turbulon_envelope
 
 
 @pytest.mark.parametrize("k", [50, 100, 500, 1000])
-@pytest.mark.parametrize("spheroscale", [10, 50, 100, 500])
-def test_kernel_mean_near_zero(k, spheroscale):
-    """Kernel mean should be near zero for various scales and spheroscales.
+def test_kernel_mean_near_zero_isotropic(k):
+    """Isotropic Mexican hat kernel mean should be near zero when di = k/2 for all i.
 
-    Uses sparsity_factors=(1,1,2): dx=dy=k, dz=k_z/2.
+    With isotropic norm, k_z = k, so di = k_i/2 gives dx = dy = dz = k/2.
+    The Mexican hat has zero integral by construction; this checks that the
+    discrete kernel with 2 cells per scale captures that accurately.
     """
-    H_z = 5 / 9
-    k_z = spheroscale * (k / spheroscale) ** H_z
-    dx = k          # sparsity_factor 1 in x
-    dy = k          # sparsity_factor 1 in y
-    dz = k_z / 2    # sparsity_factor 2 in z
+    dx = k / 2
+    dy = k / 2
+    dz = k / 2
 
-    kernel = _mexican_hat_kernel(k, spheroscale, dx, dy, dz, support_factor=10)
+    kernel = _turbulon_envelope(k, spheroscale=k, dx=dx, dy=dy, dz=dz,
+                                support_factor=10, norm='isotropic_norm',
+                                shape='mexican_hat')
 
     assert abs(kernel.mean()) < 0.01, (
-        f"k={k}, spheroscale={spheroscale}: kernel mean={kernel.mean():.4e}, "
-        f"shape={kernel.shape}"
+        f"k={k}: kernel mean={kernel.mean():.4e}, shape={kernel.shape}"
     )
