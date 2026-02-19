@@ -21,7 +21,7 @@ def simulate(
     domain_height,
     profile_dz,
     output_path,
-    sparsity_factors=(1, 1, 1),
+    sparsity_factors=(1, 1, 2),
     surface_pressure=101325.0,
     seed=None,
 ):
@@ -72,6 +72,10 @@ def simulate(
 
     h_profile = np.asarray(h_profile, dtype=np.float32)
     qt_profile = np.asarray(qt_profile, dtype=np.float32)
+    if np.any(np.isnan(h_profile)):
+        raise ValueError('nans present in h_profile')
+    if np.any(np.isnan(qt_profile)):
+        raise ValueError('nans present in qt_profile')
     if h_profile.ndim != 1 or qt_profile.ndim != 1:
         raise ValueError("h_profile and qt_profile must be 1D arrays")
     if len(h_profile) == 0 or len(h_profile) != len(qt_profile):
@@ -99,9 +103,9 @@ def simulate(
     n_large_turbulons = int(domain_height / k_z_L)
     if n_large_turbulons < 1:
         raise ValueError(
-            f"domain_height ({domain_height} m) is shorter than one vertical "
-            f"outer-scale turbulon ({k_z_L:.1f} m); increase domain_height or "
-            f"decrease outer_scale"
+            f"domain_height ({domain_height} m) is shorter than the vertical scale of the "
+            f"outer-scale turbulons ({k_z_L:.1f} m); increase domain_height or "
+            f"decrease outer_scale" 
         )
     C_h_L = _compute_normalization(h_profile, k_z_L, profile_dz, n_large_turbulons)
     C_qt_L = _compute_normalization(qt_profile, k_z_L, profile_dz, n_large_turbulons)
@@ -147,17 +151,38 @@ def simulate(
         h_mean = np.broadcast_to(h_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
         qt_mean = np.broadcast_to(qt_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
 
+        running_sum_h = h_mean + h_perturbation
+        running_sum_qt = qt_mean + qt_perturbation
+
         # Normalized gradient (Apxeq:amplitude propto gradient normalized)
         print(f'Step {i+1:3d}/{k_values.size:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}):  computing gradients...', end='\r')
-        G_h = _normalized_gradient(h_mean + h_perturbation, dx_k, dy_k, dz_k)
-        G_qt = _normalized_gradient(qt_mean + qt_perturbation, dx_k, dy_k, dz_k)
+        G_h = _normalized_gradient(running_sum_h, dx_k, dy_k, dz_k)
+        G_qt = _normalized_gradient(running_sum_qt, dx_k, dy_k, dz_k)
+
+        # Norm for min
+        h_min = 315 * 1004
+        h_max = 355 * 1004
+        qt_min = 0
+        qt_max = 30 / 1000
+        normalized_distance_to_clamp_h = np.maximum(np.minimum(running_sum_h - h_min, h_max - running_sum_h) / ((h_max-h_min)/2), 0)
+        normalized_distance_to_clamp_qt = np.maximum(np.minimum(running_sum_qt - qt_min, qt_max - running_sum_qt) / ((qt_max-qt_min)/2), 0)
+
+        
 
         # Sparse noise field — same S_k for both h and qt
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
+        S_k[:,:,:2] = 0
+        S_k[:,:,-2:] = 0
+        print('Setting lowest level S_k=0')
+
 
         # Amplitude arrays (Apxeq:amplitude propto gradient normalized)
+        A_h = G_h * S_k * C_h_k[i] * normalized_distance_to_clamp_h
+        A_qt = G_qt * S_k * C_qt_k[i] * normalized_distance_to_clamp_qt
         A_h = G_h * S_k * C_h_k[i]
-        A_qt = G_qt * S_k * C_qt_k[i]
+        A_qt = G_qt * S_k * C_qt_k[i] 
+        # Clean memory
+        del G_h, S_k, G_qt, normalized_distance_to_clamp_h, normalized_distance_to_clamp_qt
 
         # Build compact 3D Mexican hat kernel (Apxeq:turbulon shape)
         kernel = _mexican_hat_kernel(k, spheroscale, dx_k, dy_k, dz_k, support_factor=10)
@@ -177,6 +202,9 @@ def simulate(
 
     h_3d = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_perturbation)
     qt_3d = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_perturbation)
+
+    print('Clamping values')
+    qt_3d[qt_3d<0] = 0
 
     # Write NetCDF output
     nx_final, ny_final = h_3d.shape[0], h_3d.shape[1]
@@ -315,7 +343,7 @@ def _mexican_hat_kernel(k, spheroscale, dx, dy, dz, support_factor=5):
     kernel = ((1.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)).astype(np.float32)
 
     # Force zero mean
-    kernel -= kernel.mean()
+    # kernel -= kernel.mean()
     return kernel
 
 
@@ -337,12 +365,16 @@ def _compute_normalization(profile, k_z, dz, n_large_turbulons):
     average by scaling by n_large_turbulons / n_profile_samples. This
     makes C_L independent of the profile sampling resolution (profile_dz).
     """
-    kernel_1d = _mexican_hat_1d(k_z, dz)
+    kernel_1d = _mexican_hat_1d(k_z, dz) / (k_z/dz)
+    norm_factor = 2    # Need to figure out why this works
+    kernel_1d = kernel_1d  / norm_factor
+
     half = len(kernel_1d) // 2
     padded = np.pad(profile, half, mode='edge')
     convolved = np.convolve(padded, kernel_1d, mode='valid')
     rms = np.mean(np.abs(convolved))
-    return rms * (n_large_turbulons / len(profile))
+    # return rms * (n_large_turbulons / len(profile))
+    return rms
 
 
 def _sparse_noise(nx, ny, nz, s_x, s_y, s_z, rng):

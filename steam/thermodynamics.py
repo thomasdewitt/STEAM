@@ -86,7 +86,7 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
 
 
-def compute_diagnostics(nc_path, chunk_nx=64):
+def compute_diagnostics(nc_path, chunk_nx=512):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
     Opens the file in r+ mode, reads h, qt, z, surface_pressure, and appends
