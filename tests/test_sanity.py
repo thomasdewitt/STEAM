@@ -7,11 +7,13 @@ from pathlib import Path
 
 from steam.simulate import (
     simulate,
-    _mexican_hat_kernel,
+    _turbulon_envelope,
     _sparse_noise,
     _normalized_gradient,
-    _fold_kernel_to_field,
-    _convolve_periodic_xy_edgepad_z,
+)
+from steam.utils import (
+    fold_kernel_to_field,
+    convolve_periodic_xy_zeropad_z_oa,
 )
 from steam.thermodynamics import recover_diagnostics, compute_diagnostics
 from steam.constants import (
@@ -88,7 +90,7 @@ def test_rejects_domain_shorter_than_vertical_outer_scale(tmp_path, simple_profi
     h, qt = simple_profiles
     # outer_scale=8000, spheroscale=100 => k_z_L ~ 100*(8000/100)^(5/9) ~ 1467 m
     # domain_height=100 < k_z_L => n_large_turbulons=0
-    with pytest.raises(ValueError, match="shorter than one vertical"):
+    with pytest.raises(ValueError, match="shorter than the vertical"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 100, 30, tmp_path / "x.nc")
 
 
@@ -223,7 +225,7 @@ def test_h_mean_matches_profile(small_nc, simple_profiles):
 # ===================================================================
 
 def test_kernel_is_symmetric():
-    kernel = _mexican_hat_kernel(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
     cx, cy, cz = kernel.shape[0]//2, kernel.shape[1]//2, kernel.shape[2]//2
     # x symmetry
     np.testing.assert_allclose(kernel[:cx, cy, cz], kernel[cx+1:, cy, cz][::-1], atol=1e-6)
@@ -234,13 +236,13 @@ def test_kernel_is_symmetric():
 
 
 def test_kernel_center_is_positive():
-    kernel = _mexican_hat_kernel(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
     cx, cy, cz = kernel.shape[0]//2, kernel.shape[1]//2, kernel.shape[2]//2
     assert kernel[cx, cy, cz] > 0
 
 
 def test_kernel_shape_is_odd():
-    kernel = _mexican_hat_kernel(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
     assert all(s % 2 == 1 for s in kernel.shape)
 
 
@@ -273,15 +275,15 @@ def test_normalized_gradient_uniform_field_returns_ones():
 
 
 def test_fold_kernel_preserves_sum():
-    kernel = _mexican_hat_kernel(500, 100, 100, 100, 50, support_factor=5)
-    folded = _fold_kernel_to_field(kernel, (8, 8, kernel.shape[2]))
+    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
+    folded = fold_kernel_to_field(kernel, (8, 8, kernel.shape[2]))
     np.testing.assert_allclose(folded.sum(), kernel.sum(), atol=1e-3)
 
 
 def test_convolution_preserves_shape():
     field = np.random.default_rng(0).standard_normal((16, 16, 10)).astype(np.float32)
-    kernel = _mexican_hat_kernel(500, 100, 500, 500, 100, support_factor=5)
-    result = _convolve_periodic_xy_edgepad_z(field, kernel)
+    kernel = _turbulon_envelope(500, 100, 500, 500, 100, support_factor=5)
+    result = convolve_periodic_xy_zeropad_z_oa(field, kernel)
     assert result.shape == field.shape
 
 
