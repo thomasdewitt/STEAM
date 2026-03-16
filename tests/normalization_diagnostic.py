@@ -21,12 +21,12 @@ import tempfile
 
 def main():
     # ---- Parameters ----
-    outer_scale = 4096       # m, horizontal
-    dx = dy = 32            # m  (L/dx = 32 = 2^5, gives 5 scale classes)
-    nx = ny = 128             # domain = 8192 m = 2 * outer_scale
-    domain_height = 1000    # m
-    profile_dz = 6          # m
-    spheroscale = 20            # m
+    outer_scale = 5000 * 256       # m, horizontal
+    dx = dy = 5000            # m  (L/dx = 32 = 2^5, gives 5 scale classes)
+    nx = ny = 256             # domain = 8192 m = 2 * outer_scale
+    domain_height = 20000    # m
+    profile_dz = .6          # m
+    spheroscale = 10    # m
     n_seeds = 3
 
     # Derived quantities
@@ -45,9 +45,13 @@ def main():
     z_profile = np.arange(nz_profile) * profile_dz
 
     # h: moderate slope (20 kJ/kg over domain)
-    h_profile = 350e3 - 20e3 * (z_profile / domain_height)
+    # h_profile = 350e3 -20e3 * (z_profile / (domain_height))
+
+    # h: moderate slope (20 kJ/kg over domain) with sharp increase at top
+    h_profile = (350e3 - 20e3 * (z_profile / domain_height)) + (370 * 1004 - 330e3) * (np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1) ** 2) * (3 - 2 * np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1))
+    
     # qt: steep relative slope (nearly full range, 18 g/kg over domain)
-    qt_profile = 0.020 - 0.018 * (z_profile / domain_height)
+    qt_profile = 0.020 - 0.0199 * (z_profile / domain_height)
 
     print(f"h slope: {(h_profile[-1] - h_profile[0]) / domain_height:.2f} J/kg/m")
     print(f"qt slope: {(qt_profile[-1] - qt_profile[0]) / domain_height:.2e} kg/kg/m")
@@ -161,7 +165,9 @@ def main():
         print()
 
     # ---- Plot ----
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    haar_axes = axes[0]
+    profile_axes = axes[1]
 
     # Colors
     c_mean = '#2c7bb6'
@@ -171,7 +177,7 @@ def main():
     c_expected = '#1a9641'
     c_measured = '#7b3294'
 
-    for ax, (name, label) in zip(axes, [
+    for ax, (name, label) in zip(haar_axes, [
         ('h', 'Moist static energy $h$'),
         ('qt', 'Total water $q_t$'),
     ]):
@@ -208,6 +214,33 @@ def main():
         ax.set_title(label)
         ax.legend(fontsize=6.5, loc='upper left')
         ax.grid(True, alpha=0.2, which='both')
+
+    profile_specs = [
+        ('h', 'Moist static energy $h$', h_columns, h_mean, 'J kg$^{-1}$'),
+        ('qt', 'Total water $q_t$', qt_columns, qt_mean, 'kg kg$^{-1}$'),
+    ]
+    profile_rng = np.random.default_rng(42)
+
+    for ax, (name, label, columns, target_mean, unit) in zip(profile_axes, profile_specs):
+        n_show = min(500, columns.shape[0])
+        if n_show == columns.shape[0]:
+            sample_idx = np.arange(columns.shape[0])
+        else:
+            sample_idx = profile_rng.choice(columns.shape[0], n_show, replace=False)
+
+        for idx in sample_idx:
+            ax.plot(columns[idx], z_out / 1e3, color='black', alpha=0.05, lw=0.3)
+
+        ax.plot(columns.mean(axis=0), z_out / 1e3, color=c_col, lw=2,
+                label='Column mean', zorder=3)
+        ax.plot(target_mean, z_out / 1e3, color=c_mean, lw=2, ls='--',
+                label='Target profile', zorder=4)
+
+        ax.set_xlabel(f'{label} [{unit}]')
+        ax.set_ylabel('Height [km]')
+        ax.set_title(f'{label} profiles')
+        ax.legend(fontsize=7, loc='best')
+        ax.grid(True, alpha=0.3)
 
     fig.suptitle(
         f'Outer-scale normalization diagnostic\n'

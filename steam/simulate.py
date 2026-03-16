@@ -114,6 +114,26 @@ def simulate(
             f"h_profile and qt_profile must have equal nonzero length, "
             f"got {len(h_profile)} and {len(qt_profile)}"
         )
+    h_profile_min = float(np.min(h_profile))
+    h_profile_max = float(np.max(h_profile))
+    qt_profile_min = float(np.min(qt_profile))
+    qt_profile_max = float(np.max(qt_profile))
+    if h_min > h_profile_min:
+        raise ValueError(
+            f"h_min ({h_min}) must be <= min(h_profile) ({h_profile_min})"
+        )
+    if h_max < h_profile_max:
+        raise ValueError(
+            f"h_max ({h_max}) must be >= max(h_profile) ({h_profile_max})"
+        )
+    if qt_min > qt_profile_min:
+        raise ValueError(
+            f"qt_min ({qt_min}) must be <= min(qt_profile) ({qt_profile_min})"
+        )
+    if qt_max < qt_profile_max:
+        raise ValueError(
+            f"qt_max ({qt_max}) must be >= max(qt_profile) ({qt_profile_max})"
+        )
     if domain_height <= 0:
         raise ValueError(f"domain_height must be positive, got {domain_height}")
     for grid_spacing, axis in ((dx, 'x'), (dy, 'y')):
@@ -379,6 +399,7 @@ def cascade_loop(
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
         S_k[:, :, :n_zero] = 0
+        S_k[:, :, -n_zero:] = 0
 
         # Build compact 3D turbulon kernel (Apxeq:turbulon shape)
         kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),

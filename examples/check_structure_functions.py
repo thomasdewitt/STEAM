@@ -35,7 +35,7 @@ USE_SPECTRAL = (hurst_fn is scaleinvariance.spectral_hurst)
 # ---- Build input profiles ----
 nz_profile = int(DOMAIN_HEIGHT / PROFILE_DZ) + 1
 z_profile = np.arange(nz_profile) * PROFILE_DZ
-h_profile = 340e3 - 30e3 * (z_profile / z_profile.max())
+h_profile = 340e3 - 20e3 * (z_profile / z_profile.max())
 qt_profile = 0.018 - 0.016 * (z_profile / z_profile.max())
 
 # ---- Run STEAM ----

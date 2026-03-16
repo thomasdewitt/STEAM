@@ -32,7 +32,7 @@ from steam.constants import (
 def simple_profiles():
     nz = 50
     z = np.arange(nz) * 30.0
-    h = 340e3 - 30e3 * (z / z.max())
+    h = 340e3 - 20e3 * (z / z.max())
     qt = 0.018 - 0.016 * (z / z.max())
     return h, qt
 
@@ -98,7 +98,7 @@ def test_rejects_profile_dz_too_coarse(tmp_path):
     # spheroscale=100, outer_scale=8000 => k_z_L ~ 1467 m
     # profile_dz=2000 >= k_z_L => should raise
     nz = 3
-    h = np.linspace(340e3, 310e3, nz)
+    h = np.linspace(340e3, 320e3, nz)
     qt = np.linspace(0.018, 0.002, nz)
     with pytest.raises(ValueError, match="profile_dz"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 4000, 2000, tmp_path / "x.nc")
@@ -116,6 +116,34 @@ def test_rejects_float_sparsity(tmp_path, simple_profiles):
     with pytest.raises(ValueError, match="positive integer"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
                  sparsity_factors=(1.5, 1, 1))
+
+
+def test_rejects_h_min_above_profile_min(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    with pytest.raises(ValueError, match="h_min"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 h_min=float(h.min()) + 1.0)
+
+
+def test_rejects_h_max_below_profile_max(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    with pytest.raises(ValueError, match="h_max"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 h_max=float(h.max()) - 1.0)
+
+
+def test_rejects_qt_min_above_profile_min(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    with pytest.raises(ValueError, match="qt_min"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 qt_min=float(qt.min()) + 1e-6)
+
+
+def test_rejects_qt_max_below_profile_max(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    with pytest.raises(ValueError, match="qt_max"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 qt_max=float(qt.max()) - 1e-6)
 
 
 # ===================================================================
@@ -409,7 +437,7 @@ def test_normalization_invariant_to_profile_dz(tmp_path):
     for profile_dz in [1, 10, 100]:
         nz = int(domain_height / profile_dz) + 1
         z = np.arange(nz) * float(profile_dz)
-        h = 340e3 - 30e3 * (z / domain_height)
+        h = 340e3 - 20e3 * (z / domain_height)
         qt = 0.018 - 0.016 * (z / domain_height)
 
         out = tmp_path / f"test_dz{profile_dz}.nc"
