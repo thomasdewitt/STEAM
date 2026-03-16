@@ -679,7 +679,7 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
     # Empirical sensitivity correction between Haar and turbulon envelope
-    response /= 2.3
+    response /= 1.3
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []

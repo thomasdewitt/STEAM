@@ -46,9 +46,10 @@ def main():
 
     # h: moderate slope (20 kJ/kg over domain)
     # h_profile = 350e3 -20e3 * (z_profile / (domain_height))
+    h_profile = 350e3 -20e3 * (z_profile / (domain_height))**2
 
     # h: moderate slope (20 kJ/kg over domain) with sharp increase at top
-    h_profile = (350e3 - 20e3 * (z_profile / domain_height)) + (370 * 1004 - 330e3) * (np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1) ** 2) * (3 - 2 * np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1))
+    # h_profile = (350e3 - 20e3 * (z_profile / domain_height)) + (370 * 1004 - 330e3) * (np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1) ** 2) * (3 - 2 * np.clip((z_profile - 0.85 * domain_height) / (0.15 * domain_height), 0, 1))
     
     # qt: steep relative slope (nearly full range, 18 g/kg over domain)
     qt_profile = 0.020 - 0.0199 * (z_profile / domain_height)
@@ -70,7 +71,7 @@ def main():
                 h_profile, qt_profile, nx, ny, dx, dy,
                 outer_scale, spheroscale, domain_height, profile_dz,
                 out, seed=seed, h_min = 0.9 * h_profile.min(), h_max = 1.1 * h_profile.max(), qt_min = 0, qt_max = 1.5 * qt_profile.max(),
-                n_size_classes=200
+                n_size_classes=10
             )
             ds = netCDF4.Dataset(out)
             h_3d = ds.variables['h'][:]
