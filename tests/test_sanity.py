@@ -94,6 +94,16 @@ def test_rejects_domain_shorter_than_vertical_outer_scale(tmp_path, simple_profi
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 100, 30, tmp_path / "x.nc")
 
 
+def test_rejects_profile_dz_too_coarse(tmp_path):
+    # spheroscale=100, outer_scale=8000 => k_z_L ~ 1467 m
+    # profile_dz=2000 >= k_z_L => should raise
+    nz = 3
+    h = np.linspace(340e3, 310e3, nz)
+    qt = np.linspace(0.018, 0.002, nz)
+    with pytest.raises(ValueError, match="profile_dz"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 4000, 2000, tmp_path / "x.nc")
+
+
 def test_rejects_zero_sparsity(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="positive integer"):
@@ -387,6 +397,40 @@ def test_compute_diagnostics_idempotent(small_nc):
     T2 = ds.variables["T"][:]
     ds.close()
     np.testing.assert_array_equal(T1, T2)
+
+
+def test_normalization_invariant_to_profile_dz(tmp_path):
+    """Output field std should not depend on profile_dz resolution."""
+    domain_height = 3000
+    stds = {}
+    for profile_dz in [1, 10, 100]:
+        nz = int(domain_height / profile_dz) + 1
+        z = np.arange(nz) * float(profile_dz)
+        h = 340e3 - 30e3 * (z / domain_height)
+        qt = 0.018 - 0.016 * (z / domain_height)
+
+        out = tmp_path / f"test_dz{profile_dz}.nc"
+        simulate(h, qt, nx=64, ny=64, dx=125, dy=125,
+                 outer_scale=8000, spheroscale=100,
+                 domain_height=domain_height, profile_dz=profile_dz,
+                 output_path=out, seed=42)
+
+        ds = netCDF4.Dataset(out)
+        h_3d = ds.variables['h'][:]
+        z_out = ds.variables['z'][:]
+        # Subtract mean profile to get perturbation std
+        h_mean = np.interp(z_out, z, h)
+        h_pert = h_3d - h_mean[np.newaxis, np.newaxis, :]
+        stds[profile_dz] = float(np.std(h_pert))
+        ds.close()
+
+    values = list(stds.values())
+    mean_std = np.mean(values)
+    for dz, s in stds.items():
+        np.testing.assert_allclose(
+            s, mean_std, rtol=0.1,
+            err_msg=f"profile_dz={dz}: perturbation std={s:.1f} vs mean={mean_std:.1f}"
+        )
 
 
 def test_compute_diagnostics_chunking_matches_full(tmp_path, simple_profiles):

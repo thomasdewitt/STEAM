@@ -161,6 +161,12 @@ def simulate(
 
     k_L = k_values[0]
     k_z_L = k_z_values[0]
+    if profile_dz >= k_z_L:
+        raise ValueError(
+            f"profile_dz ({profile_dz} m) must be less than the vertical outer "
+            f"scale k_z_L ({k_z_L:.1f} m); use a finer profile resolution"
+        )
+
     n_large_turbulons = int(domain_height / k_z_L)
     if n_large_turbulons < 1:
         raise ValueError(
@@ -177,10 +183,12 @@ def simulate(
     C_h_k = _compute_normalization(
         h_profile, k_L, spheroscale_geomean, profile_dz,
         z_profile, k_values, outer_scale, grids['z_arrays'], spheroscale_profile,
+        sparsity_factors=sparsity_factors,
     )
     C_qt_k = _compute_normalization(
         qt_profile, k_L, spheroscale_geomean, profile_dz,
         z_profile, k_values, outer_scale, grids['z_arrays'], spheroscale_profile,
+        sparsity_factors=sparsity_factors,
     )
     # Scalar C_L for NetCDF attribute: outer scale hurst_scale=1
     C_h_L = float(np.mean(C_h_k[0]))
@@ -196,7 +204,7 @@ def simulate(
         spheroscale_geomean,
         rng,
     )
-
+    
     # Construct final 3D fields
     z_final = final_grid['z'].astype(np.float32)
     h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
@@ -344,32 +352,51 @@ def cascade_loop(
         running_sum_h = h_mean + h_perturbation
         running_sum_qt = qt_mean + qt_perturbation
 
-        # Normalized gradient magnitude (Apxeq:amplitude propto gradient normalized)
-        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing gradients...', end='\r')
-        G_h = _normalized_gradient(running_sum_h, dx_k, dy_k, z_k)
-        G_qt = _normalized_gradient(running_sum_qt, dx_k, dy_k, z_k)
-
+        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})   computing G_* factors...', end='\r')
         # Soft-clamp weights: linearly ramp to zero as field approaches h_min/h_max
-        normalized_distance_to_clip_h = np.maximum(
-            np.minimum(running_sum_h - h_min, h_max - running_sum_h) / ((h_max - h_min) / 2), 0
-        )
-        normalized_distance_to_clip_qt = np.maximum(
-            np.minimum(running_sum_qt - qt_min, qt_max - running_sum_qt) / ((qt_max - qt_min) / 2), 0
-        )
+        soft_clip_h = np.maximum(0, running_sum_h - h_min) * np.maximum(0, h_max - running_sum_h)
+        soft_clip_qt = np.maximum(0, running_sum_qt - qt_min) * np.maximum(0, qt_max - running_sum_qt)
+        # Normalize them
+        if soft_clip_h.mean() != 0: soft_clip_h = soft_clip_h/soft_clip_h.mean()
+        if soft_clip_qt.mean() != 0: soft_clip_qt = soft_clip_qt/soft_clip_qt.mean()
+
+        # G_h function is the clips * normalized gradient magnitude (Apxeq:amplitude propto gradient normalized)
+        G_h = _normalized_gradient(running_sum_h, dx_k, dy_k, z_k) * soft_clip_h
+        G_qt = _normalized_gradient(running_sum_qt, dx_k, dy_k, z_k) * soft_clip_qt
 
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
         S_k[:, :, :n_zero] = 0
 
-        # Amplitude arrays (Apxeq:amplitude propto gradient normalized)
-        # C_h_k[i] is a scalar or 1D array of shape (nz_k,); both broadcast over (nx,ny,nz)
-        A_h = G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h
-        A_qt = G_qt * S_k * C_qt_k[i] * normalized_distance_to_clip_qt
-        del G_h, S_k, G_qt, normalized_distance_to_clip_h, normalized_distance_to_clip_qt
-
         # Build compact 3D turbulon kernel (Apxeq:turbulon shape)
         kernel = _turbulon_envelope(1, spheroscale, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                     support_factor=10, norm='isotropic_norm')
+        dz_k = z_k[1]-z_k[0]
+        kernel_variance = np.sum(kernel**2 * dx_k * dy_k * dz_k)
+        # qt_variance = (running_sum_qt-running_sum_qt.mean())**2
+        # h_variance = (running_sum_h-running_sum_h.mean())**2
+        # qt_variance = _normalized_gradient((normalized_distance_to_clip_qt)**2, dx_k, dy_k, z_k)
+        # h_variance = _normalized_gradient((normalized_distance_to_clip_h)**2, dx_k, dy_k, z_k)
+        # A_h = S_k * C_h_k[i] * h_variance/h_variance.mean()
+        # A_qt = S_k * C_qt_k[i] * qt_variance/qt_variance.mean()
+        A_h = S_k * C_h_k[i] * G_h 
+        A_qt = S_k * C_qt_k[i] * G_qt
+        print(np.count_nonzero(np.isnan(G_h)))
+        # print('-------------')
+        # print(np.mean(G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h))
+        # print(np.mean(A_h))
+        # print()
+        # print(np.std(G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h))
+        # print(np.std(A_h))
+        # print(A_h.shape)
+        # print('---------')
+        # if i == 7: exit()
+
+        # Amplitude arrays (Apxeq:amplitude propto gradient normalized)
+        # C_h_k[i] is a scalar or 1D array of shape (nz_k,); both broadcast over (nx,ny,nz)
+        # A_h = G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h
+        # A_qt = G_qt * S_k * C_qt_k[i] * normalized_distance_to_clip_qt
+        # del G_h, S_k, G_qt, normalized_distance_to_clip_h, normalized_distance_to_clip_qt
 
         # Convolve and accumulate (periodic x,y; zero-padded z)
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing convolutions...', end='\r')
@@ -543,23 +570,17 @@ def _compute_normalization(profile, k_L, spheroscale, profile_dz,
                            z_profile, k_values, outer_scale, z_arrays,
                            spheroscale_profile=None,
                            norm='canonical_anisotropic_norm', shape='mexican_hat',
-                           support_factor=10):
+                           support_factor=10, sparsity_factors=(1, 1, 1)):
     """Compute scale- and height-dependent amplitude arrays C_k.
 
     (Apxeq:norm factor computation)
 
-    Builds a 1D kernel by evaluating isotropic_norm at (X=0, Y=0, z) and
-    applying the chosen shape function. Convolves with the input profile to
-    get the absolute response at each profile level, then packages it into
-    one entry per scale class with Hurst scaling applied:
+    Measures profile variation at the vertical outer scale k_z_L using a
+    first-order Haar wavelet (step function: -1 below center, +1 above),
+    then corrects for the 3D kernel energy so that the cascade perturbation
+    variance matches the measured profile variation.
 
-      C_k[i] = response_profile * (k_i / outer_scale)^H_h
-
-    For scalar spheroscale, each entry is a scalar (the mean response, same
-    behavior as before). For a spheroscale profile, each entry is a 1D array
-    interpolated from the response profile onto that scale class's z-grid,
-    so that the amplitude reflects both the local profile gradient and the
-    local turbulon scale.
+      C_k[i] = haar_response / sqrt(E_3d) * (k_i / outer_scale)^H_h
 
     Parameters
     ----------
@@ -572,41 +593,42 @@ def _compute_normalization(profile, k_L, spheroscale, profile_dz,
     outer_scale : float
     z_arrays : list of n_classes 1D arrays  —  z-coords per scale class
     spheroscale_profile : ndarray or None
+    sparsity_factors : tuple of 3 ints
 
     Returns
     -------
     list of n_classes entries, each a float32 scalar or 1D float32 array.
     """
-    if norm not in _turbulons.NORMS:
-        raise ValueError(f"Unknown norm {norm!r}. Valid options: {sorted(_turbulons.NORMS)}")
-    if shape not in _turbulons.SHAPES:
-        raise ValueError(f"Unknown shape {shape!r}. Valid options: {sorted(_turbulons.SHAPES)}")
-
-    norm_fn = getattr(_turbulons, 'isotropic_norm')
-    shape_fn = getattr(_turbulons, shape)
-
     k_z = _vertical_scale(norm, k_L, spheroscale)
 
-    half_nz = int(np.ceil(support_factor * k_z / profile_dz))
-    z = np.arange(-half_nz, half_nz + 1, dtype=np.float64) * profile_dz
+    # --- Haar wavelet at scale k_z ---
+    n_half = max(1, int(round(k_z / profile_dz)/2))
+    if n_half % 2 ==1: n_half += 1
+    kernel_haar = np.empty(n_half, dtype=np.float64)
+    kernel_haar[:n_half//2] = -1.0 / (n_half/2)
+    kernel_haar[n_half//2:] = 1.0 / (n_half/2)
 
-    Z = z[np.newaxis, np.newaxis, :]
-    r_norm_sq = norm_fn(0.0, 0.0, Z, spheroscale)
-    kernel_1d = shape_fn(r_norm_sq, k_z)[0, 0, :]
-    kernel_1d = kernel_1d / (k_z / profile_dz)
-    kernel_1d *= 3  # fudge_factor
+    padded = np.pad(profile, n_half//2, mode='edge')
+    response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
-    half = len(kernel_1d) // 2
-    padded = np.pad(profile, half, mode='edge')
-    response = np.abs(np.convolve(padded, kernel_1d, mode='valid'))
+    # --- 3D kernel energy correction ---
+    # s_x, s_y, s_z = sparsity_factors
+    # kernel_3d = _turbulon_envelope(
+    #     1, spheroscale, 1 / (2 * s_x), 1 / (2 * s_y), 1 / (2 * s_z),
+    #     support_factor=support_factor, norm='isotropic_norm', shape=shape,
+    # )
+    # energy_3d = float(np.sum(kernel_3d ** 2))
+    energy_3d = 1
 
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h)
         if spheroscale_profile is None:
-            C_k.append(np.float32(np.mean(response) * hurst_scale))
+            C_L = float(np.mean(response)) / np.sqrt(energy_3d)
+            C_k.append(np.float32(C_L * hurst_scale))
         else:
-            C_k.append(np.interp(z_arrays[i], z_profile, response).astype(np.float32) * hurst_scale)
+            C_profile = response / np.sqrt(energy_3d)
+            C_k.append(np.interp(z_arrays[i], z_profile, C_profile).astype(np.float32) * hurst_scale)
     return C_k
 
 
