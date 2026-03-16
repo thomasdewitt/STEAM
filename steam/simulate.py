@@ -241,8 +241,6 @@ def simulate(
     )
     C_h_k = [c * spectral_width_correction for c in C_h_k]
     C_qt_k = [c * spectral_width_correction for c in C_qt_k]
-    # print(C_h_k[0])
-    # exit()
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
@@ -407,36 +405,19 @@ def cascade_loop(
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G_* factors...', end='\r')
 
-        # --- DEBUG: soft-clamp options (pick one, comment the rest) ---
-        # OPTION A: parabolic [0,1], no mean norm — smooth, peaks at midpoint
+        # Soft-clamp: parabolic weight 
         u_h = np.clip((running_sum_h - h_min) / (h_max - h_min), 0, 1)
-        soft_clip_h = (4 * u_h * (1 - u_h))
+        soft_clip_h = u_h * (1 - u_h)
         u_qt = np.clip((running_sum_qt - qt_min) / (qt_max - qt_min), 0, 1)
-        soft_clip_qt = (4 * u_qt * (1 - u_qt))
-        # soft_clip_h /= soft_clip_h.mean()
-        # soft_clip_qt /= soft_clip_qt.mean()
+        soft_clip_qt = u_qt * (1 - u_qt)
 
-        # OPTION B: tent/triangle — distance to nearest bound, [0,1]
-        #   (this is what 614ffed computed but never actually used)
-        # soft_clip_h = np.maximum(np.minimum(running_sum_h - h_min, h_max - running_sum_h) / ((h_max - h_min) / 2), 0)
-        # soft_clip_qt = np.maximum(np.minimum(running_sum_qt - qt_min, qt_max - running_sum_qt) / ((qt_max - qt_min) / 2), 0)
-
-        # OPTION C: no soft clip (what 614ffed "looking pretty good" actually ran)
-        # soft_clip_h = 1.0
-        # soft_clip_qt = 1.0
-        # --- END DEBUG ---
-
-        # G_h function is the clips * normalized gradient magnitude (Apxeq:amplitude propto gradient normalized)
+        # Gradient magnitude × soft clip, normalized per z-level (Apxeq:amplitude propto gradient normalized)
         G_h = _gradient_magnitude(running_sum_h, dx_k, dy_k, z_k) * soft_clip_h
         G_qt = _gradient_magnitude(running_sum_qt, dx_k, dy_k, z_k) * soft_clip_qt
         mean_h = G_h.mean(axis=(0, 1), keepdims=True)
-        mean_h = np.where(mean_h > 0, mean_h, 1.0)
-        G_h = G_h / mean_h
+        G_h = G_h / np.where(mean_h > 0, mean_h, 1.0)
         mean_qt = G_qt.mean(axis=(0, 1), keepdims=True)
-        mean_qt = np.where(mean_qt > 0, mean_qt, 1.0)
-        G_qt = G_qt / mean_qt
-        # G_h = soft_clip_h
-        # G_qt = soft_clip_qt
+        G_qt = G_qt / np.where(mean_qt > 0, mean_qt, 1.0)
 
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
@@ -448,11 +429,8 @@ def cascade_loop(
                                     support_factor=10, shape=turbulon_shape)
         
         # Final turbulon amplitudes
-        A_h = S_k * C_h_k[i] * G_h 
+        A_h = S_k * C_h_k[i] * G_h
         A_qt = S_k * C_qt_k[i] * G_qt
-        # A_h = S_k * np.mean(C_h_k[i]) * G_h 
-        # A_qt = S_k * np.mean(C_qt_k[i]) * G_qt
-        
 
         # Convolve and accumulate (periodic x,y; zero-padded z)
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing convolutions...', end='\r')
@@ -700,14 +678,7 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     padded = np.pad(profile_on_finest_grid, (n_half, n_half - 1), mode='edge')
     response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
-    # Correct for turbulon vs Haar sensitivity ratio                                                                                                       
-    # mean(|haar|) = 1/n_half by construction; scale by turbulon's mean absolute difference                                          
-    haar_sensitivity = float(np.sum(np.abs(kernel_haar)))                                                
-    turbulon_sensitivity = float(np.sum(np.abs(turbulon)))   
-    # turbulon_sensitivity = float(np.sum(np.abs(turbulon[turbulon.shape[0]//2, turbulon.shape[1]//2, :])))   
-    # print(turbulon_sensitivity / haar_sensitivity)
-    # exit()
-    # response = response * (haar_sensitivity / turbulon_sensitivity) 
+    # Empirical sensitivity correction between Haar and turbulon envelope
     response /= 2.3
 
     z_finest = z_arrays['z_arrays'][-1]
@@ -748,9 +719,8 @@ def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
 
 
 def _gradient_magnitude(field_3d, dx, dy, z_coords):
-    """Compute |∇f| / mean(|∇f|), the normalized gradient magnitude.
+    """Compute |∇f|, the gradient magnitude (unnormalized).
 
-    (Apxeq:amplitude propto gradient normalized)
     Uses periodic central differences for x,y and np.gradient for z.
     z_coords may be a scalar spacing (uniform grid) or a 1D array of
     z-positions (non-uniform grid); np.gradient handles both.

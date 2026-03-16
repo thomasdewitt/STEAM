@@ -10,7 +10,7 @@ from steam.simulate import (
     _compute_all_grids,
     _turbulon_envelope,
     _sparse_noise,
-    _normalized_gradient,
+    _gradient_magnitude,
     spectral_width_normalization,
 )
 from steam.utils import (
@@ -390,17 +390,19 @@ def test_sparse_noise_s1_all_nonzero():
     assert np.count_nonzero(field) == 1000
 
 
-def test_normalized_gradient_mean_is_one():
+def test_gradient_magnitude_positive_for_random_field():
     rng = np.random.default_rng(0)
     field = rng.standard_normal((20, 20, 20)).astype(np.float32)
-    G = _normalized_gradient(field, 1.0, 1.0, 1.0)
-    np.testing.assert_allclose(G.mean(), 1.0, atol=0.15)
+    G = _gradient_magnitude(field, 1.0, 1.0, 1.0)
+    assert G.shape == field.shape
+    assert np.all(G >= 0)
+    assert G.mean() > 0
 
 
-def test_normalized_gradient_uniform_field_returns_ones():
+def test_gradient_magnitude_zero_for_uniform_field():
     field = np.ones((10, 10, 10), dtype=np.float32) * 300e3
-    G = _normalized_gradient(field, 100.0, 100.0, 50.0)
-    np.testing.assert_array_equal(G, np.ones_like(G))
+    G = _gradient_magnitude(field, 100.0, 100.0, 50.0)
+    np.testing.assert_allclose(G, 0.0, atol=1e-6)
 
 
 def test_fold_kernel_preserves_sum():
