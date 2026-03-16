@@ -69,7 +69,8 @@ def main():
             simulate(
                 h_profile, qt_profile, nx, ny, dx, dy,
                 outer_scale, spheroscale, domain_height, profile_dz,
-                out, seed=seed, h_min = 0.9 * h_profile.min(), h_max = 1.1 * h_profile.max(), qt_min = 0, qt_max = 1.5 * qt_profile.max()
+                out, seed=seed, h_min = 0.9 * h_profile.min(), h_max = 1.1 * h_profile.max(), qt_min = 0, qt_max = 1.5 * qt_profile.max(),
+                n_size_classes=200
             )
             ds = netCDF4.Dataset(out)
             h_3d = ds.variables['h'][:]

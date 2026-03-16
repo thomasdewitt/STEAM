@@ -7,9 +7,11 @@ from pathlib import Path
 
 from steam.simulate import (
     simulate,
+    _compute_all_grids,
     _turbulon_envelope,
     _sparse_noise,
     _normalized_gradient,
+    spectral_width_normalization,
 )
 from steam.utils import (
     fold_kernel_to_field,
@@ -57,6 +59,20 @@ def test_rejects_outer_scale_less_than_dx(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="outer_scale"):
         simulate(h, qt, 16, 16, 500, 500, 100, 100, 3000, 30, tmp_path / "x.nc")
+
+
+def test_allows_dy_not_aligned_with_size_classes(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    out = tmp_path / "unaligned_dy.nc"
+    simulate(
+        h, qt,
+        nx=16, ny=20,
+        dx=500, dy=400,
+        outer_scale=8000, spheroscale=100,
+        domain_height=3000, profile_dz=30,
+        output_path=out, seed=42,
+    )
+    assert out.exists()
 
 
 def test_rejects_mismatched_profile_lengths(tmp_path):
@@ -111,6 +127,13 @@ def test_rejects_zero_sparsity(tmp_path, simple_profiles):
                  sparsity_factors=(0, 1, 1))
 
 
+def test_rejects_invalid_n_size_classes(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    with pytest.raises(ValueError, match="n_size_classes"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 n_size_classes=1)
+
+
 def test_rejects_float_sparsity(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="positive integer"):
@@ -144,6 +167,71 @@ def test_rejects_qt_max_below_profile_max(tmp_path, simple_profiles):
     with pytest.raises(ValueError, match="qt_max"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
                  qt_max=float(qt.max()) - 1e-6)
+
+
+def test_compute_all_grids_regression_for_dyadic_scale_classes():
+    k_values = np.array([8.0, 4.0, 2.0])
+    grids = _compute_all_grids(
+        k_values=k_values,
+        domain_x=32.0,
+        domain_y=16.0,
+        domain_height=20.0,
+        sparsity_factors=(1, 2, 1),
+        spheroscale_profile=np.array([2.0, 2.0]),
+        z_profile=np.array([0.0, 20.0]),
+    )
+
+    np.testing.assert_array_equal(grids["k"], np.array([8.0, 4.0, 2.0]))
+    np.testing.assert_array_equal(grids["nx"], np.array([8, 16, 32]))
+    np.testing.assert_array_equal(grids["ny"], np.array([8, 16, 32]))
+    np.testing.assert_array_equal(grids["nz"], np.array([10, 14, 20]))
+    np.testing.assert_allclose(grids["dx"], np.array([4.0, 2.0, 1.0]))
+    np.testing.assert_allclose(grids["dy"], np.array([2.0, 1.0, 0.5]))
+    np.testing.assert_allclose(grids["dz"], np.array([2.0, 20.0 / 14.0, 1.0]))
+
+    expected_z_arrays = [
+        np.arange(10, dtype=np.float64) * 2.0,
+        np.arange(14, dtype=np.float64) * (20.0 / 14.0),
+        np.arange(20, dtype=np.float64),
+    ]
+    expected_dz_arrays = [
+        np.full(10, 2.0, dtype=np.float64),
+        np.full(14, 20.0 / 14.0, dtype=np.float64),
+        np.ones(20, dtype=np.float64),
+    ]
+    for z_actual, z_expected in zip(grids["z_arrays"], expected_z_arrays):
+        np.testing.assert_allclose(z_actual, z_expected)
+    for dz_actual, dz_expected in zip(grids["dz_arrays"], expected_dz_arrays):
+        np.testing.assert_allclose(dz_actual, dz_expected)
+
+
+def test_compute_all_grids_uses_actual_spacing_from_rounded_counts():
+    grids = _compute_all_grids(
+        k_values=np.array([7.0, 3.5]),
+        domain_x=30.0,
+        domain_y=18.0,
+        domain_height=12.0,
+        sparsity_factors=(1, 1, 1),
+        spheroscale_profile=np.array([2.0, 2.0]),
+        z_profile=np.array([0.0, 12.0]),
+    )
+
+    np.testing.assert_array_equal(grids["nx"], np.array([9, 17]))
+    np.testing.assert_array_equal(grids["ny"], np.array([5, 10]))
+    np.testing.assert_allclose(grids["dx"], 30.0 / grids["nx"])
+    np.testing.assert_allclose(grids["dy"], 18.0 / grids["ny"])
+
+
+def test_spectral_width_normalization_uses_hardcoded_shape_widths():
+    np.testing.assert_allclose(
+        spectral_width_normalization("mexican_hat", 2.0),
+        2.0 / 2.7954,
+    )
+    np.testing.assert_allclose(
+        spectral_width_normalization("morlet_omega0_6", 2.0),
+        2.0 / 3.0465,
+    )
+    assert spectral_width_normalization("mexican_hat", 4.0) == 1.0
 
 
 # ===================================================================

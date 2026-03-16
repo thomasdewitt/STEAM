@@ -23,7 +23,7 @@ def simulate(
     profile_dz,
     output_path,
     sparsity_factors=(1, 1, 1),
-    k_factor=2,
+    n_size_classes=None,
     surface_pressure=101325.0,
     seed=None,
     h_min=315 * 1004,
@@ -47,8 +47,7 @@ def simulate(
         Horizontal grid spacing at finest resolution [m].
     outer_scale : float
         Outer (largest) turbulon scale L [m]. Must satisfy:
-          - outer_scale / dx and outer_scale / dy are positive integer
-            powers of k_factor (e.g. k_factor^m for some m >= 0).
+          - outer_scale must be >= dx.
           - domain_x = nx*dx and domain_y = ny*dy are integer multiples
             of outer_scale.
     spheroscale : float or ndarray, shape (n_profile,)
@@ -67,8 +66,11 @@ def simulate(
         (s_x, s_y, s_z) oversampling factors. Grid spacing at scale k is
         k/(2*s_i), so s=1 is Nyquist sampling and s=2 gives 4 grid cells
         per turbulon width.
-    k_factor : int
-        Ratio between successive scale classes.
+    n_size_classes : int or None
+        Number of size classes between outer_scale and 2*dx, inclusive.
+        If None, use the current dyadic behavior. If an integer, the
+        adjacent-class multiplicative gap is derived from the endpoint
+        constraint and this class count.
     surface_pressure : float
         Surface pressure [Pa].
     seed : int or None
@@ -93,6 +95,12 @@ def simulate(
     for s, name in zip(sparsity_factors, ('s_x', 's_y', 's_z')):
         if not isinstance(s, int) or s < 1:
             raise ValueError(f"{name} must be a positive integer, got {s}")
+    if n_size_classes is not None:
+        if not isinstance(n_size_classes, int) or n_size_classes < 2:
+            raise ValueError(
+                "n_size_classes must be an integer >= 2 when provided, "
+                f"got {n_size_classes}"
+            )
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
         raise ValueError(
             f"min_distance_to_ground must be a non-negative integer, got {min_distance_to_ground}"
@@ -136,19 +144,16 @@ def simulate(
         )
     if domain_height <= 0:
         raise ValueError(f"domain_height must be positive, got {domain_height}")
-    for grid_spacing, axis in ((dx, 'x'), (dy, 'y')):
-        ratio = outer_scale / grid_spacing
-        if ratio < 1:
-            raise ValueError(
-                f"outer_scale ({outer_scale}) must be >= d{axis} ({grid_spacing})"
-            )
-        log_ratio = np.log(ratio) / np.log(k_factor)
-        if abs(log_ratio - round(log_ratio)) > 1e-9:
-            raise ValueError(
-                f"outer_scale/d{axis} must be a positive integer power of "
-                f"k_factor={k_factor}, got outer_scale={outer_scale}, "
-                f"d{axis}={grid_spacing} (ratio={ratio})"
-            )
+    ratio = outer_scale / dx
+    if ratio < 1:
+        raise ValueError(
+            f"outer_scale ({outer_scale}) must be >= dx ({dx})"
+        )
+    if n_size_classes is not None and outer_scale <= 2 * dx:
+        raise ValueError(
+            "outer_scale must be greater than 2*dx when n_size_classes is "
+            f"provided, got outer_scale={outer_scale} and dx={dx}"
+        )
     for domain_size, axis in ((domain_x, 'x'), (domain_y, 'y')):
         n_tiles = domain_size / outer_scale
         if abs(n_tiles - round(n_tiles)) > 1e-9:
@@ -171,10 +176,19 @@ def simulate(
 
     z_profile = np.arange(len(h_profile), dtype=np.float64) * profile_dz
 
-    # Scale classes: L, L/k_factor, ..., 2*dx (finest)
+    # Scale classes: L, ..., 2*dx (finest)
     s_x, s_y, s_z = sparsity_factors
-    n_classes = int(round(np.log(outer_scale / (2*dx)) / np.log(k_factor))) + 1
-    k_values = outer_scale / k_factor ** np.arange(n_classes)
+    if n_size_classes is None:
+        size_class_gap_factor = 2.0
+        n_classes = int(
+            round(np.log(outer_scale / (2 * dx)) / np.log(size_class_gap_factor))
+        ) + 1
+    else:
+        n_classes = n_size_classes
+        size_class_gap_factor = float(
+            (outer_scale / (2 * dx)) ** (1.0 / (n_classes - 1))
+        )
+    k_values = outer_scale / size_class_gap_factor ** np.arange(n_classes)
 
     # Input validation using arithmetic mean spheroscale
     spheroscale_mean = float(np.mean(spheroscale_profile))
@@ -211,6 +225,9 @@ def simulate(
     # Unit turbulon z-slice for normalization correction
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                      support_factor=10, shape=turbulon_shape)
+    spectral_width_correction = spectral_width_normalization(
+        turbulon_shape, size_class_gap_factor
+    )
 
     C_h_k = _compute_normalization(
         h_on_finest, vertical_outer_scale_grid_pts,
@@ -222,6 +239,8 @@ def simulate(
         k_values, outer_scale, grids,
         unit_turbulon, turbulon_shape
     )
+    C_h_k = [c * spectral_width_correction for c in C_h_k]
+    C_qt_k = [c * spectral_width_correction for c in C_qt_k]
     # print(C_h_k[0])
     # exit()
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
@@ -269,6 +288,8 @@ def simulate(
         'domain_height': domain_height,
         'profile_dz': profile_dz,
         'sparsity_factors': sparsity_factors,
+        'n_size_classes': n_classes,
+        'size_class_gap_factor': size_class_gap_factor,
         'surface_pressure': surface_pressure,
         'seed': seed,
         'C_h_L': C_h_L,
@@ -385,16 +406,37 @@ def cascade_loop(
         running_sum_qt = qt_mean + qt_perturbation
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G_* factors...', end='\r')
-        # Soft-clamp weights: linearly ramp to zero as field approaches h_min/h_max
-        soft_clip_h = np.maximum(0, running_sum_h - h_min) * np.maximum(0, h_max - running_sum_h)
-        soft_clip_qt = np.maximum(0, running_sum_qt - qt_min) * np.maximum(0, qt_max - running_sum_qt)
-        # Normalize them
-        if soft_clip_h.mean() != 0: soft_clip_h = soft_clip_h/soft_clip_h.mean()
-        if soft_clip_qt.mean() != 0: soft_clip_qt = soft_clip_qt/soft_clip_qt.mean()
+
+        # --- DEBUG: soft-clamp options (pick one, comment the rest) ---
+        # OPTION A: parabolic [0,1], no mean norm — smooth, peaks at midpoint
+        u_h = np.clip((running_sum_h - h_min) / (h_max - h_min), 0, 1)
+        soft_clip_h = (4 * u_h * (1 - u_h))
+        u_qt = np.clip((running_sum_qt - qt_min) / (qt_max - qt_min), 0, 1)
+        soft_clip_qt = (4 * u_qt * (1 - u_qt))
+        # soft_clip_h /= soft_clip_h.mean()
+        # soft_clip_qt /= soft_clip_qt.mean()
+
+        # OPTION B: tent/triangle — distance to nearest bound, [0,1]
+        #   (this is what 614ffed computed but never actually used)
+        # soft_clip_h = np.maximum(np.minimum(running_sum_h - h_min, h_max - running_sum_h) / ((h_max - h_min) / 2), 0)
+        # soft_clip_qt = np.maximum(np.minimum(running_sum_qt - qt_min, qt_max - running_sum_qt) / ((qt_max - qt_min) / 2), 0)
+
+        # OPTION C: no soft clip (what 614ffed "looking pretty good" actually ran)
+        # soft_clip_h = 1.0
+        # soft_clip_qt = 1.0
+        # --- END DEBUG ---
 
         # G_h function is the clips * normalized gradient magnitude (Apxeq:amplitude propto gradient normalized)
-        G_h = _normalized_gradient(running_sum_h, dx_k, dy_k, z_k) * soft_clip_h
-        G_qt = _normalized_gradient(running_sum_qt, dx_k, dy_k, z_k) * soft_clip_qt
+        G_h = _gradient_magnitude(running_sum_h, dx_k, dy_k, z_k) * soft_clip_h
+        G_qt = _gradient_magnitude(running_sum_qt, dx_k, dy_k, z_k) * soft_clip_qt
+        mean_h = G_h.mean(axis=(0, 1), keepdims=True)
+        mean_h = np.where(mean_h > 0, mean_h, 1.0)
+        G_h = G_h / mean_h
+        mean_qt = G_qt.mean(axis=(0, 1), keepdims=True)
+        mean_qt = np.where(mean_qt > 0, mean_qt, 1.0)
+        G_qt = G_qt / mean_qt
+        # G_h = soft_clip_h
+        # G_qt = soft_clip_qt
 
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
@@ -408,6 +450,9 @@ def cascade_loop(
         # Final turbulon amplitudes
         A_h = S_k * C_h_k[i] * G_h 
         A_qt = S_k * C_qt_k[i] * G_qt
+        # A_h = S_k * np.mean(C_h_k[i]) * G_h 
+        # A_qt = S_k * np.mean(C_qt_k[i]) * G_qt
+        
 
         # Convolve and accumulate (periodic x,y; zero-padded z)
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing convolutions...', end='\r')
@@ -433,6 +478,9 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
       dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = ls(z) * (k/ls(z))^H_z
     Cells are accumulated from z=0 until domain_height is reached, then all
     dz values are scaled uniformly so their sum equals domain_height exactly.
+    In x and y, target spacings are k/(2*s_x) and k/(2*s_y), but the stored
+    dx, dy are the actual spacings implied by the rounded integer grid counts
+    so every class spans the domain exactly.
 
     If spheroscale_profile is scalar, it is promoted to a uniform array.
 
@@ -472,12 +520,12 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
     dz_arrays = []
 
     for i, k in enumerate(k_values):
-        dx_k = k / (2 * s_x)
-        dy_k = k / (2 * s_y)
-        nx_arr[i] = int(round(domain_x / dx_k))
-        ny_arr[i] = int(round(domain_y / dy_k))
-        dx_arr[i] = dx_k
-        dy_arr[i] = dy_k
+        target_dx_k = k / (2 * s_x)
+        target_dy_k = k / (2 * s_y)
+        nx_arr[i] = int(round(domain_x / target_dx_k))
+        ny_arr[i] = int(round(domain_y / target_dy_k))
+        dx_arr[i] = domain_x / nx_arr[i]
+        dy_arr[i] = domain_y / ny_arr[i]
 
         # Integrate dz(z) = k_z(z)/(2*s_z) from z=0
         def k_z_local(z):
@@ -553,6 +601,54 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=5, shape='mexican_hat'):
 
     r_norm_sq = X**2 + Y**2 + Z**2
     return shape_fn(r_norm_sq, k).astype(np.float32)
+
+
+def spectral_width_normalization(shape, size_class_gap_factor):
+    """Return an overlap correction from kernel spectral width and class spacing.
+
+    The returned factor is a simple linear overlap correction:
+
+        min(1, size_class_gap_factor / spectral_width_factor)
+
+    where ``size_class_gap_factor`` is the multiplicative ratio between
+    adjacent size-class values and ``spectral_width_factor`` is a hard-coded
+    estimate of the kernel's PSD e-folding width in the same multiplicative
+    sense.
+
+    The width constants were estimated once offline from the continuous
+    dimensionless kernel shapes at unit scale:
+
+    - ``mexican_hat``: PSD width factor 2.7954
+      This comes from the analytic 1D band-pass form of the line-profile PSD,
+      ``P(q) ∝ q^4 exp(-q^2)``, using the ratio of the two wavenumbers where
+      the PSD falls to ``peak / e`` around the nonzero spectral peak.
+    - ``morlet_omega0_6``: PSD width factor 3.0465
+      This comes from the corresponding Gaussian-modulated cosine line-profile
+      PSD at ``omega0 = 6`` and ``sigma = 1/pi``, again using the ratio of the
+      two wavenumbers where the PSD falls to ``peak / e`` around the main
+      nonzero spectral peak.
+
+    These constants are heuristic shape descriptors. They are not recomputed
+    at runtime because they depend only on the dimensionless kernel family.
+    """
+    if size_class_gap_factor <= 1:
+        raise ValueError(
+            "size_class_gap_factor must be greater than 1, "
+            f"got {size_class_gap_factor}"
+        )
+
+    spectral_width_factor = {
+        'mexican_hat': 2.7954,
+        'morlet_omega0_6': 3.0465,
+    }.get(shape)
+    if spectral_width_factor is None:
+        raise ValueError(
+            f"No spectral width normalization defined for shape {shape!r}"
+        )
+
+    if spectral_width_factor < size_class_gap_factor:
+        return 1.0
+    return float(size_class_gap_factor / spectral_width_factor)
 
 
 def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
@@ -651,7 +747,7 @@ def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
     return field
 
 
-def _normalized_gradient(field_3d, dx, dy, z_coords):
+def _gradient_magnitude(field_3d, dx, dy, z_coords):
     """Compute |∇f| / mean(|∇f|), the normalized gradient magnitude.
 
     (Apxeq:amplitude propto gradient normalized)
@@ -664,9 +760,5 @@ def _normalized_gradient(field_3d, dx, dy, z_coords):
     grad_z = np.gradient(field_3d, z_coords, axis=2)
 
     magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
-    mean_mag = magnitude.mean()
-
-    if mean_mag > 0:
-        return magnitude / mean_mag
-    else:
-        return np.ones_like(magnitude)
+    
+    return magnitude
