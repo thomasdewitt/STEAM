@@ -26,7 +26,7 @@ def main():
     nx = ny = 128             # domain = 8192 m = 2 * outer_scale
     domain_height = 1000    # m
     profile_dz = 6          # m
-    spheroscale = 2            # m
+    spheroscale = 20            # m
     n_seeds = 3
 
     # Derived quantities

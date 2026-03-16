@@ -31,6 +31,7 @@ def simulate(
     qt_min=0.0,
     qt_max=30 / 1000,
     min_distance_to_ground=1,
+    turbulon_shape = 'mexican_hat'
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -53,9 +54,9 @@ def simulate(
     spheroscale : float or ndarray, shape (n_profile,)
         Scale at which horizontal and vertical turbulon sizes are equal [m].
         If a 1D array, it is interpreted as a height-dependent profile at
-        the same levels as h_profile. The geometric mean is used for the
-        kernel shape and normalization reference; the full profile drives the
-        variable-dz grid and height-dependent C factors.
+        the same levels as h_profile. Scalars are promoted to uniform arrays.
+        The full profile drives the variable-dz grid and height-dependent
+        normalization; the arithmetic mean is used only for input validation.
     domain_height : float
         Vertical extent of domain [m].
     profile_dz : float
@@ -136,7 +137,7 @@ def simulate(
                 f"outer_scale ({outer_scale}), got ratio={n_tiles}"
             )
 
-    # Spheroscale: scalar or height-dependent profile
+    # Spheroscale: always promote to 1D profile
     spheroscale_arr = np.asarray(spheroscale, dtype=np.float64)
     if spheroscale_arr.ndim > 0:
         if len(spheroscale_arr) != len(h_profile):
@@ -145,52 +146,65 @@ def simulate(
                 f"got {len(spheroscale_arr)} vs {len(h_profile)}"
             )
         spheroscale_profile = spheroscale_arr
-        # Geometric mean used for kernel shape and normalization reference
-        spheroscale_geomean = float(np.exp(np.mean(np.log(spheroscale_arr))))
     else:
-        spheroscale_profile = None
-        spheroscale_geomean = float(spheroscale_arr)
+        spheroscale_profile = np.full(len(h_profile), float(spheroscale_arr))
 
     z_profile = np.arange(len(h_profile), dtype=np.float64) * profile_dz
 
     # Scale classes: L, L/k_factor, ..., 2*dx (finest)
+    s_x, s_y, s_z = sparsity_factors
     n_classes = int(round(np.log(outer_scale / (2*dx)) / np.log(k_factor))) + 1
     k_values = outer_scale / k_factor ** np.arange(n_classes)
-    # k_z_values uses geometric mean spheroscale for NetCDF output reference
-    k_z_values = spheroscale_geomean * (k_values / spheroscale_geomean) ** H_z
 
-    k_L = k_values[0]
-    k_z_L = k_z_values[0]
-    if profile_dz >= k_z_L:
+    # Input validation using arithmetic mean spheroscale
+    spheroscale_mean = float(np.mean(spheroscale_profile))
+    k_z_L_mean = spheroscale_mean * (outer_scale / spheroscale_mean) ** H_z
+    if profile_dz >= k_z_L_mean:
         raise ValueError(
             f"profile_dz ({profile_dz} m) must be less than the vertical outer "
-            f"scale k_z_L ({k_z_L:.1f} m); use a finer profile resolution"
+            f"scale k_z_L ({k_z_L_mean:.1f} m); use a finer profile resolution"
         )
 
-    n_large_turbulons = int(domain_height / k_z_L)
+    n_large_turbulons = int(domain_height / k_z_L_mean)
     if n_large_turbulons < 1:
         raise ValueError(
             f"domain_height ({domain_height} m) is shorter than the vertical scale of the "
-            f"outer-scale turbulons ({k_z_L:.1f} m); increase domain_height or "
+            f"outer-scale turbulons ({k_z_L_mean:.1f} m); increase domain_height or "
             f"decrease outer_scale"
         )
 
     grids = _compute_all_grids(
         k_values, domain_x, domain_y, domain_height, sparsity_factors,
-        spheroscale_geomean, z_profile, spheroscale_profile,
+        spheroscale_profile, z_profile,
     )
 
+    # Interpolate profiles to finest grid for normalization
+    z_finest = grids['z_arrays'][-1]
+    h_on_finest = np.interp(z_finest, z_profile, h_profile)
+    qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
+    spheroscale_on_finest = np.interp(z_finest, z_profile, spheroscale_profile)
+
+    # Vertical outer scale in finest-grid points (constant across height)
+    k_min = k_values[-1]
+    vertical_outer_scale_grid_pts = int(round(2 * s_z * (outer_scale / k_min) ** H_z))
+
+    # Unit turbulon z-slice for normalization correction
+    unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
+                                     support_factor=10, shape=turbulon_shape)
+
     C_h_k = _compute_normalization(
-        h_profile, k_L, spheroscale_geomean, profile_dz,
-        z_profile, k_values, outer_scale, grids['z_arrays'], spheroscale_profile,
-        sparsity_factors=sparsity_factors,
+        h_on_finest, vertical_outer_scale_grid_pts,
+        k_values, outer_scale, grids,
+        unit_turbulon, turbulon_shape
     )
     C_qt_k = _compute_normalization(
-        qt_profile, k_L, spheroscale_geomean, profile_dz,
-        z_profile, k_values, outer_scale, grids['z_arrays'], spheroscale_profile,
-        sparsity_factors=sparsity_factors,
+        qt_on_finest, vertical_outer_scale_grid_pts,
+        k_values, outer_scale, grids,
+        unit_turbulon, turbulon_shape
     )
-    # Scalar C_L for NetCDF attribute: outer scale hurst_scale=1
+    # print(C_h_k[0])
+    # exit()
+    # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
@@ -201,14 +215,15 @@ def simulate(
         h_min, h_max, qt_min, qt_max,
         min_distance_to_ground,
         sparsity_factors,
-        spheroscale_geomean,
         rng,
+        turbulon_shape=turbulon_shape,
     )
-    
+
     # Construct final 3D fields
     z_final = final_grid['z'].astype(np.float32)
     h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
+    spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
     h_3d = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert)
     qt_3d = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert)
@@ -219,17 +234,18 @@ def simulate(
     dy_final = (ny * dy) / ny_final_val
     x_coords = np.arange(nx_final_val, dtype=np.float32) * dx_final
     y_coords = np.arange(ny_final_val, dtype=np.float32) * dy_final
-    # dz: scalar for uniform grids, 1D array for variable-spheroscale grids
-    dz_out = float(final_grid['dz'][0]) if spheroscale_profile is None else final_grid['dz'].astype(np.float32)
+
+    # k_z_values using arith-mean spheroscale as reference
+    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
 
     simulation_params = {
         'nx': nx_final_val,
         'ny': ny_final_val,
         'dx': dx_final,
         'dy': dy_final,
-        'dz': dz_out,
+        'dz': final_grid['dz'].astype(np.float32),
         'outer_scale': outer_scale,
-        'spheroscale': spheroscale_geomean,
+        'spheroscale': spheroscale_final,
         'domain_height': domain_height,
         'profile_dz': profile_dz,
         'sparsity_factors': sparsity_factors,
@@ -264,10 +280,10 @@ def cascade_loop(
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
-    spheroscale,
     rng,
     h_perturbation=None,
     qt_perturbation=None,
+    turbulon_shape = 'mexican_hat'
 ):
     """Run the multi-scale turbulon cascade over all scale classes.
 
@@ -285,10 +301,9 @@ def cascade_loop(
         Output of _compute_all_grids. Contains 1D arrays k, k_z, nx, ny, nz,
         dx, dy, dz (mean, per class) and lists z_arrays, dz_arrays (one 1D
         array per scale class, each of length nz for that class).
-    C_h_k, C_qt_k : list of (float or 1D ndarray)
-        Scale-dependent amplitudes, one entry per scale class. Scalar for
-        uniform spheroscale; 1D array of length nz_k for variable spheroscale.
-        Both broadcast correctly over (nx_k, ny_k, nz_k).
+    C_h_k, C_qt_k : list of 1D ndarray
+        Scale-dependent amplitudes, one entry per scale class. Each is a
+        1D array of length nz_k that broadcasts over (nx_k, ny_k, nz_k).
     h_min, h_max : float
         Soft-clamp bounds for moist static energy.
     qt_min, qt_max : float
@@ -299,9 +314,6 @@ def cascade_loop(
         of the noise field are zeroed at every scale class.
     sparsity_factors : tuple of 3 ints
         (s_x, s_y, s_z) oversampling factors.
-    spheroscale : float
-        Geometric-mean spheroscale [m], used only for the turbulon kernel
-        (which uses isotropic_norm and is therefore spheroscale-independent).
     rng : numpy.random.Generator
     h_perturbation, qt_perturbation : ndarray or None
         Existing perturbation fields for nested simulations. If None,
@@ -352,7 +364,7 @@ def cascade_loop(
         running_sum_h = h_mean + h_perturbation
         running_sum_qt = qt_mean + qt_perturbation
 
-        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})   computing G_* factors...', end='\r')
+        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G_* factors...', end='\r')
         # Soft-clamp weights: linearly ramp to zero as field approaches h_min/h_max
         soft_clip_h = np.maximum(0, running_sum_h - h_min) * np.maximum(0, h_max - running_sum_h)
         soft_clip_qt = np.maximum(0, running_sum_qt - qt_min) * np.maximum(0, qt_max - running_sum_qt)
@@ -369,34 +381,12 @@ def cascade_loop(
         S_k[:, :, :n_zero] = 0
 
         # Build compact 3D turbulon kernel (Apxeq:turbulon shape)
-        kernel = _turbulon_envelope(1, spheroscale, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
-                                    support_factor=10, norm='isotropic_norm')
-        dz_k = z_k[1]-z_k[0]
-        kernel_variance = np.sum(kernel**2 * dx_k * dy_k * dz_k)
-        # qt_variance = (running_sum_qt-running_sum_qt.mean())**2
-        # h_variance = (running_sum_h-running_sum_h.mean())**2
-        # qt_variance = _normalized_gradient((normalized_distance_to_clip_qt)**2, dx_k, dy_k, z_k)
-        # h_variance = _normalized_gradient((normalized_distance_to_clip_h)**2, dx_k, dy_k, z_k)
-        # A_h = S_k * C_h_k[i] * h_variance/h_variance.mean()
-        # A_qt = S_k * C_qt_k[i] * qt_variance/qt_variance.mean()
+        kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
+                                    support_factor=10, shape=turbulon_shape)
+        
+        # Final turbulon amplitudes
         A_h = S_k * C_h_k[i] * G_h 
         A_qt = S_k * C_qt_k[i] * G_qt
-        print(np.count_nonzero(np.isnan(G_h)))
-        # print('-------------')
-        # print(np.mean(G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h))
-        # print(np.mean(A_h))
-        # print()
-        # print(np.std(G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h))
-        # print(np.std(A_h))
-        # print(A_h.shape)
-        # print('---------')
-        # if i == 7: exit()
-
-        # Amplitude arrays (Apxeq:amplitude propto gradient normalized)
-        # C_h_k[i] is a scalar or 1D array of shape (nz_k,); both broadcast over (nx,ny,nz)
-        # A_h = G_h * S_k * C_h_k[i] * normalized_distance_to_clip_h
-        # A_qt = G_qt * S_k * C_qt_k[i] * normalized_distance_to_clip_qt
-        # del G_h, S_k, G_qt, normalized_distance_to_clip_h, normalized_distance_to_clip_qt
 
         # Convolve and accumulate (periodic x,y; zero-padded z)
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing convolutions...', end='\r')
@@ -415,38 +405,40 @@ def cascade_loop(
 
 
 def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_factors,
-                       spheroscale, z_profile=None, spheroscale_profile=None):
+                       spheroscale_profile, z_profile):
     """Precompute grid dimensions and z-coordinate arrays for all scale classes.
 
-    For scalar spheroscale, each scale class has uniform cell spacing. For a
-    spheroscale profile, each scale class uses an altitude-dependent dz:
+    Each scale class uses an altitude-dependent dz:
       dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = ls(z) * (k/ls(z))^H_z
     Cells are accumulated from z=0 until domain_height is reached, then all
     dz values are scaled uniformly so their sum equals domain_height exactly.
+
+    If spheroscale_profile is scalar, it is promoted to a uniform array.
 
     Parameters
     ----------
     k_values : ndarray, shape (n_classes,)
     domain_x, domain_y, domain_height : float
     sparsity_factors : tuple of 3 ints
-    spheroscale : float
-        Geometric-mean (or scalar) spheroscale, used for the uniform-dz case.
-    z_profile : ndarray, shape (n_profile,) or None
-        Heights at which spheroscale_profile is given. Required if
-        spheroscale_profile is not None.
-    spheroscale_profile : ndarray, shape (n_profile,) or None
-        Height-dependent spheroscale. If None, uniform dz is used.
+    spheroscale_profile : ndarray, shape (n_profile,)
+        Height-dependent spheroscale [m]. Scalar is auto-promoted.
+    z_profile : ndarray, shape (n_profile,)
+        Heights at which spheroscale_profile is given.
 
     Returns
     -------
     dict with keys:
-        k, k_z : 1D arrays, shape (n_classes,)
+        k : 1D array, shape (n_classes,)
         nx, ny, nz : 1D int arrays, shape (n_classes,)
         dx, dy : 1D float arrays, shape (n_classes,)
         dz : 1D float array, shape (n_classes,) — mean cell height per class
         z_arrays : list of n_classes 1D float64 arrays — left-edge z-coords
         dz_arrays : list of n_classes 1D float64 arrays — cell heights
     """
+    spheroscale_profile = np.asarray(spheroscale_profile, dtype=np.float64)
+    if spheroscale_profile.ndim == 0:
+        spheroscale_profile = np.full_like(z_profile, float(spheroscale_profile))
+
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(k_values)
     nx_arr = np.empty(n_classes, dtype=np.int64)
@@ -466,43 +458,30 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         dx_arr[i] = dx_k
         dy_arr[i] = dy_k
 
-        if spheroscale_profile is None:
-            # Scalar spheroscale: uniform dz
-            k_z = spheroscale * (k / spheroscale) ** H_z
-            n_turbulons_z = int(np.ceil(domain_height / k_z))
-            nz_k = n_turbulons_z * 2 * s_z
-            dz_k = domain_height / nz_k
-            dz_k_arr = np.full(nz_k, dz_k)
-            z_k_arr = np.arange(nz_k, dtype=np.float64) * dz_k
-        else:
-            # Profile spheroscale: integrate dz(z) = k_z(z)/(2*s_z) from z=0
-            def k_z_local(z):
-                ls = np.interp(z, z_profile, spheroscale_profile)
-                return ls * (k / ls) ** H_z
+        # Integrate dz(z) = k_z(z)/(2*s_z) from z=0
+        def k_z_local(z):
+            ls = np.interp(z, z_profile, spheroscale_profile)
+            return ls * (k / ls) ** H_z
 
-            z_edges = [0.0]
-            while z_edges[-1] < domain_height:
-                dz_here = k_z_local(z_edges[-1]) / (2 * s_z)
-                z_edges.append(z_edges[-1] + dz_here)
+        z_edges = [0.0]
+        while z_edges[-1] < domain_height:
+            dz_here = k_z_local(z_edges[-1]) / (2 * s_z)
+            z_edges.append(z_edges[-1] + dz_here)
 
-            nz_k = len(z_edges) - 1
-            dz_raw = np.diff(z_edges)
-            scale_factor = domain_height / np.sum(dz_raw)
-            dz_k_arr = dz_raw * scale_factor
-            z_k_arr = np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
-            dz_k = float(np.mean(dz_k_arr))
-            print(f'  k={k:.0f}m: nz={nz_k}, dz scale factor={scale_factor:.6f}')
+        nz_k = len(z_edges) - 1
+        dz_raw = np.diff(z_edges)
+        scale_factor = domain_height / np.sum(dz_raw)
+        dz_k_arr = dz_raw * scale_factor
+        z_k_arr = np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
+        dz_k = float(np.mean(dz_k_arr))
 
         nz_arr[i] = nz_k
         dz_arr[i] = dz_k
         z_arrays.append(z_k_arr)
         dz_arrays.append(dz_k_arr)
 
-    k_z_values = spheroscale * (k_values / spheroscale) ** H_z
-
     return {
         'k': k_values,
-        'k_z': k_z_values,
         'nx': nx_arr,
         'ny': ny_arr,
         'nz': nz_arr,
@@ -527,32 +506,21 @@ def _vertical_scale(norm, k, spheroscale):
         raise ValueError(f"No vertical scale defined for norm {norm!r}")
 
 
-def _turbulon_envelope(k, spheroscale, dx, dy, dz, support_factor=5,
-                       norm='canonical_anisotropic_norm', shape='mexican_hat'):
-    """Compact 3D turbulon kernel, centered, trimmed to support extent.
+def _turbulon_envelope(k, dx, dy, dz, support_factor=5, shape='mexican_hat'):
+    """Compact 3D isotropic turbulon kernel, centered, trimmed to support.
 
-    Looks up norm and shape functions by name from steam.turbulons.
-    Raises ValueError if either name is not found there.
-
-    The kernel extends to support_factor * k horizontally and
-    support_factor * k_z vertically (k_z = k for isotropic norm).
-
+    The kernel extends to support_factor * k in all directions (isotropic).
     Returns array of shape (2*half_nx+1, 2*half_ny+1, 2*half_nz+1)
     with the kernel center at the middle index.
     """
-    if norm not in _turbulons.NORMS:
-        raise ValueError(f"Unknown norm {norm!r}. Valid options: {sorted(_turbulons.NORMS)}")
     if shape not in _turbulons.SHAPES:
         raise ValueError(f"Unknown shape {shape!r}. Valid options: {sorted(_turbulons.SHAPES)}")
 
-    norm_fn = getattr(_turbulons, norm)
     shape_fn = getattr(_turbulons, shape)
-
-    k_z = _vertical_scale(norm, k, spheroscale)
 
     half_nx = int(np.ceil(support_factor * k / dx))
     half_ny = int(np.ceil(support_factor * k / dy))
-    half_nz = int(np.ceil(support_factor * k_z / dz))
+    half_nz = int(np.ceil(support_factor * k / dz))
 
     x = np.arange(-half_nx, half_nx + 1, dtype=np.float32) * dx
     y = np.arange(-half_ny, half_ny + 1, dtype=np.float32) * dy
@@ -562,73 +530,75 @@ def _turbulon_envelope(k, spheroscale, dx, dy, dz, support_factor=5,
     Y = y[None, :, None]
     Z = z[None, None, :]
 
-    r_norm_sq = norm_fn(X, Y, Z, spheroscale)
+    r_norm_sq = X**2 + Y**2 + Z**2
     return shape_fn(r_norm_sq, k).astype(np.float32)
 
 
-def _compute_normalization(profile, k_L, spheroscale, profile_dz,
-                           z_profile, k_values, outer_scale, z_arrays,
-                           spheroscale_profile=None,
-                           norm='canonical_anisotropic_norm', shape='mexican_hat',
-                           support_factor=10, sparsity_factors=(1, 1, 1)):
+def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
+                           k_values, outer_scale, z_arrays,
+                           turbulon, shape='mexican_hat'):
     """Compute scale- and height-dependent amplitude arrays C_k.
 
     (Apxeq:norm factor computation)
 
-    Measures profile variation at the vertical outer scale k_z_L using a
-    first-order Haar wavelet (step function: -1 below center, +1 above),
-    then corrects for the 3D kernel energy so that the cascade perturbation
-    variance matches the measured profile variation.
-
-      C_k[i] = haar_response / sqrt(E_3d) * (k_i / outer_scale)^H_h
+    Measures profile variation at the vertical outer scale using a first-order
+    Haar wavelet (step function: -1 below center, +1 above) on the finest
+    resolution grid. The Haar width is adjusted so its spectral peak matches
+    the envelope shape's spectral peak, then scales by (k/outer_scale)^H_h.
 
     Parameters
     ----------
-    profile : ndarray, shape (n_profile,)
-    k_L : float  —  outer-scale horizontal turbulon size
-    spheroscale : float  —  geometric-mean spheroscale
-    profile_dz : float  —  profile vertical spacing
-    z_profile : ndarray, shape (n_profile,)
+    profile_on_finest_grid : ndarray, shape (nz_finest,)
+        Profile interpolated to the finest-resolution z-grid.
+    vertical_outer_scale_grid_pts : int
+        Number of finest-grid cells spanning the vertical outer scale.
+        Constant across height: 2 * s_z * (outer_scale / k_min)^H_z.
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
-    z_arrays : list of n_classes 1D arrays  —  z-coords per scale class
-    spheroscale_profile : ndarray or None
-    sparsity_factors : tuple of 3 ints
+    z_arrays : list of n_classes 1D arrays — z-coords per scale class
+    shape : str
+        Envelope shape name. Used to match Haar spectral peak to envelope peak.
 
     Returns
     -------
-    list of n_classes entries, each a float32 scalar or 1D float32 array.
+    list of n_classes 1D float32 arrays.
     """
-    k_z = _vertical_scale(norm, k_L, spheroscale)
+    # Spectral peak wavelengths in units of k, measured numerically at high
+    # resolution.  The Haar peak ratio is per unit of total width.
+    HAAR_PEAK_PER_WIDTH = 1.3443
+    SHAPE_PEAK_PER_K = {
+        'mexican_hat': 1.4170,
+        'morlet_omega0_6': 1.0486,
+    }
+    shape_peak = SHAPE_PEAK_PER_K.get(shape, 1.4170)
 
-    # --- Haar wavelet at scale k_z ---
-    n_half = max(1, int(round(k_z / profile_dz)/2))
-    if n_half % 2 ==1: n_half += 1
-    kernel_haar = np.empty(n_half, dtype=np.float64)
-    kernel_haar[:n_half//2] = -1.0 / (n_half/2)
-    kernel_haar[n_half//2:] = 1.0 / (n_half/2)
+    # Adjust Haar width so its spectral peak matches the envelope's
+    corrected_width_pts = vertical_outer_scale_grid_pts * shape_peak / HAAR_PEAK_PER_WIDTH
+    n_half = max(1, int(round(corrected_width_pts / 2)))
 
-    padded = np.pad(profile, n_half//2, mode='edge')
+    kernel_haar = np.empty(2 * n_half, dtype=np.float64)
+    kernel_haar[:n_half] = -1.0 / n_half
+    kernel_haar[n_half:] = 1.0 / n_half
+
+    padded = np.pad(profile_on_finest_grid, (n_half, n_half - 1), mode='edge')
     response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
-    # --- 3D kernel energy correction ---
-    # s_x, s_y, s_z = sparsity_factors
-    # kernel_3d = _turbulon_envelope(
-    #     1, spheroscale, 1 / (2 * s_x), 1 / (2 * s_y), 1 / (2 * s_z),
-    #     support_factor=support_factor, norm='isotropic_norm', shape=shape,
-    # )
-    # energy_3d = float(np.sum(kernel_3d ** 2))
-    energy_3d = 1
+    # Correct for turbulon vs Haar sensitivity ratio                                                                                                       
+    # mean(|haar|) = 1/n_half by construction; scale by turbulon's mean absolute difference                                          
+    haar_sensitivity = float(np.sum(np.abs(kernel_haar)))                                                
+    turbulon_sensitivity = float(np.sum(np.abs(turbulon)))   
+    # turbulon_sensitivity = float(np.sum(np.abs(turbulon[turbulon.shape[0]//2, turbulon.shape[1]//2, :])))   
+    # print(turbulon_sensitivity / haar_sensitivity)
+    # exit()
+    # response = response * (haar_sensitivity / turbulon_sensitivity) 
+    response /= 2.3
 
+    z_finest = z_arrays['z_arrays'][-1]
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h)
-        if spheroscale_profile is None:
-            C_L = float(np.mean(response)) / np.sqrt(energy_3d)
-            C_k.append(np.float32(C_L * hurst_scale))
-        else:
-            C_profile = response / np.sqrt(energy_3d)
-            C_k.append(np.interp(z_arrays[i], z_profile, C_profile).astype(np.float32) * hurst_scale)
+        C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
+        C_k.append(C_profile)
     return C_k
 
 

@@ -24,11 +24,13 @@ def write_netcdf(
     k_values, k_z_values : 1D arrays of scale classes
     C_h_k, C_qt_k : 1D arrays of scale-dependent amplitudes
     simulation_params : dict
-        Scalar attributes to write as NetCDF global attributes.
-        Required keys: nx, ny, dx, dy, dz, outer_scale, spheroscale,
-        domain_height, profile_dz, sparsity_factors, surface_pressure,
-        seed, C_h_L, C_qt_L, n_large_turbulons, H_h, H_z,
-        h_min, h_max, qt_min, qt_max, min_distance_to_ground.
+        Simulation metadata. Contains scalar attributes and 1D arrays:
+        - dz : 1D float32 array, shape (nz,) — cell heights
+        - spheroscale : 1D float32 array, shape (nz,) — spheroscale profile on output grid
+        Plus scalar keys: nx, ny, dx, dy, outer_scale, domain_height,
+        profile_dz, sparsity_factors, surface_pressure, seed, C_h_L,
+        C_qt_L, n_large_turbulons, H_h, H_z, h_min, h_max, qt_min,
+        qt_max, min_distance_to_ground.
 
     Returns
     -------
@@ -107,28 +109,19 @@ def write_netcdf(
     kzv.units = "m"
     kzv.long_name = "vertical turbulon scale classes"
 
-    # C_h_k / C_qt_k: list of scalars (scalar spheroscale) or list of 1D arrays (profile spheroscale)
-    if np.ndim(C_h_k[0]) == 0:
-        chk = ds.createVariable("C_h_k", "f4", ("k",))
-        chk[:] = np.array(C_h_k, dtype=np.float32)
-        chk.long_name = "scale-dependent h amplitude"
+    # C_h_k / C_qt_k: always 2D (k × nz_k_max)
+    nz_k_max = max(len(c) for c in C_h_k)
+    ds.createDimension("nz_k_max", nz_k_max)
 
-        cqtk = ds.createVariable("C_qt_k", "f4", ("k",))
-        cqtk[:] = np.array(C_qt_k, dtype=np.float32)
-        cqtk.long_name = "scale-dependent qt amplitude"
-    else:
-        nz_k_max = max(len(c) for c in C_h_k)
-        ds.createDimension("nz_k_max", nz_k_max)
+    chk = ds.createVariable("C_h_k", "f4", ("k", "nz_k_max"), fill_value=np.nan)
+    for i, c in enumerate(C_h_k):
+        chk[i, :len(c)] = c
+    chk.long_name = "scale- and height-dependent h amplitude"
 
-        chk = ds.createVariable("C_h_k", "f4", ("k", "nz_k_max"), fill_value=np.nan)
-        for i, c in enumerate(C_h_k):
-            chk[i, :len(c)] = c
-        chk.long_name = "scale- and height-dependent h amplitude"
-
-        cqtk = ds.createVariable("C_qt_k", "f4", ("k", "nz_k_max"), fill_value=np.nan)
-        for i, c in enumerate(C_qt_k):
-            cqtk[i, :len(c)] = c
-        cqtk.long_name = "scale- and height-dependent qt amplitude"
+    cqtk = ds.createVariable("C_qt_k", "f4", ("k", "nz_k_max"), fill_value=np.nan)
+    for i, c in enumerate(C_qt_k):
+        cqtk[i, :len(c)] = c
+    cqtk.long_name = "scale- and height-dependent qt amplitude"
 
     # Scalar attributes on root group
     p = simulation_params
@@ -136,17 +129,17 @@ def write_netcdf(
     ds.ny = np.int32(p['ny'])
     ds.dx = np.float32(p['dx'])
     ds.dy = np.float32(p['dy'])
-    # dz: scalar attribute for uniform grids; variable for altitude-dependent spheroscale
-    dz = p['dz']
-    if np.ndim(dz) == 0:
-        ds.dz = np.float32(dz)
-    else:
-        dz_var = ds.createVariable("dz", "f4", ("z",))
-        dz_var[:] = np.asarray(dz, dtype=np.float32)
-        dz_var.units = "m"
-        dz_var.long_name = "cell height"
+    # dz: always 1D variable (cell heights per z-level)
+    dz_var = ds.createVariable("dz", "f4", ("z",))
+    dz_var[:] = np.asarray(p['dz'], dtype=np.float32)
+    dz_var.units = "m"
+    dz_var.long_name = "cell height"
     ds.outer_scale = np.float32(p['outer_scale'])
-    ds.spheroscale = np.float32(p['spheroscale'])
+    # spheroscale: 1D variable (profile on output grid)
+    ls_var = ds.createVariable("spheroscale", "f4", ("z",))
+    ls_var[:] = np.asarray(p['spheroscale'], dtype=np.float32)
+    ls_var.units = "m"
+    ls_var.long_name = "spheroscale profile"
     ds.domain_height = np.float32(p['domain_height'])
     ds.profile_dz = np.float32(p['profile_dz'])
     ds.sparsity_factors = np.array(p['sparsity_factors'], dtype=np.int32)

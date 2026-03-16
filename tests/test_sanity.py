@@ -129,14 +129,15 @@ def test_output_file_exists(small_nc):
 def test_output_contains_required_variables(small_nc):
     ds = netCDF4.Dataset(small_nc, "r")
     expected = {"h", "qt", "x", "y", "z", "h_profile", "qt_profile",
-                "z_profile", "k_values", "k_z_values", "C_h_k", "C_qt_k"}
+                "z_profile", "k_values", "k_z_values", "C_h_k", "C_qt_k",
+                "dz", "spheroscale"}
     assert expected <= set(ds.variables.keys())
     ds.close()
 
 
 def test_output_contains_required_attributes(small_nc):
     ds = netCDF4.Dataset(small_nc, "r")
-    expected = {"nx", "ny", "dx", "dy", "dz", "outer_scale", "spheroscale",
+    expected = {"nx", "ny", "dx", "dy", "outer_scale",
                 "domain_height", "profile_dz", "surface_pressure", "seed",
                 "C_h_L", "C_qt_L", "n_large_turbulons", "H_h", "H_z",
                 "sparsity_factors"}
@@ -159,9 +160,11 @@ def test_output_coordinate_spacing(small_nc):
     x = ds.variables["x"][:]
     y = ds.variables["y"][:]
     z = ds.variables["z"][:]
+    dz = ds.variables["dz"][:]
     np.testing.assert_allclose(x[1] - x[0], float(ds.dx), rtol=1e-5)
     np.testing.assert_allclose(y[1] - y[0], float(ds.dy), rtol=1e-5)
-    np.testing.assert_allclose(z[1] - z[0], float(ds.dz), rtol=1e-5)
+    # dz[0] should match the first z-spacing
+    np.testing.assert_allclose(z[1] - z[0], float(dz[0]), rtol=1e-5)
     ds.close()
 
 
@@ -235,7 +238,7 @@ def test_h_mean_matches_profile(small_nc, simple_profiles):
 # ===================================================================
 
 def test_kernel_is_symmetric():
-    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 50, support_factor=5)
     cx, cy, cz = kernel.shape[0]//2, kernel.shape[1]//2, kernel.shape[2]//2
     # x symmetry
     np.testing.assert_allclose(kernel[:cx, cy, cz], kernel[cx+1:, cy, cz][::-1], atol=1e-6)
@@ -246,13 +249,13 @@ def test_kernel_is_symmetric():
 
 
 def test_kernel_center_is_positive():
-    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 50, support_factor=5)
     cx, cy, cz = kernel.shape[0]//2, kernel.shape[1]//2, kernel.shape[2]//2
     assert kernel[cx, cy, cz] > 0
 
 
 def test_kernel_shape_is_odd():
-    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 50, support_factor=5)
     assert all(s % 2 == 1 for s in kernel.shape)
 
 
@@ -285,14 +288,14 @@ def test_normalized_gradient_uniform_field_returns_ones():
 
 
 def test_fold_kernel_preserves_sum():
-    kernel = _turbulon_envelope(500, 100, 100, 100, 50, support_factor=5)
+    kernel = _turbulon_envelope(500, 100, 100, 50, support_factor=5)
     folded = fold_kernel_to_field(kernel, (8, 8, kernel.shape[2]))
     np.testing.assert_allclose(folded.sum(), kernel.sum(), atol=1e-3)
 
 
 def test_convolution_preserves_shape():
     field = np.random.default_rng(0).standard_normal((16, 16, 10)).astype(np.float32)
-    kernel = _turbulon_envelope(500, 100, 500, 500, 100, support_factor=5)
+    kernel = _turbulon_envelope(500, 500, 500, 100, support_factor=5)
     result = convolve_periodic_xy_zeropad_z_oa(field, kernel)
     assert result.shape == field.shape
 
