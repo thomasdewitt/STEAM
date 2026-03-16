@@ -1,6 +1,8 @@
 """Core STEAM cascade algorithm."""
 
+import math
 import numpy as np
+import netCDF4
 from pathlib import Path
 from scipy.ndimage import zoom
 from .constants import (
@@ -10,6 +12,8 @@ from .constants import (
 from . import turbulons as _turbulons
 from .utils import convolve_periodic_xy_zeropad_z_oa
 from .output import write_netcdf
+
+SUPPORT_FACTOR = 5
 
 
 def simulate(
@@ -89,7 +93,7 @@ def simulate(
         The output_path as a Path object.
     """
     output_path = Path(output_path)
-    rng = np.random.default_rng(seed)
+    seed_sequence = np.random.SeedSequence(seed)
 
     # Input validation
     for s, name in zip(sparsity_factors, ('s_x', 's_y', 's_z')):
@@ -224,7 +228,7 @@ def simulate(
 
     # Unit turbulon z-slice for normalization correction
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
-                                     support_factor=10, shape=turbulon_shape)
+                                     support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
     spectral_width_correction = spectral_width_normalization(
         turbulon_shape, size_class_gap_factor
     )
@@ -245,6 +249,8 @@ def simulate(
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
+    child_seeds = seed_sequence.spawn(n_classes)
+
     h_pert, qt_pert, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
@@ -252,7 +258,7 @@ def simulate(
         h_min, h_max, qt_min, qt_max,
         min_distance_to_ground,
         sparsity_factors,
-        rng,
+        child_seeds,
         turbulon_shape=turbulon_shape,
     )
 
@@ -300,6 +306,9 @@ def simulate(
         'qt_min': qt_min,
         'qt_max': qt_max,
         'min_distance_to_ground': min_distance_to_ground,
+        'turbulon_shape': turbulon_shape,
+        'n_size_classes': n_classes,
+        'size_class_gap_factor': size_class_gap_factor,
     }
 
     write_netcdf(
@@ -319,7 +328,7 @@ def cascade_loop(
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
-    rng,
+    seeds_or_rng,
     h_perturbation=None,
     qt_perturbation=None,
     turbulon_shape = 'mexican_hat'
@@ -353,7 +362,10 @@ def cascade_loop(
         of the noise field are zeroed at every scale class.
     sparsity_factors : tuple of 3 ints
         (s_x, s_y, s_z) oversampling factors.
-    rng : numpy.random.Generator
+    seeds_or_rng : list of SeedSequence, or numpy.random.Generator
+        If a list of SeedSequence, each element seeds one size class
+        independently. If a Generator, it is used directly for all
+        classes (legacy behavior).
     h_perturbation, qt_perturbation : ndarray or None
         Existing perturbation fields for nested simulations. If None,
         initialized to zero at the first scale class resolution.
@@ -369,6 +381,9 @@ def cascade_loop(
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(grids['k'])
     n_zero = int(round(2 * s_z * min_distance_to_ground))
+
+    # Determine whether we have per-class seeds or a shared Generator
+    use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
 
     for i in range(n_classes):
         k = grids['k'][i]
@@ -420,13 +435,17 @@ def cascade_loop(
         G_qt = G_qt / np.where(mean_qt > 0, mean_qt, 1.0)
 
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
+        if use_per_class_seeds:
+            rng = np.random.default_rng(seeds_or_rng[i])
+        else:
+            rng = seeds_or_rng
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
         S_k[:, :, :n_zero] = 0
         S_k[:, :, -n_zero:] = 0
 
         # Build compact 3D turbulon kernel (Apxeq:turbulon shape)
         kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
-                                    support_factor=10, shape=turbulon_shape)
+                                    support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
         
         # Final turbulon amplitudes
         A_h = S_k * C_h_k[i] * G_h
@@ -553,7 +572,7 @@ def _vertical_scale(norm, k, spheroscale):
         raise ValueError(f"No vertical scale defined for norm {norm!r}")
 
 
-def _turbulon_envelope(k, dx, dy, dz, support_factor=5, shape='mexican_hat'):
+def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexican_hat'):
     """Compact 3D isotropic turbulon kernel, centered, trimmed to support.
 
     The kernel extends to support_factor * k in all directions (isotropic).
@@ -730,5 +749,302 @@ def _gradient_magnitude(field_3d, dx, dy, z_coords):
     grad_z = np.gradient(field_3d, z_coords, axis=2)
 
     magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
-    
+
     return magnitude
+
+
+def refine(
+    parent_path,
+    x_start, x_stop,
+    y_start, y_stop,
+    dx, dy,
+    parent_group='/',
+    output_group=None,
+    n_size_classes=None,
+    seed=None,
+    sparsity_factors=None,
+    turbulon_shape=None,
+):
+    """Refine a subdomain of a parent simulation to finer resolution.
+
+    Loads a completed STEAM simulation (or a previous refinement group),
+    extracts a spatial subset (with padding to capture turbulon tails),
+    and continues the cascade from the parent's finest scale down to 2*dx.
+
+    For recursive refinement, pass the group path of an existing
+    refinement as parent_group (e.g. "refinements/r0").
+
+    Parameters
+    ----------
+    parent_path : str or Path
+        Path to the NetCDF file.
+    x_start, x_stop : int
+        Index range into parent x-grid for the inner subdomain.
+    y_start, y_stop : int
+        Index range into parent y-grid for the inner subdomain.
+    dx, dy : float
+        New finest horizontal resolution [m].
+    parent_group : str
+        NetCDF group to read parent data from. Default '/' (root).
+    output_group : str or None
+        NetCDF group name for output. Default: auto-generated
+        "refinements/r0", "r1", ...
+    n_size_classes : int or None
+        Number of refinement size classes. If None, use dyadic classes.
+    seed : int or None
+        Random seed. If None, derived from parent seed + group name hash.
+    sparsity_factors : tuple of 3 ints or None
+        If None, inherit from parent.
+    turbulon_shape : str or None
+        If None, inherit from parent.
+
+    Returns
+    -------
+    Path
+        The parent_path (with the new group written into it).
+    """
+    parent_path = Path(parent_path)
+
+    # Read parent data from the specified group
+    ds = netCDF4.Dataset(parent_path, "r")
+    grp = ds if parent_group == '/' else ds[parent_group]
+
+    h_3d = grp.variables["h"][:].astype(np.float32)
+    qt_3d = grp.variables["qt"][:].astype(np.float32)
+    x_coords = grp.variables["x"][:]
+    y_coords = grp.variables["y"][:]
+    z_coords = grp.variables["z"][:]
+    h_profile = grp.variables["h_profile"][:]
+    qt_profile = grp.variables["qt_profile"][:]
+    z_profile = grp.variables["z_profile"][:]
+    k_values_parent = grp.variables["k_values"][:]
+    spheroscale_on_z = grp.variables["spheroscale"][:]
+
+    parent_dx = float(grp.dx)
+    parent_dy = float(grp.dy)
+    domain_height = float(grp.domain_height)
+    profile_dz = float(grp.profile_dz)
+    surface_pressure = float(grp.surface_pressure)
+    parent_seed = int(grp.seed) if int(grp.seed) != -1 else None
+    h_min = float(grp.h_min)
+    h_max = float(grp.h_max)
+    qt_min = float(grp.qt_min)
+    qt_max = float(grp.qt_max)
+    min_distance_to_ground = int(grp.min_distance_to_ground)
+
+    if sparsity_factors is None:
+        sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
+    if turbulon_shape is None:
+        turbulon_shape = grp.turbulon_shape if hasattr(grp, 'turbulon_shape') else 'mexican_hat'
+
+    # Determine existing refinement groups for auto-naming
+    if output_group is None:
+        existing = []
+        if "refinements" in ds.groups:
+            existing = list(ds.groups["refinements"].groups.keys())
+        idx = 0
+        while f"r{idx}" in existing:
+            idx += 1
+        output_group = f"refinements/r{idx}"
+
+    ds.close()
+
+    # New outer scale = parent's finest k
+    new_outer_scale = float(k_values_parent[-1])
+
+    # Pad width: SUPPORT_FACTOR * new_outer_scale / parent_dx grid cells
+    pad_cells = int(math.ceil(SUPPORT_FACTOR * new_outer_scale / parent_dx))
+
+    parent_nx = h_3d.shape[0]
+    parent_ny = h_3d.shape[1]
+
+    # Extract padded subdomain using periodic wrapping
+    x_indices = np.arange(x_start - pad_cells, x_stop + pad_cells) % parent_nx
+    y_indices = np.arange(y_start - pad_cells, y_stop + pad_cells) % parent_ny
+
+    h_pad = h_3d[np.ix_(x_indices, y_indices)]
+    qt_pad = qt_3d[np.ix_(x_indices, y_indices)]
+
+    # Compute perturbation: subtract mean profile
+    h_mean_1d = np.interp(z_coords, z_profile, h_profile).astype(np.float32)
+    qt_mean_1d = np.interp(z_coords, z_profile, qt_profile).astype(np.float32)
+    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
+    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
+
+    # Inner subdomain physical extent
+    inner_nx = x_stop - x_start
+    inner_ny = y_stop - y_start
+    inner_extent_x = inner_nx * parent_dx
+    inner_extent_y = inner_ny * parent_dy
+
+    # Validate: inner extent must be integer multiple of new_outer_scale
+    for extent, axis_name in ((inner_extent_x, 'x'), (inner_extent_y, 'y')):
+        n_tiles = extent / new_outer_scale
+        if abs(n_tiles - round(n_tiles)) > 1e-9:
+            raise ValueError(
+                f"Inner subdomain {axis_name}-extent ({extent} m) must be an "
+                f"integer multiple of new_outer_scale ({new_outer_scale} m), "
+                f"got ratio={n_tiles}"
+            )
+
+    # Padded domain extent
+    padded_extent_x = len(x_indices) * parent_dx
+    padded_extent_y = len(y_indices) * parent_dy
+
+    # Compute new size classes from new_outer_scale down to 2*dx
+    s_x, s_y, s_z = sparsity_factors
+    if n_size_classes is None:
+        size_class_gap_factor = 2.0
+        n_classes = int(
+            round(np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor))
+        ) + 1
+    else:
+        n_classes = n_size_classes
+        size_class_gap_factor = float(
+            (new_outer_scale / (2 * dx)) ** (1.0 / (n_classes - 1))
+        )
+
+    if n_classes < 2:
+        raise ValueError(
+            f"Refinement requires at least 2 size classes, but "
+            f"new_outer_scale={new_outer_scale} and dx={dx} yield {n_classes}"
+        )
+
+    k_values = new_outer_scale / size_class_gap_factor ** np.arange(n_classes)
+
+    # Interpolate spheroscale to profile z-grid
+    spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
+
+    # Compute grids for padded domain
+    grids = _compute_all_grids(
+        k_values, padded_extent_x, padded_extent_y, domain_height,
+        sparsity_factors, spheroscale_profile, z_profile,
+    )
+
+    # Interpolate profiles to finest grid for normalization
+    z_finest = grids['z_arrays'][-1]
+    h_on_finest = np.interp(z_finest, z_profile, h_profile)
+    qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
+
+    # Vertical outer scale in finest-grid points
+    k_min = k_values[-1]
+    vertical_outer_scale_grid_pts = int(round(2 * s_z * (new_outer_scale / k_min) ** H_z))
+
+    unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
+                                       support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
+    spectral_width_correction = spectral_width_normalization(
+        turbulon_shape, size_class_gap_factor
+    )
+
+    C_h_k = _compute_normalization(
+        h_on_finest, vertical_outer_scale_grid_pts,
+        k_values, new_outer_scale, grids,
+        unit_turbulon, turbulon_shape
+    )
+    C_qt_k = _compute_normalization(
+        qt_on_finest, vertical_outer_scale_grid_pts,
+        k_values, new_outer_scale, grids,
+        unit_turbulon, turbulon_shape
+    )
+    C_h_k = [c * spectral_width_correction for c in C_h_k]
+    C_qt_k = [c * spectral_width_correction for c in C_qt_k]
+
+    # Seed handling
+    if seed is None and parent_seed is not None:
+        seed = parent_seed + hash(output_group) % (2**31)
+    seed_sequence = np.random.SeedSequence(seed)
+    child_seeds = seed_sequence.spawn(n_classes)
+
+    # Run cascade on padded domain
+    h_pert_refined, qt_pert_refined, final_grid = cascade_loop(
+        h_profile, qt_profile, z_profile,
+        grids,
+        C_h_k, C_qt_k,
+        h_min, h_max, qt_min, qt_max,
+        min_distance_to_ground,
+        sparsity_factors,
+        child_seeds,
+        h_perturbation=h_pert_pad,
+        qt_perturbation=qt_pert_pad,
+        turbulon_shape=turbulon_shape,
+    )
+
+    # Trim pad region to get inner subdomain
+    final_nx = final_grid['nx']
+    final_ny = final_grid['ny']
+    # The pad was pad_cells on each side in parent-grid units;
+    # compute the corresponding number of cells in the refined grid
+    inner_nx_fine = int(round(inner_extent_x / final_grid['dx']))
+    inner_ny_fine = int(round(inner_extent_y / final_grid['dy']))
+    trim_x = (final_nx - inner_nx_fine) // 2
+    trim_y = (final_ny - inner_ny_fine) // 2
+
+    h_pert_inner = h_pert_refined[trim_x:trim_x+inner_nx_fine,
+                                   trim_y:trim_y+inner_ny_fine, :]
+    qt_pert_inner = qt_pert_refined[trim_x:trim_x+inner_nx_fine,
+                                     trim_y:trim_y+inner_ny_fine, :]
+
+    # Construct final 3D fields
+    z_final = final_grid['z'].astype(np.float32)
+    h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
+    qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
+    spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
+
+    h_3d_out = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
+    qt_3d_out = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
+
+    nx_out = h_3d_out.shape[0]
+    ny_out = h_3d_out.shape[1]
+    dx_final = inner_extent_x / nx_out
+    dy_final = inner_extent_y / ny_out
+    x_out = np.arange(nx_out, dtype=np.float32) * dx_final + x_start * parent_dx
+    y_out = np.arange(ny_out, dtype=np.float32) * dy_final + y_start * parent_dy
+
+    spheroscale_mean = float(np.mean(spheroscale_profile))
+    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
+
+    C_h_L = float(np.mean(C_h_k[0]))
+    C_qt_L = float(np.mean(C_qt_k[0]))
+
+    simulation_params = {
+        'nx': nx_out,
+        'ny': ny_out,
+        'dx': dx_final,
+        'dy': dy_final,
+        'dz': final_grid['dz'].astype(np.float32),
+        'outer_scale': new_outer_scale,
+        'spheroscale': spheroscale_final,
+        'domain_height': domain_height,
+        'profile_dz': profile_dz,
+        'sparsity_factors': sparsity_factors,
+        'n_size_classes': n_classes,
+        'size_class_gap_factor': size_class_gap_factor,
+        'surface_pressure': surface_pressure,
+        'seed': seed,
+        'C_h_L': C_h_L,
+        'C_qt_L': C_qt_L,
+        'n_large_turbulons': 0,  # refinement doesn't define this
+        'H_h': H_h,
+        'H_z': H_z,
+        'h_min': h_min,
+        'h_max': h_max,
+        'qt_min': qt_min,
+        'qt_max': qt_max,
+        'min_distance_to_ground': min_distance_to_ground,
+        'turbulon_shape': turbulon_shape,
+        'parent_group': parent_group,
+        'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
+        'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),
+        'parent_x_offset': float(x_start * parent_dx),
+        'parent_y_offset': float(y_start * parent_dy),
+    }
+
+    write_netcdf(
+        parent_path, h_3d_out, qt_3d_out,
+        x_out, y_out, z_final,
+        h_profile, qt_profile, z_profile.astype(np.float32),
+        k_values, k_z_values, C_h_k, C_qt_k,
+        simulation_params,
+        group=output_group,
+    )
+    return parent_path

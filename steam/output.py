@@ -11,6 +11,7 @@ def write_netcdf(
     h_profile, qt_profile, z_profile,
     k_values, k_z_values, C_h_k, C_qt_k,
     simulation_params,
+    group=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -31,6 +32,10 @@ def write_netcdf(
         profile_dz, sparsity_factors, surface_pressure, seed, C_h_L,
         C_qt_L, n_large_turbulons, H_h, H_z, h_min, h_max, qt_min,
         qt_max, min_distance_to_ground.
+    group : str or None
+        If None, write to root of a new file (current behavior).
+        If provided, open existing file in append mode and create a
+        NetCDF4 group with this name.
 
     Returns
     -------
@@ -39,9 +44,15 @@ def write_netcdf(
     """
     output_path = Path(output_path)
     nx_final, ny_final, nz_final = h_3d.shape
-    print(f"Writing NetCDF to {output_path} ...")
 
-    ds = netCDF4.Dataset(output_path, "w", format="NETCDF4")
+    if group is not None:
+        print(f"Writing NetCDF group '{group}' to {output_path} ...")
+        ds_root = netCDF4.Dataset(output_path, "a", format="NETCDF4")
+        ds = ds_root.createGroup(group)
+    else:
+        print(f"Writing NetCDF to {output_path} ...")
+        ds_root = netCDF4.Dataset(output_path, "w", format="NETCDF4")
+        ds = ds_root
 
     # Dimensions
     ds.createDimension("x", nx_final)
@@ -155,7 +166,23 @@ def write_netcdf(
     ds.qt_min = np.float32(p['qt_min'])
     ds.qt_max = np.float32(p['qt_max'])
     ds.min_distance_to_ground = np.int32(p['min_distance_to_ground'])
+    if 'turbulon_shape' in p:
+        ds.turbulon_shape = p['turbulon_shape']
+    if 'n_size_classes' in p:
+        ds.n_size_classes = np.int32(p['n_size_classes'])
+    if 'size_class_gap_factor' in p:
+        ds.size_class_gap_factor = np.float64(p['size_class_gap_factor'])
 
-    ds.close()
-    print(f"Written {output_path}")
+    # Refinement-specific attributes
+    for attr in ('parent_group', 'parent_x_slice', 'parent_y_slice',
+                 'parent_x_offset', 'parent_y_offset'):
+        if attr in p:
+            val = p[attr]
+            if isinstance(val, str):
+                ds.setncattr(attr, val)
+            else:
+                ds.setncattr(attr, np.array(val))
+
+    ds_root.close()
+    print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))
     return output_path
