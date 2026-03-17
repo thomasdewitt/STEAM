@@ -10,9 +10,15 @@ from .constants import (
     hurst_vertical_anisotropy as H_z,
 )
 from . import turbulons as _turbulons
-from .utils import convolve_periodic_xy_zeropad_z_oa
+from .utils import (
+    convolve_periodic_xy_zeropad_z,
+    convolve_periodic_xy_zeropad_z_ndimage,
+    convolve_periodic_xy_zeropad_z_oa,
+    convolve_fft_xy_oa_z,
+)
 from .output import write_netcdf
 
+CONVOLVE = convolve_periodic_xy_zeropad_z
 SUPPORT_FACTOR = 5
 
 
@@ -385,6 +391,10 @@ def cascade_loop(
     # Determine whether we have per-class seeds or a shared Generator
     use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
 
+    # Kernel is identical every iteration — hoist it out of the loop
+    kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
+                                support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
+
     for i in range(n_classes):
         k = grids['k'][i]
         nx_k = int(grids['nx'][i])
@@ -412,27 +422,6 @@ def cascade_loop(
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
         qt_mean_1d = np.interp(z_k, z_profile, qt_profile).astype(np.float32)
-        h_mean = np.broadcast_to(h_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
-        qt_mean = np.broadcast_to(qt_mean_1d[np.newaxis, np.newaxis, :], (nx_k, ny_k, nz_k))
-
-        running_sum_h = h_mean + h_perturbation
-        running_sum_qt = qt_mean + qt_perturbation
-
-        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G_* factors...', end='\r')
-
-        # Soft-clamp: parabolic weight 
-        u_h = np.clip((running_sum_h - h_min) / (h_max - h_min), 0, 1)
-        soft_clip_h = u_h * (1 - u_h)
-        u_qt = np.clip((running_sum_qt - qt_min) / (qt_max - qt_min), 0, 1)
-        soft_clip_qt = u_qt * (1 - u_qt)
-
-        # Gradient magnitude × soft clip, normalized per z-level (Apxeq:amplitude propto gradient normalized)
-        G_h = _gradient_magnitude(running_sum_h, dx_k, dy_k, z_k) * soft_clip_h
-        G_qt = _gradient_magnitude(running_sum_qt, dx_k, dy_k, z_k) * soft_clip_qt
-        mean_h = G_h.mean(axis=(0, 1), keepdims=True)
-        G_h = G_h / np.where(mean_h > 0, mean_h, 1.0)
-        mean_qt = G_qt.mean(axis=(0, 1), keepdims=True)
-        G_qt = G_qt / np.where(mean_qt > 0, mean_qt, 1.0)
 
         # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         if use_per_class_seeds:
@@ -443,18 +432,36 @@ def cascade_loop(
         S_k[:, :, :n_zero] = 0
         S_k[:, :, -n_zero:] = 0
 
-        # Build compact 3D turbulon kernel (Apxeq:turbulon shape)
-        kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
-                                    support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
-        
-        # Final turbulon amplitudes
-        A_h = S_k * C_h_k[i] * G_h
-        A_qt = S_k * C_qt_k[i] * G_qt
+        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
-        # Convolve and accumulate (periodic x,y; zero-padded z)
-        print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing convolutions...', end='\r')
-        h_perturbation += convolve_periodic_xy_zeropad_z_oa(A_h, kernel)
-        qt_perturbation += convolve_periodic_xy_zeropad_z_oa(A_qt, kernel)
+        # Process h and qt sequentially to halve peak memory
+        for (perturbation_field, mean_1d, var_min, var_max, C_k_i) in (
+            (h_perturbation,  h_mean_1d,  h_min,  h_max,  C_h_k[i]),
+            (qt_perturbation, qt_mean_1d, qt_min, qt_max, C_qt_k[i]),
+        ):
+            running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
+
+            # Soft-clamp: parabolic weight
+            u = np.clip((running_sum - var_min) / (var_max - var_min), 0, 1)
+            soft_clip = u * (1 - u)
+            del u
+
+            # Gradient magnitude × soft clip, normalized per z-level (Apxeq:amplitude propto gradient normalized)
+            G = _gradient_magnitude(running_sum, dx_k, dy_k, z_k)
+            del running_sum
+            G *= soft_clip
+            del soft_clip
+            mean_G = G.mean(axis=(0, 1), keepdims=True)
+            G /= np.where(mean_G > 0, mean_G, np.float32(1.0))
+            del mean_G
+
+            # Amplitude: reuse G buffer (G becomes A)
+            G *= C_k_i          # 1D broadcast, in-place
+            G *= S_k            # in-place; G is now A
+
+            # Convolve and accumulate (periodic x,y; zero-padded z)
+            perturbation_field += CONVOLVE(G, kernel)
+            del G
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -743,14 +750,35 @@ def _gradient_magnitude(field_3d, dx, dy, z_coords):
     Uses periodic central differences for x,y and np.gradient for z.
     z_coords may be a scalar spacing (uniform grid) or a 1D array of
     z-positions (non-uniform grid); np.gradient handles both.
+
+    Memory-efficient: accumulates squared gradients in-place into a single
+    result buffer, using ~3 arrays peak instead of 6-7.
     """
-    grad_x = (np.roll(field_3d, -1, axis=0) - np.roll(field_3d, 1, axis=0)) / (2 * dx)
-    grad_y = (np.roll(field_3d, -1, axis=1) - np.roll(field_3d, 1, axis=1)) / (2 * dy)
-    grad_z = np.gradient(field_3d, z_coords, axis=2)
+    dx_f32 = np.float32(2 * dx)
+    dy_f32 = np.float32(2 * dy)
 
-    magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+    # X: periodic central difference → result holds grad_x**2
+    result = np.roll(field_3d, -1, axis=0)
+    result -= np.roll(field_3d, 1, axis=0)
+    result /= dx_f32
+    result **= 2
 
-    return magnitude
+    # Y: accumulate grad_y**2 into result
+    grad = np.roll(field_3d, -1, axis=1)
+    grad -= np.roll(field_3d, 1, axis=1)
+    grad /= dy_f32
+    grad **= 2
+    result += grad
+    del grad
+
+    # Z: accumulate grad_z**2 into result
+    grad_z = np.gradient(field_3d, z_coords.astype(np.float32) if hasattr(z_coords, 'astype') else z_coords, axis=2)
+    grad_z **= 2
+    result += grad_z
+    del grad_z
+
+    np.sqrt(result, out=result)
+    return result
 
 
 def refine(

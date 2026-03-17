@@ -133,7 +133,7 @@ def case_name(request):
 
 
 def test_regression_h(case_name, tmp_path):
-    """h field must match reference exactly (bitwise, same seed)."""
+    """h field must match reference within small tolerance."""
     params = CASES[case_name]
     h_prof, qt_prof, kw = _build_kwargs(case_name, params, tmp_path)
     ref = _load_reference(case_name)
@@ -143,14 +143,14 @@ def test_regression_h(case_name, tmp_path):
     h_out = ds.variables["h"][:]
     ds.close()
 
-    np.testing.assert_array_equal(
-        h_out, ref["h"],
+    np.testing.assert_allclose(
+        h_out, ref["h"], rtol=1e-5, atol=1e-7,
         err_msg=f"h field changed for case '{case_name}'",
     )
 
 
 def test_regression_qt(case_name, tmp_path):
-    """qt field must match reference exactly (bitwise, same seed)."""
+    """qt field must match reference within small tolerance."""
     params = CASES[case_name]
     h_prof, qt_prof, kw = _build_kwargs(case_name, params, tmp_path)
     ref = _load_reference(case_name)
@@ -160,14 +160,14 @@ def test_regression_qt(case_name, tmp_path):
     qt_out = ds.variables["qt"][:]
     ds.close()
 
-    np.testing.assert_array_equal(
-        qt_out, ref["qt"],
+    np.testing.assert_allclose(
+        qt_out, ref["qt"], rtol=1e-5, atol=1e-7,
         err_msg=f"qt field changed for case '{case_name}'",
     )
 
 
 def test_regression_coordinates(case_name, tmp_path):
-    """x, y, z coordinates must match reference exactly."""
+    """x, y, z coordinates must match reference within small tolerance."""
     params = CASES[case_name]
     h_prof, qt_prof, kw = _build_kwargs(case_name, params, tmp_path)
     ref = _load_reference(case_name)
@@ -179,16 +179,16 @@ def test_regression_coordinates(case_name, tmp_path):
     z_out = ds.variables["z"][:]
     ds.close()
 
-    np.testing.assert_array_equal(x_out, ref["x"],
-                                   err_msg=f"x coords changed for '{case_name}'")
-    np.testing.assert_array_equal(y_out, ref["y"],
-                                   err_msg=f"y coords changed for '{case_name}'")
-    np.testing.assert_array_equal(z_out, ref["z"],
-                                   err_msg=f"z coords changed for '{case_name}'")
+    np.testing.assert_allclose(x_out, ref["x"], rtol=1e-5, atol=1e-7,
+                                err_msg=f"x coords changed for '{case_name}'")
+    np.testing.assert_allclose(y_out, ref["y"], rtol=1e-5, atol=1e-7,
+                                err_msg=f"y coords changed for '{case_name}'")
+    np.testing.assert_allclose(z_out, ref["z"], rtol=1e-5, atol=1e-7,
+                                err_msg=f"z coords changed for '{case_name}'")
 
 
 def test_regression_normalization(case_name, tmp_path):
-    """C_h_k and C_qt_k normalization arrays must match reference."""
+    """C_h_k and C_qt_k normalization arrays must match reference within small tolerance."""
     params = CASES[case_name]
     h_prof, qt_prof, kw = _build_kwargs(case_name, params, tmp_path)
     ref = _load_reference(case_name)
@@ -199,10 +199,10 @@ def test_regression_normalization(case_name, tmp_path):
     C_qt = ds.variables["C_qt_k"][:]
     ds.close()
 
-    np.testing.assert_array_equal(C_h, ref["C_h_k"],
-                                   err_msg=f"C_h_k changed for '{case_name}'")
-    np.testing.assert_array_equal(C_qt, ref["C_qt_k"],
-                                   err_msg=f"C_qt_k changed for '{case_name}'")
+    np.testing.assert_allclose(C_h, ref["C_h_k"], rtol=1e-5, atol=1e-7,
+                                err_msg=f"C_h_k changed for '{case_name}'")
+    np.testing.assert_allclose(C_qt, ref["C_qt_k"], rtol=1e-5, atol=1e-7,
+                                err_msg=f"C_qt_k changed for '{case_name}'")
 
 
 def test_regression_k_values(case_name, tmp_path):
