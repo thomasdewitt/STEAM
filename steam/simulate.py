@@ -18,7 +18,7 @@ from .utils import (
 )
 from .output import write_netcdf
 
-CONVOLVE = convolve_periodic_xy_zeropad_z
+CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
 
 
