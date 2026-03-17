@@ -104,10 +104,10 @@ def _make_kernel(kernel_shape: tuple[int, int, int], seed: int) -> Array3D:
 
 def _method_table() -> list[tuple[str, Callable[[Array3D, Array3D], Array3D]]]:
     return [
-        ("numba_direct", convolve_periodic_xy_zeropad_z),
-        ("ndimage_wrapxy_zeropadz", convolve_periodic_xy_zeropad_z_ndimage),
-        ("scipy_wrapxy_zeropadz", convolve_periodic_xy_zeropad_z_oa),
-        ("fft_xy_oa_z", convolve_fft_xy_oa_z),
+        ("convolve_periodic_xy_zeropad_z", convolve_periodic_xy_zeropad_z),
+        ("convolve_periodic_xy_zeropad_z_ndimage", convolve_periodic_xy_zeropad_z_ndimage),
+        ("convolve_periodic_xy_zeropad_z_oa", convolve_periodic_xy_zeropad_z_oa),
+        ("convolve_fft_xy_oa_z", convolve_fft_xy_oa_z),
     ]
 
 
@@ -168,7 +168,7 @@ def main() -> None:
         default="3x3x3,7x7x7,15x15x9,31x31x15",
         help="Comma-separated kernel shapes as kxXkyXkz",
     )
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
         "--check",
@@ -222,7 +222,7 @@ def main() -> None:
         baseline: Array3D | None = None
         for name, fn in methods:
             times, out = _time_method(fn, field, kernel, repeats=args.repeats)
-            line = f"  {name:20s} {_fmt_stats(times)}"
+            line = f"  {name:40s} {_fmt_stats(times)}"
             if args.memory:
                 line += f"  peakRSS={_fmt_mem(peak_rss_by_method[name])}"
             if baseline is None:
