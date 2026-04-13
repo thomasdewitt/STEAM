@@ -225,3 +225,73 @@ class TestRefine:
         assert "r0" in ref_group.groups
         assert "r1" in ref_group.groups
         ds.close()
+
+    def test_refine_z_limited(self, parent_nc):
+        """Refinement with z_min/z_max produces a vertically limited inset."""
+        ds = netCDF4.Dataset(parent_nc, "r")
+        parent_nx = len(ds.dimensions["x"])
+        parent_ny = len(ds.dimensions["y"])
+        parent_domain_height = float(ds.domain_height)
+        k_finest = float(ds.variables["k_values"][:][-1])
+        parent_z = ds.variables["z"][:]
+        ds.close()
+
+        half_x = parent_nx // 2
+        half_y = parent_ny // 2
+        new_dx = k_finest / 4
+        new_dy = k_finest / 4
+
+        # Take the middle third of the domain height
+        z_min = parent_domain_height / 3
+        z_max = 2 * parent_domain_height / 3
+        inset_height = z_max - z_min
+
+        refine(
+            parent_nc,
+            x_start=0, x_stop=half_x,
+            y_start=0, y_stop=half_y,
+            dx=new_dx, dy=new_dy,
+            z_min=z_min, z_max=z_max,
+            seed=99,
+        )
+
+        ds = netCDF4.Dataset(parent_nc, "r")
+        r0 = ds.groups["refinements"].groups["r0"]
+
+        # domain_height should be the inset span, not the full height
+        assert abs(float(r0.domain_height) - inset_height) < 1.0
+        assert abs(float(r0.domain_z_min) - z_min) < 1.0
+
+        # z-coordinates should lie within [z_min, z_max]
+        z_refined = r0.variables["z"][:]
+        assert z_refined[0] >= z_min - 1.0
+        assert z_refined[-1] <= z_max + 1.0
+
+        # Fields should be finite
+        h_refined = r0.variables["h"][:]
+        qt_refined = r0.variables["qt"][:]
+        assert np.all(np.isfinite(h_refined))
+        assert np.all(np.isfinite(qt_refined))
+
+        ds.close()
+
+    def test_refine_z_limited_bad_range_raises(self, parent_nc):
+        """z_min/z_max outside parent range raises ValueError."""
+        ds = netCDF4.Dataset(parent_nc, "r")
+        parent_nx = len(ds.dimensions["x"])
+        parent_ny = len(ds.dimensions["y"])
+        parent_domain_height = float(ds.domain_height)
+        k_finest = float(ds.variables["k_values"][:][-1])
+        ds.close()
+
+        half_x = parent_nx // 2
+        half_y = parent_ny // 2
+        new_dx = k_finest / 4
+        new_dy = k_finest / 4
+
+        with pytest.raises(ValueError, match="exceeds parent"):
+            refine(
+                parent_nc, 0, half_x, 0, half_y, new_dx, new_dy,
+                z_min=0, z_max=parent_domain_height + 500,
+                seed=99,
+            )

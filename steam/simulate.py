@@ -475,16 +475,16 @@ def cascade_loop(
 
 
 def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_factors,
-                       spheroscale_profile, z_profile):
+                       spheroscale_profile, z_profile, z_min=0.0):
     """Precompute grid dimensions and z-coordinate arrays for all scale classes.
 
     Each scale class uses an altitude-dependent dz:
       dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = ls(z) * (k/ls(z))^H_z
-    Cells are accumulated from z=0 until domain_height is reached, then all
-    dz values are scaled uniformly so their sum equals domain_height exactly.
-    In x and y, target spacings are k/(2*s_x) and k/(2*s_y), but the stored
-    dx, dy are the actual spacings implied by the rounded integer grid counts
-    so every class spans the domain exactly.
+    Cells are accumulated from z_min until z_min + domain_height is reached,
+    then all dz values are scaled uniformly so their sum equals domain_height
+    exactly.  In x and y, target spacings are k/(2*s_x) and k/(2*s_y), but
+    the stored dx, dy are the actual spacings implied by the rounded integer
+    grid counts so every class spans the domain exactly.
 
     If spheroscale_profile is scalar, it is promoted to a uniform array.
 
@@ -497,6 +497,9 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         Height-dependent spheroscale [m]. Scalar is auto-promoted.
     z_profile : ndarray, shape (n_profile,)
         Heights at which spheroscale_profile is given.
+    z_min : float
+        Bottom altitude of the domain [m].  Default 0.0.
+        The domain spans [z_min, z_min + domain_height].
 
     Returns
     -------
@@ -531,13 +534,14 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         dx_arr[i] = domain_x / nx_arr[i]
         dy_arr[i] = domain_y / ny_arr[i]
 
-        # Integrate dz(z) = k_z(z)/(2*s_z) from z=0
+        # Integrate dz(z) = k_z(z)/(2*s_z) from z_min
         def k_z_local(z):
             ls = np.interp(z, z_profile, spheroscale_profile)
             return ls * (k / ls) ** H_z
 
-        z_edges = [0.0]
-        while z_edges[-1] < domain_height:
+        z_top = z_min + domain_height
+        z_edges = [z_min]
+        while z_edges[-1] < z_top:
             dz_here = k_z_local(z_edges[-1]) / (2 * s_z)
             z_edges.append(z_edges[-1] + dz_here)
 
@@ -545,7 +549,7 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         dz_raw = np.diff(z_edges)
         scale_factor = domain_height / np.sum(dz_raw)
         dz_k_arr = dz_raw * scale_factor
-        z_k_arr = np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
+        z_k_arr = z_min + np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
         dz_k = float(np.mean(dz_k_arr))
 
         nz_arr[i] = nz_k
@@ -792,6 +796,8 @@ def refine(
     seed=None,
     sparsity_factors=None,
     turbulon_shape=None,
+    z_min=None,
+    z_max=None,
 ):
     """Refine a subdomain of a parent simulation to finer resolution.
 
@@ -825,6 +831,11 @@ def refine(
         If None, inherit from parent.
     turbulon_shape : str or None
         If None, inherit from parent.
+    z_min : float or None
+        Bottom altitude of the inset [m].  If None, inherit from parent
+        (0 for a root simulation).
+    z_max : float or None
+        Top altitude of the inset [m].  If None, use parent's top altitude.
 
     Returns
     -------
@@ -877,6 +888,22 @@ def refine(
 
     ds.close()
 
+    # Resolve vertical extent of the inset
+    parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
+    parent_z_max = parent_z_min + domain_height
+    if z_min is None:
+        z_min = parent_z_min
+    if z_max is None:
+        z_max = parent_z_max
+    if z_min < parent_z_min - 1e-6 or z_max > parent_z_max + 1e-6:
+        raise ValueError(
+            f"Requested altitude range [{z_min}, {z_max}] m exceeds parent "
+            f"range [{parent_z_min}, {parent_z_max}] m"
+        )
+    inset_height = z_max - z_min
+    if inset_height <= 0:
+        raise ValueError(f"z_max ({z_max}) must be greater than z_min ({z_min})")
+
     # New outer scale = parent's finest k
     new_outer_scale = float(k_values_parent[-1])
 
@@ -890,12 +917,21 @@ def refine(
     x_indices = np.arange(x_start - pad_cells, x_stop + pad_cells) % parent_nx
     y_indices = np.arange(y_start - pad_cells, y_stop + pad_cells) % parent_ny
 
-    h_pad = h_3d[np.ix_(x_indices, y_indices)]
-    qt_pad = qt_3d[np.ix_(x_indices, y_indices)]
+    # Vertical slice: find parent z-indices within [z_min, z_max)
+    z_indices = np.where((z_coords >= z_min - 1e-6) & (z_coords < z_max + 1e-6))[0]
+    if len(z_indices) == 0:
+        raise ValueError(
+            f"No parent z-levels found in [{z_min}, {z_max}] m. "
+            f"Parent z ranges from {z_coords[0]:.1f} to {z_coords[-1]:.1f} m"
+        )
+    z_coords_slice = z_coords[z_indices]
+
+    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
+    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
 
     # Compute perturbation: subtract mean profile
-    h_mean_1d = np.interp(z_coords, z_profile, h_profile).astype(np.float32)
-    qt_mean_1d = np.interp(z_coords, z_profile, qt_profile).astype(np.float32)
+    h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
+    qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
     h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
     qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
 
@@ -945,8 +981,8 @@ def refine(
 
     # Compute grids for padded domain
     grids = _compute_all_grids(
-        k_values, padded_extent_x, padded_extent_y, domain_height,
-        sparsity_factors, spheroscale_profile, z_profile,
+        k_values, padded_extent_x, padded_extent_y, inset_height,
+        sparsity_factors, spheroscale_profile, z_profile, z_min=z_min,
     )
 
     # Interpolate profiles to finest grid for normalization
@@ -1042,7 +1078,8 @@ def refine(
         'dz': final_grid['dz'].astype(np.float32),
         'outer_scale': new_outer_scale,
         'spheroscale': spheroscale_final,
-        'domain_height': domain_height,
+        'domain_height': inset_height,
+        'domain_z_min': z_min,
         'profile_dz': profile_dz,
         'sparsity_factors': sparsity_factors,
         'n_size_classes': n_classes,

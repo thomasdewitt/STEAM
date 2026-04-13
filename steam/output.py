@@ -152,6 +152,8 @@ def write_netcdf(
     ls_var.units = "m"
     ls_var.long_name = "spheroscale profile"
     ds.domain_height = np.float32(p['domain_height'])
+    if 'domain_z_min' in p:
+        ds.domain_z_min = np.float32(p['domain_z_min'])
     ds.profile_dz = np.float32(p['profile_dz'])
     ds.sparsity_factors = np.array(p['sparsity_factors'], dtype=np.int32)
     ds.surface_pressure = np.float32(p['surface_pressure'])
