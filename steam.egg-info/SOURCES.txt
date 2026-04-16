@@ -13,4 +13,7 @@ steam.egg-info/requires.txt
 steam.egg-info/top_level.txt
 tests/test_convolution.py
 tests/test_kernel.py
+tests/test_refine.py
+tests/test_regression.py
 tests/test_sanity.py
+tests/test_size_classes.py
