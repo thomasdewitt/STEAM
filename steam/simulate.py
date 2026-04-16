@@ -337,7 +337,9 @@ def cascade_loop(
     seeds_or_rng,
     h_perturbation=None,
     qt_perturbation=None,
-    turbulon_shape = 'mexican_hat'
+    turbulon_shape='mexican_hat',
+    zero_bottom=True,
+    zero_top=True,
 ):
     """Run the multi-scale turbulon cascade over all scale classes.
 
@@ -354,7 +356,10 @@ def cascade_loop(
     grids : dict
         Output of _compute_all_grids. Contains 1D arrays k, k_z, nx, ny, nz,
         dx, dy, dz (mean, per class) and lists z_arrays, dz_arrays (one 1D
-        array per scale class, each of length nz for that class).
+        array per scale class, each of length nz for that class). Also
+        padded_extent_x, padded_extent_y, padded_height, z_min_per_class
+        (per-class physical extents, used to shrink the grid between
+        classes when pad shrinks with k).
     C_h_k, C_qt_k : list of 1D ndarray
         Scale-dependent amplitudes, one entry per scale class. Each is a
         1D array of length nz_k that broadcasts over (nx_k, ny_k, nz_k).
@@ -375,6 +380,13 @@ def cascade_loop(
     h_perturbation, qt_perturbation : ndarray or None
         Existing perturbation fields for nested simulations. If None,
         initialized to zero at the first scale class resolution.
+    zero_bottom, zero_top : bool
+        Whether to zero the bottom/top n_zero cells of the sparse noise
+        at each class. True when the z-boundary corresponds to ground or
+        the top of a full simulation domain; False for elevated insets,
+        where turbulon centers may legitimately exist below/above the
+        inset's inner z range (in the z-pad) and contribute via their
+        kernel tails.
 
     Returns
     -------
@@ -395,6 +407,21 @@ def cascade_loop(
     kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                 support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
 
+    # Per-class padded physical extents — used to crop between classes
+    # when the padded extent shrinks as k gets smaller.
+    padded_extent_x = grids['padded_extent_x']
+    padded_extent_y = grids['padded_extent_y']
+    padded_height = grids['padded_height']
+    z_min_per_class = grids['z_min_per_class']
+
+    prev_dx = None
+    prev_dy = None
+    prev_dz_mean = None
+    prev_padded_extent_x = None
+    prev_padded_extent_y = None
+    prev_padded_height = None
+    prev_z_min = None
+
     for i in range(n_classes):
         k = grids['k'][i]
         nx_k = int(grids['nx'][i])
@@ -402,7 +429,12 @@ def cascade_loop(
         nz_k = int(grids['nz'][i])
         dx_k = float(grids['dx'][i])
         dy_k = float(grids['dy'][i])
+        dz_k_mean = float(grids['dz'][i])
         z_k = grids['z_arrays'][i]   # 1D array of z-coordinates (left-edge of each cell)
+        padded_x_i = float(padded_extent_x[i])
+        padded_y_i = float(padded_extent_y[i])
+        padded_h_i = float(padded_height[i])
+        z_min_i = float(z_min_per_class[i])
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           interpolating...', end='\r')
 
@@ -410,14 +442,46 @@ def cascade_loop(
         if h_perturbation is None:
             h_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
             qt_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
-        elif h_perturbation.shape != (nx_k, ny_k, nz_k):
-            zoom_factors = (
-                nx_k / h_perturbation.shape[0],
-                ny_k / h_perturbation.shape[1],
-                nz_k / h_perturbation.shape[2],
-            )
-            h_perturbation = zoom(h_perturbation, zoom_factors, order=1).astype(np.float32)
-            qt_perturbation = zoom(qt_perturbation, zoom_factors, order=1).astype(np.float32)
+        else:
+            # Crop-before-zoom when padded extent shrinks between classes.
+            # Cropping happens in physical units at the previous class's
+            # resolution, centered on the inner region.
+            if prev_padded_extent_x is not None:
+                eps = 1e-9
+                cur_nx, cur_ny, cur_nz = h_perturbation.shape
+                if padded_x_i < prev_padded_extent_x - eps:
+                    keep = int(round(padded_x_i / prev_dx))
+                    keep = max(1, min(cur_nx, keep))
+                    start = (cur_nx - keep) // 2
+                    h_perturbation = h_perturbation[start:start+keep, :, :]
+                    qt_perturbation = qt_perturbation[start:start+keep, :, :]
+                if padded_y_i < prev_padded_extent_y - eps:
+                    cur_ny = h_perturbation.shape[1]
+                    keep = int(round(padded_y_i / prev_dy))
+                    keep = max(1, min(cur_ny, keep))
+                    start = (cur_ny - keep) // 2
+                    h_perturbation = h_perturbation[:, start:start+keep, :]
+                    qt_perturbation = qt_perturbation[:, start:start+keep, :]
+                if padded_h_i < prev_padded_height - eps:
+                    cur_nz = h_perturbation.shape[2]
+                    keep = int(round(padded_h_i / prev_dz_mean))
+                    keep = max(1, min(cur_nz, keep))
+                    # Offset in z is relative to prev class's bottom (z_min_per_class[i-1]).
+                    # New bottom is z_min_i; start index in cells:
+                    z_offset = z_min_i - prev_z_min
+                    start = int(round(z_offset / prev_dz_mean))
+                    start = max(0, min(cur_nz - keep, start))
+                    h_perturbation = h_perturbation[:, :, start:start+keep]
+                    qt_perturbation = qt_perturbation[:, :, start:start+keep]
+
+            if h_perturbation.shape != (nx_k, ny_k, nz_k):
+                zoom_factors = (
+                    nx_k / h_perturbation.shape[0],
+                    ny_k / h_perturbation.shape[1],
+                    nz_k / h_perturbation.shape[2],
+                )
+                h_perturbation = zoom(h_perturbation, zoom_factors, order=1).astype(np.float32)
+                qt_perturbation = zoom(qt_perturbation, zoom_factors, order=1).astype(np.float32)
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
@@ -429,8 +493,10 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
         S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
-        S_k[:, :, :n_zero] = 0
-        S_k[:, :, -n_zero:] = 0
+        if zero_bottom and n_zero > 0:
+            S_k[:, :, :n_zero] = 0
+        if zero_top and n_zero > 0:
+            S_k[:, :, -n_zero:] = 0
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -465,6 +531,15 @@ def cascade_loop(
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
+        # Record this class's extent so the next iteration can crop
+        prev_dx = dx_k
+        prev_dy = dy_k
+        prev_dz_mean = dz_k_mean
+        prev_padded_extent_x = padded_x_i
+        prev_padded_extent_y = padded_y_i
+        prev_padded_height = padded_h_i
+        prev_z_min = z_min_i
+
     final_grid_info = {
         'nx': nx_k, 'ny': ny_k, 'nz': nz_k,
         'dx': dx_k, 'dy': dy_k,
@@ -474,32 +549,48 @@ def cascade_loop(
     return h_perturbation, qt_perturbation, final_grid_info
 
 
-def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_factors,
-                       spheroscale_profile, z_profile, z_min=0.0):
+def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
+                       sparsity_factors, spheroscale_profile, z_profile, z_min=0.0,
+                       pad_x_per_class=None, pad_y_per_class=None,
+                       pad_z_below_per_class=None, pad_z_above_per_class=None):
     """Precompute grid dimensions and z-coordinate arrays for all scale classes.
+
+    Each scale class has its own padded extent in x, y, and z. The inner
+    region (of physical size inner_extent_x × inner_extent_y × inner_height
+    starting at z_min) is extended by a per-class physical pad on each side.
+    Pad = 0 means no pad (use for periodic/spanning dims or ground/top in z
+    where the parent is already naturally zero-padded).
 
     Each scale class uses an altitude-dependent dz:
       dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = ls(z) * (k/ls(z))^H_z
-    Cells are accumulated from z_min until z_min + domain_height is reached,
-    then all dz values are scaled uniformly so their sum equals domain_height
-    exactly.  In x and y, target spacings are k/(2*s_x) and k/(2*s_y), but
-    the stored dx, dy are the actual spacings implied by the rounded integer
-    grid counts so every class spans the domain exactly.
+    Cells are accumulated from (z_min - pad_z_below) until
+    (z_min + inner_height + pad_z_above) is reached, then all dz values
+    are scaled uniformly so their sum equals the padded z-extent exactly.
+
+    In x and y, target spacings are k/(2*s_x) and k/(2*s_y), but the stored
+    dx, dy are the actual spacings implied by the rounded integer grid
+    counts so every class spans the padded extent exactly.
 
     If spheroscale_profile is scalar, it is promoted to a uniform array.
 
     Parameters
     ----------
     k_values : ndarray, shape (n_classes,)
-    domain_x, domain_y, domain_height : float
+    inner_extent_x, inner_extent_y, inner_height : float
+        Physical size of the inner (un-padded) region [m].
     sparsity_factors : tuple of 3 ints
     spheroscale_profile : ndarray, shape (n_profile,)
         Height-dependent spheroscale [m]. Scalar is auto-promoted.
     z_profile : ndarray, shape (n_profile,)
         Heights at which spheroscale_profile is given.
     z_min : float
-        Bottom altitude of the domain [m].  Default 0.0.
-        The domain spans [z_min, z_min + domain_height].
+        Bottom altitude of the inner region [m]. Default 0.0.
+    pad_x_per_class, pad_y_per_class : ndarray or None
+        Per-class physical pad on each side [m]. Shape (n_classes,).
+        None means zero pad at all classes.
+    pad_z_below_per_class, pad_z_above_per_class : ndarray or None
+        Per-class physical pad below z_min / above z_min+inner_height [m].
+        Shape (n_classes,). None means zero pad at all classes.
 
     Returns
     -------
@@ -510,6 +601,12 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         dz : 1D float array, shape (n_classes,) — mean cell height per class
         z_arrays : list of n_classes 1D float64 arrays — left-edge z-coords
         dz_arrays : list of n_classes 1D float64 arrays — cell heights
+        padded_extent_x, padded_extent_y : 1D float arrays, shape (n_classes,)
+            Physical x/y extent of each class (inner + 2*pad).
+        padded_height : 1D float array, shape (n_classes,)
+            Physical z-extent of each class (inner_height + pad_below + pad_above).
+        z_min_per_class : 1D float array, shape (n_classes,)
+            Bottom z-edge of each class (z_min - pad_z_below).
     """
     spheroscale_profile = np.asarray(spheroscale_profile, dtype=np.float64)
     if spheroscale_profile.ndim == 0:
@@ -517,43 +614,63 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
 
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(k_values)
+
+    zeros = np.zeros(n_classes, dtype=np.float64)
+    pad_x = zeros if pad_x_per_class is None else np.asarray(pad_x_per_class, dtype=np.float64)
+    pad_y = zeros if pad_y_per_class is None else np.asarray(pad_y_per_class, dtype=np.float64)
+    pad_zb = zeros if pad_z_below_per_class is None else np.asarray(pad_z_below_per_class, dtype=np.float64)
+    pad_za = zeros if pad_z_above_per_class is None else np.asarray(pad_z_above_per_class, dtype=np.float64)
+
     nx_arr = np.empty(n_classes, dtype=np.int64)
     ny_arr = np.empty(n_classes, dtype=np.int64)
     nz_arr = np.empty(n_classes, dtype=np.int64)
     dx_arr = np.empty(n_classes, dtype=np.float64)
     dy_arr = np.empty(n_classes, dtype=np.float64)
     dz_arr = np.empty(n_classes, dtype=np.float64)
+    padded_x_arr = np.empty(n_classes, dtype=np.float64)
+    padded_y_arr = np.empty(n_classes, dtype=np.float64)
+    padded_h_arr = np.empty(n_classes, dtype=np.float64)
+    z_min_arr = np.empty(n_classes, dtype=np.float64)
     z_arrays = []
     dz_arrays = []
 
     for i, k in enumerate(k_values):
+        padded_extent_x = inner_extent_x + 2 * pad_x[i]
+        padded_extent_y = inner_extent_y + 2 * pad_y[i]
+        padded_height = inner_height + pad_zb[i] + pad_za[i]
+        z_min_i = z_min - pad_zb[i]
+
         target_dx_k = k / (2 * s_x)
         target_dy_k = k / (2 * s_y)
-        nx_arr[i] = int(round(domain_x / target_dx_k))
-        ny_arr[i] = int(round(domain_y / target_dy_k))
-        dx_arr[i] = domain_x / nx_arr[i]
-        dy_arr[i] = domain_y / ny_arr[i]
+        nx_arr[i] = int(round(padded_extent_x / target_dx_k))
+        ny_arr[i] = int(round(padded_extent_y / target_dy_k))
+        dx_arr[i] = padded_extent_x / nx_arr[i]
+        dy_arr[i] = padded_extent_y / ny_arr[i]
 
-        # Integrate dz(z) = k_z(z)/(2*s_z) from z_min
+        # Integrate dz(z) = k_z(z)/(2*s_z) from z_min_i
         def k_z_local(z):
             ls = np.interp(z, z_profile, spheroscale_profile)
             return ls * (k / ls) ** H_z
 
-        z_top = z_min + domain_height
-        z_edges = [z_min]
+        z_top = z_min_i + padded_height
+        z_edges = [z_min_i]
         while z_edges[-1] < z_top:
             dz_here = k_z_local(z_edges[-1]) / (2 * s_z)
             z_edges.append(z_edges[-1] + dz_here)
 
         nz_k = len(z_edges) - 1
         dz_raw = np.diff(z_edges)
-        scale_factor = domain_height / np.sum(dz_raw)
+        scale_factor = padded_height / np.sum(dz_raw)
         dz_k_arr = dz_raw * scale_factor
-        z_k_arr = z_min + np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
+        z_k_arr = z_min_i + np.concatenate([[0.0], np.cumsum(dz_k_arr[:-1])])
         dz_k = float(np.mean(dz_k_arr))
 
         nz_arr[i] = nz_k
         dz_arr[i] = dz_k
+        padded_x_arr[i] = padded_extent_x
+        padded_y_arr[i] = padded_extent_y
+        padded_h_arr[i] = padded_height
+        z_min_arr[i] = z_min_i
         z_arrays.append(z_k_arr)
         dz_arrays.append(dz_k_arr)
 
@@ -567,6 +684,10 @@ def _compute_all_grids(k_values, domain_x, domain_y, domain_height, sparsity_fac
         'dz': dz_arr,
         'z_arrays': z_arrays,
         'dz_arrays': dz_arrays,
+        'padded_extent_x': padded_x_arr,
+        'padded_extent_y': padded_y_arr,
+        'padded_height': padded_h_arr,
+        'z_min_per_class': z_min_arr,
     }
 
 
@@ -876,6 +997,8 @@ def refine(
     if turbulon_shape is None:
         turbulon_shape = grp.turbulon_shape if hasattr(grp, 'turbulon_shape') else 'mexican_hat'
 
+    parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
+
     # Determine existing refinement groups for auto-naming
     if output_group is None:
         existing = []
@@ -889,7 +1012,6 @@ def refine(
     ds.close()
 
     # Resolve vertical extent of the inset
-    parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
     parent_z_max = parent_z_min + domain_height
     if z_min is None:
         z_min = parent_z_min
@@ -907,53 +1029,8 @@ def refine(
     # New outer scale = parent's finest k
     new_outer_scale = float(k_values_parent[-1])
 
-    # Pad width: SUPPORT_FACTOR * new_outer_scale / parent_dx grid cells
-    pad_cells = int(math.ceil(SUPPORT_FACTOR * new_outer_scale / parent_dx))
-
     parent_nx = h_3d.shape[0]
     parent_ny = h_3d.shape[1]
-
-    # Extract padded subdomain using periodic wrapping
-    x_indices = np.arange(x_start - pad_cells, x_stop + pad_cells) % parent_nx
-    y_indices = np.arange(y_start - pad_cells, y_stop + pad_cells) % parent_ny
-
-    # Vertical slice: find parent z-indices within [z_min, z_max)
-    z_indices = np.where((z_coords >= z_min - 1e-6) & (z_coords < z_max + 1e-6))[0]
-    if len(z_indices) == 0:
-        raise ValueError(
-            f"No parent z-levels found in [{z_min}, {z_max}] m. "
-            f"Parent z ranges from {z_coords[0]:.1f} to {z_coords[-1]:.1f} m"
-        )
-    z_coords_slice = z_coords[z_indices]
-
-    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
-    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
-
-    # Compute perturbation: subtract mean profile
-    h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
-    qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
-    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
-    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
-
-    # Inner subdomain physical extent
-    inner_nx = x_stop - x_start
-    inner_ny = y_stop - y_start
-    inner_extent_x = inner_nx * parent_dx
-    inner_extent_y = inner_ny * parent_dy
-
-    # Validate: inner extent must be integer multiple of new_outer_scale
-    for extent, axis_name in ((inner_extent_x, 'x'), (inner_extent_y, 'y')):
-        n_tiles = extent / new_outer_scale
-        if abs(n_tiles - round(n_tiles)) > 1e-9:
-            raise ValueError(
-                f"Inner subdomain {axis_name}-extent ({extent} m) must be an "
-                f"integer multiple of new_outer_scale ({new_outer_scale} m), "
-                f"got ratio={n_tiles}"
-            )
-
-    # Padded domain extent
-    padded_extent_x = len(x_indices) * parent_dx
-    padded_extent_y = len(y_indices) * parent_dy
 
     # Compute new size classes from new_outer_scale down to 2*dx
     s_x, s_y, s_z = sparsity_factors
@@ -978,11 +1055,126 @@ def refine(
 
     # Interpolate spheroscale to profile z-grid
     spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
+    spheroscale_mean = float(np.mean(spheroscale_profile))
+    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
 
-    # Compute grids for padded domain
+    # Inner subdomain physical extent
+    inner_nx = x_stop - x_start
+    inner_ny = y_stop - y_start
+    inner_extent_x = inner_nx * parent_dx
+    inner_extent_y = inner_ny * parent_dy
+
+    # Validate: inner extent must be integer multiple of new_outer_scale
+    for extent, axis_name in ((inner_extent_x, 'x'), (inner_extent_y, 'y')):
+        n_tiles = extent / new_outer_scale
+        if abs(n_tiles - round(n_tiles)) > 1e-9:
+            raise ValueError(
+                f"Inner subdomain {axis_name}-extent ({extent} m) must be an "
+                f"integer multiple of new_outer_scale ({new_outer_scale} m), "
+                f"got ratio={n_tiles}"
+            )
+
+    # Detect spanning dims and parent periodicity.
+    # Root sim is periodic in x/y; any nested refinement is non-periodic.
+    spans_x = (inner_nx == parent_nx)
+    spans_y = (inner_ny == parent_ny)
+    parent_is_periodic = (parent_group == '/')
+
+    # Per-class physical pad on each side.
+    # Spanning dim → pad = 0 so FFT period = inner_extent = parent_extent.
+    # Non-spanning dim → pad = SUPPORT_FACTOR * k_i, shrinking with cascade.
+    if spans_x:
+        pad_x_per_class = np.zeros(n_classes)
+    else:
+        pad_x_per_class = SUPPORT_FACTOR * k_values
+    if spans_y:
+        pad_y_per_class = np.zeros(n_classes)
+    else:
+        pad_y_per_class = SUPPORT_FACTOR * k_values
+
+    # z pad: 0 at parent ground/top (parent was already zero-padded there);
+    # else SUPPORT_FACTOR * k_z_i, clipped to available parent room.
+    at_ground = (z_min <= parent_z_min + 1e-6)
+    at_top = (z_max >= parent_z_max - 1e-6)
+    if at_ground:
+        pad_z_below_per_class = np.zeros(n_classes)
+    else:
+        pad_z_below_per_class = np.minimum(
+            SUPPORT_FACTOR * k_z_values, z_min - parent_z_min
+        )
+    if at_top:
+        pad_z_above_per_class = np.zeros(n_classes)
+    else:
+        pad_z_above_per_class = np.minimum(
+            SUPPORT_FACTOR * k_z_values, parent_z_max - z_max
+        )
+
+    # Pad cell counts at parent resolution (used only for class-0 extraction
+    # from the parent's netCDF grid).
+    pad_cells_x = int(math.ceil(pad_x_per_class[0] / parent_dx)) if not spans_x else 0
+    pad_cells_y = int(math.ceil(pad_y_per_class[0] / parent_dy)) if not spans_y else 0
+
+    # Non-periodic parent: the extraction can't wrap, so the nest must leave
+    # enough room on each non-spanning side. Reject otherwise — (4)'s
+    # shrinking pad only relaxes cascade memory, not the class-0 extraction.
+    if not parent_is_periodic:
+        if not spans_x and (x_start < pad_cells_x or x_stop > parent_nx - pad_cells_x):
+            raise ValueError(
+                f"Refinement of non-periodic parent {parent_group!r} at x=[{x_start},{x_stop}] "
+                f"is too close to the parent's x boundary; need at least {pad_cells_x} cells "
+                f"of room on each side (parent_nx={parent_nx})"
+            )
+        if not spans_y and (y_start < pad_cells_y or y_stop > parent_ny - pad_cells_y):
+            raise ValueError(
+                f"Refinement of non-periodic parent {parent_group!r} at y=[{y_start},{y_stop}] "
+                f"is too close to the parent's y boundary; need at least {pad_cells_y} cells "
+                f"of room on each side (parent_ny={parent_ny})"
+            )
+
+    # Build extraction index arrays at parent resolution.
+    if spans_x:
+        x_indices = np.arange(x_start, x_stop) % parent_nx
+    elif parent_is_periodic:
+        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x) % parent_nx
+    else:
+        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x)
+    if spans_y:
+        y_indices = np.arange(y_start, y_stop) % parent_ny
+    elif parent_is_periodic:
+        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y) % parent_ny
+    else:
+        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y)
+
+    # z slice with padded range
+    z_range_low = z_min - pad_z_below_per_class[0]
+    z_range_high = z_max + pad_z_above_per_class[0]
+    z_indices = np.where(
+        (z_coords >= z_range_low - 1e-6) & (z_coords < z_range_high + 1e-6)
+    )[0]
+    if len(z_indices) == 0:
+        raise ValueError(
+            f"No parent z-levels found in [{z_range_low}, {z_range_high}] m. "
+            f"Parent z ranges from {z_coords[0]:.1f} to {z_coords[-1]:.1f} m"
+        )
+    z_coords_slice = z_coords[z_indices]
+
+    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
+    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
+
+    # Compute perturbation: subtract mean profile
+    h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
+    qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
+    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
+    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
+
+    # Compute grids with per-class pad (shrinks as k shrinks in non-spanning dims).
     grids = _compute_all_grids(
-        k_values, padded_extent_x, padded_extent_y, inset_height,
+        k_values, inner_extent_x, inner_extent_y, inset_height,
         sparsity_factors, spheroscale_profile, z_profile, z_min=z_min,
+        pad_x_per_class=pad_x_per_class,
+        pad_y_per_class=pad_y_per_class,
+        pad_z_below_per_class=pad_z_below_per_class,
+        pad_z_above_per_class=pad_z_above_per_class,
     )
 
     # Interpolate profiles to finest grid for normalization
@@ -1031,25 +1223,41 @@ def refine(
         h_perturbation=h_pert_pad,
         qt_perturbation=qt_pert_pad,
         turbulon_shape=turbulon_shape,
+        zero_bottom=at_ground,
+        zero_top=at_top,
     )
 
-    # Trim pad region to get inner subdomain
+    # Trim pad region to get inner subdomain (x, y, z).
     final_nx = final_grid['nx']
     final_ny = final_grid['ny']
-    # The pad was pad_cells on each side in parent-grid units;
-    # compute the corresponding number of cells in the refined grid
     inner_nx_fine = int(round(inner_extent_x / final_grid['dx']))
     inner_ny_fine = int(round(inner_extent_y / final_grid['dy']))
     trim_x = (final_nx - inner_nx_fine) // 2
     trim_y = (final_ny - inner_ny_fine) // 2
 
+    # z trim: find cells whose left-edge lies within [z_min, z_max).
+    z_full = final_grid['z']
+    dz_full = final_grid['dz']
+    z_inner_mask = (z_full >= z_min - 1e-6) & (z_full < z_max - 1e-6)
+    z_inner_indices = np.where(z_inner_mask)[0]
+    if len(z_inner_indices) == 0:
+        # Fallback: use centered trim based on inset_height
+        inner_nz_fine = int(round(inset_height / float(final_grid['dz'].mean())))
+        z_trim_start = (len(z_full) - inner_nz_fine) // 2
+        z_inner_indices = np.arange(z_trim_start, z_trim_start + inner_nz_fine)
+    z_trim_start = int(z_inner_indices[0])
+    z_trim_stop = int(z_inner_indices[-1]) + 1
+
     h_pert_inner = h_pert_refined[trim_x:trim_x+inner_nx_fine,
-                                   trim_y:trim_y+inner_ny_fine, :]
+                                   trim_y:trim_y+inner_ny_fine,
+                                   z_trim_start:z_trim_stop]
     qt_pert_inner = qt_pert_refined[trim_x:trim_x+inner_nx_fine,
-                                     trim_y:trim_y+inner_ny_fine, :]
+                                     trim_y:trim_y+inner_ny_fine,
+                                     z_trim_start:z_trim_stop]
 
     # Construct final 3D fields
-    z_final = final_grid['z'].astype(np.float32)
+    z_final = z_full[z_trim_start:z_trim_stop].astype(np.float32)
+    dz_final = dz_full[z_trim_start:z_trim_stop].astype(np.float32)
     h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
@@ -1064,9 +1272,6 @@ def refine(
     x_out = np.arange(nx_out, dtype=np.float32) * dx_final + x_start * parent_dx
     y_out = np.arange(ny_out, dtype=np.float32) * dy_final + y_start * parent_dy
 
-    spheroscale_mean = float(np.mean(spheroscale_profile))
-    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
-
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
@@ -1075,7 +1280,7 @@ def refine(
         'ny': ny_out,
         'dx': dx_final,
         'dy': dy_final,
-        'dz': final_grid['dz'].astype(np.float32),
+        'dz': dz_final,
         'outer_scale': new_outer_scale,
         'spheroscale': spheroscale_final,
         'domain_height': inset_height,

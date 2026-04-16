@@ -173,9 +173,9 @@ def test_compute_all_grids_regression_for_dyadic_scale_classes():
     k_values = np.array([8.0, 4.0, 2.0])
     grids = _compute_all_grids(
         k_values=k_values,
-        domain_x=32.0,
-        domain_y=16.0,
-        domain_height=20.0,
+        inner_extent_x=32.0,
+        inner_extent_y=16.0,
+        inner_height=20.0,
         sparsity_factors=(1, 2, 1),
         spheroscale_profile=np.array([2.0, 2.0]),
         z_profile=np.array([0.0, 20.0]),
@@ -208,9 +208,9 @@ def test_compute_all_grids_regression_for_dyadic_scale_classes():
 def test_compute_all_grids_uses_actual_spacing_from_rounded_counts():
     grids = _compute_all_grids(
         k_values=np.array([7.0, 3.5]),
-        domain_x=30.0,
-        domain_y=18.0,
-        domain_height=12.0,
+        inner_extent_x=30.0,
+        inner_extent_y=18.0,
+        inner_height=12.0,
         sparsity_factors=(1, 1, 1),
         spheroscale_profile=np.array([2.0, 2.0]),
         z_profile=np.array([0.0, 12.0]),
