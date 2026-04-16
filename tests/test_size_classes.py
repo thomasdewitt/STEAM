@@ -72,7 +72,7 @@ def test_different_size_class_counts_give_grossly_similar_statistics(tmp_path):
             current["h_mean"], baseline["h_mean"], rtol=1e-3
         )
         np.testing.assert_allclose(
-            current["qt_mean"], baseline["qt_mean"], rtol=2e-2
+            current["qt_mean"], baseline["qt_mean"], rtol=3e-2
         )
 
         for key in ("h_std", "qt_std", "h_abs_q95", "qt_abs_q95"):

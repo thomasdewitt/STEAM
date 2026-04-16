@@ -17,9 +17,8 @@ def test_kernel_mean_near_zero_isotropic(k):
     dy = k / 2
     dz = k / 2
 
-    kernel = _turbulon_envelope(k, spheroscale=k, dx=dx, dy=dy, dz=dz,
-                                support_factor=10, norm='isotropic_norm',
-                                shape='mexican_hat')
+    kernel = _turbulon_envelope(k, dx=dx, dy=dy, dz=dz,
+                                support_factor=10, shape='mexican_hat')
 
     assert abs(kernel.mean()) < 0.01, (
         f"k={k}: kernel mean={kernel.mean():.4e}, shape={kernel.shape}"
