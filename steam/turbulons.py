@@ -1,51 +1,24 @@
-"""Turbulon norm functions and envelope shape functions.
-
-Norm functions: (X, Y, Z, spheroscale) -> r_norm_sq
-    All accept spheroscale; isotropic ignores it.
+"""Turbulon envelope shape functions.
 
 Shape functions: (r_norm_sq, k) -> kernel array (same shape as r_norm_sq)
     ratio_sq = r_norm_sq / σ², σ = k/π is the dimensionless argument.
     All shapes are designed so that peak PSD occurs at wavelength k.
 
-NORMS and SHAPES are the authoritative registries of valid string names.
+SHAPES is the authoritative registry of valid string names.
 Add an entry here when adding a new function.
+
+Grid anisotropy is handled separately in simulate._k_z (on the grid, not
+in the envelope): the envelope is always evaluated with isotropic
+r_norm² = X² + Y² + Z² in cell-index space, and anisotropy enters
+through per-class dz = k_z(k, spheroscale) / (2*s_z).
 """
 
 import numpy as np
-from .constants import hurst_vertical_anisotropy as H_z
 
 
-# Registries — extend these when adding new functions
-NORMS = {'isotropic_norm', 'canonical_anisotropic_norm'}
+# Registry — extend when adding new functions
 SHAPES = {'mexican_hat', 'morlet_omega0_6'}
 
-
-# ---------------------------------------------------------------------------
-# Norm functions
-# ---------------------------------------------------------------------------
-
-def isotropic_norm(X, Y, Z, spheroscale=None):
-    """Isotropic Euclidean norm squared: r_norm² = X² + Y² + Z²."""
-    return X**2 + Y**2 + Z**2
-
-
-def canonical_anisotropic_norm(X, Y, Z, spheroscale):
-    """Canonical anisotropic STEAM norm squared.
-
-    (Apxeq:canonical anisotropic norm)
-    r_norm² = spheroscale² * ((X/spheroscale)² + (Y/spheroscale)²
-                               + (|Z|/spheroscale)^(2/H_z))
-    """
-    return spheroscale**2 * (
-        (X / spheroscale) ** 2
-        + (Y / spheroscale) ** 2
-        + (np.abs(Z) / spheroscale) ** (2.0 / H_z)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Shape functions
-# ---------------------------------------------------------------------------
 
 def mexican_hat(r_norm_sq, k):
     """3D Mexican hat wavelet envelope.

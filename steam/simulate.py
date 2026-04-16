@@ -21,6 +21,33 @@ from .output import write_netcdf
 CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
 
+VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
+
+
+def _k_z(anisotropy, k, spheroscale):
+    """Vertical scale k_z(k, spheroscale) — the grid-anisotropy function.
+
+    Anisotropy in STEAM lives on the grid (dz_i = k_z(k_i)/(2*s_z)), not in
+    the turbulon envelope (which is isotropic in cell-index space).
+
+    Options
+    -------
+    'canonical' : k_z = spheroscale * (k/spheroscale)**H_z.
+    'piecewise_isotropic_below_spheroscale' : canonical for k >= spheroscale,
+        k_z = k (isotropic) for k < spheroscale. Continuous at k = spheroscale.
+    """
+    k = np.asarray(k, dtype=np.float64)
+    spheroscale = np.asarray(spheroscale, dtype=np.float64)
+    canonical = spheroscale * (k / spheroscale) ** H_z
+    if anisotropy == 'canonical':
+        return canonical
+    if anisotropy == 'piecewise_isotropic_below_spheroscale':
+        return np.where(k >= spheroscale, canonical, k)
+    raise ValueError(
+        f"Unknown anisotropy {anisotropy!r}. "
+        f"Valid options: {VALID_ANISOTROPY}"
+    )
+
 
 def simulate(
     h_profile,
@@ -41,7 +68,8 @@ def simulate(
     qt_min=0.0,
     qt_max=30 / 1000,
     min_distance_to_ground=1,
-    turbulon_shape = 'mexican_hat'
+    turbulon_shape='mexican_hat',
+    anisotropy='canonical',
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -114,6 +142,10 @@ def simulate(
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
         raise ValueError(
             f"min_distance_to_ground must be a non-negative integer, got {min_distance_to_ground}"
+        )
+    if anisotropy not in VALID_ANISOTROPY:
+        raise ValueError(
+            f"anisotropy must be one of {VALID_ANISOTROPY}, got {anisotropy!r}"
         )
 
     domain_x = nx * dx
@@ -202,7 +234,7 @@ def simulate(
 
     # Input validation using arithmetic mean spheroscale
     spheroscale_mean = float(np.mean(spheroscale_profile))
-    k_z_L_mean = spheroscale_mean * (outer_scale / spheroscale_mean) ** H_z
+    k_z_L_mean = float(_k_z(anisotropy, outer_scale, spheroscale_mean))
     if profile_dz >= k_z_L_mean:
         raise ValueError(
             f"profile_dz ({profile_dz} m) must be less than the vertical outer "
@@ -220,6 +252,7 @@ def simulate(
     grids = _compute_all_grids(
         k_values, domain_x, domain_y, domain_height, sparsity_factors,
         spheroscale_profile, z_profile,
+        anisotropy=anisotropy,
     )
 
     # Interpolate profiles to finest grid for normalization
@@ -228,9 +261,14 @@ def simulate(
     qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
     spheroscale_on_finest = np.interp(z_finest, z_profile, spheroscale_profile)
 
-    # Vertical outer scale in finest-grid points (constant across height)
+    # Vertical outer scale in finest-grid points (constant across height).
+    # Ratio k_z_L / dz_min = 2*s_z * k_z(outer_scale) / k_z(k_min) — only
+    # simplifies to (outer_scale/k_min)^H_z under canonical anisotropy.
     k_min = k_values[-1]
-    vertical_outer_scale_grid_pts = int(round(2 * s_z * (outer_scale / k_min) ** H_z))
+    vertical_outer_scale_grid_pts = int(round(
+        2 * s_z * _k_z(anisotropy, outer_scale, spheroscale_mean)
+        / _k_z(anisotropy, k_min, spheroscale_mean)
+    ))
 
     # Unit turbulon z-slice for normalization correction
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
@@ -285,7 +323,7 @@ def simulate(
     y_coords = np.arange(ny_final_val, dtype=np.float32) * dy_final
 
     # k_z_values using arith-mean spheroscale as reference
-    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
+    k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
 
     simulation_params = {
         'nx': nx_final_val,
@@ -313,6 +351,7 @@ def simulate(
         'qt_max': qt_max,
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
+        'anisotropy': anisotropy,
         'n_size_classes': n_classes,
         'size_class_gap_factor': size_class_gap_factor,
     }
@@ -552,7 +591,8 @@ def cascade_loop(
 def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
                        sparsity_factors, spheroscale_profile, z_profile, z_min=0.0,
                        pad_x_per_class=None, pad_y_per_class=None,
-                       pad_z_below_per_class=None, pad_z_above_per_class=None):
+                       pad_z_below_per_class=None, pad_z_above_per_class=None,
+                       anisotropy='canonical'):
     """Precompute grid dimensions and z-coordinate arrays for all scale classes.
 
     Each scale class has its own padded extent in x, y, and z. The inner
@@ -562,7 +602,7 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
     where the parent is already naturally zero-padded).
 
     Each scale class uses an altitude-dependent dz:
-      dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = ls(z) * (k/ls(z))^H_z
+      dz(z) = k_z(z) / (2*s_z)  where  k_z(z) = _k_z(anisotropy, k, ls(z))
     Cells are accumulated from (z_min - pad_z_below) until
     (z_min + inner_height + pad_z_above) is reached, then all dz values
     are scaled uniformly so their sum equals the padded z-extent exactly.
@@ -591,6 +631,8 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
     pad_z_below_per_class, pad_z_above_per_class : ndarray or None
         Per-class physical pad below z_min / above z_min+inner_height [m].
         Shape (n_classes,). None means zero pad at all classes.
+    anisotropy : str
+        Grid-anisotropy function name. See _k_z docstring for options.
 
     Returns
     -------
@@ -650,7 +692,7 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
         # Integrate dz(z) = k_z(z)/(2*s_z) from z_min_i
         def k_z_local(z):
             ls = np.interp(z, z_profile, spheroscale_profile)
-            return ls * (k / ls) ** H_z
+            return float(_k_z(anisotropy, k, ls))
 
         z_top = z_min_i + padded_height
         z_edges = [z_min_i]
@@ -689,19 +731,6 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
         'padded_height': padded_h_arr,
         'z_min_per_class': z_min_arr,
     }
-
-
-def _vertical_scale(norm, k, spheroscale):
-    """Return k_z: the z at which norm(0, 0, k_z, spheroscale) = k².
-
-    Add a branch here when adding a new norm to steam/turbulons.py.
-    """
-    if norm == 'canonical_anisotropic_norm':
-        return spheroscale * (k / spheroscale) ** H_z
-    elif norm == 'isotropic_norm':
-        return k
-    else:
-        raise ValueError(f"No vertical scale defined for norm {norm!r}")
 
 
 def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexican_hat'):
@@ -919,6 +948,7 @@ def refine(
     turbulon_shape=None,
     z_min=None,
     z_max=None,
+    anisotropy=None,
 ):
     """Refine a subdomain of a parent simulation to finer resolution.
 
@@ -957,6 +987,9 @@ def refine(
         (0 for a root simulation).
     z_max : float or None
         Top altitude of the inset [m].  If None, use parent's top altitude.
+    anisotropy : str or None
+        Grid-anisotropy function name (see _k_z). If None, inherit from
+        the parent group (defaulting to 'canonical' for older files).
 
     Returns
     -------
@@ -996,6 +1029,12 @@ def refine(
         sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
     if turbulon_shape is None:
         turbulon_shape = grp.turbulon_shape if hasattr(grp, 'turbulon_shape') else 'mexican_hat'
+    if anisotropy is None:
+        anisotropy = grp.anisotropy if hasattr(grp, 'anisotropy') else 'canonical'
+    if anisotropy not in VALID_ANISOTROPY:
+        raise ValueError(
+            f"anisotropy must be one of {VALID_ANISOTROPY}, got {anisotropy!r}"
+        )
 
     parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
 
@@ -1056,7 +1095,7 @@ def refine(
     # Interpolate spheroscale to profile z-grid
     spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
     spheroscale_mean = float(np.mean(spheroscale_profile))
-    k_z_values = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
+    k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
 
     # Inner subdomain physical extent
     inner_nx = x_stop - x_start
@@ -1175,6 +1214,7 @@ def refine(
         pad_y_per_class=pad_y_per_class,
         pad_z_below_per_class=pad_z_below_per_class,
         pad_z_above_per_class=pad_z_above_per_class,
+        anisotropy=anisotropy,
     )
 
     # Interpolate profiles to finest grid for normalization
@@ -1182,9 +1222,13 @@ def refine(
     h_on_finest = np.interp(z_finest, z_profile, h_profile)
     qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
 
-    # Vertical outer scale in finest-grid points
+    # Vertical outer scale in finest-grid points (see simulate() for why
+    # the general form is 2*s_z * k_z(outer) / k_z(k_min)).
     k_min = k_values[-1]
-    vertical_outer_scale_grid_pts = int(round(2 * s_z * (new_outer_scale / k_min) ** H_z))
+    vertical_outer_scale_grid_pts = int(round(
+        2 * s_z * _k_z(anisotropy, new_outer_scale, spheroscale_mean)
+        / _k_z(anisotropy, k_min, spheroscale_mean)
+    ))
 
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                        support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
@@ -1302,6 +1346,7 @@ def refine(
         'qt_max': qt_max,
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
+        'anisotropy': anisotropy,
         'parent_group': parent_group,
         'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
         'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),

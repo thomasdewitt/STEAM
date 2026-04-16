@@ -10,7 +10,9 @@ from pathlib import Path
 import netCDF4
 import scaleinvariance
 from steam import simulate
+from steam.simulate import _k_z
 H_z = 5/9
+ANISOTROPY = 'canonical'
 
 # ---- Config ----
 NX = NY = 128*10
@@ -88,7 +90,7 @@ qt_vert = hurst_fn(qt_field, axis=2, **fit_kwargs)
 h_prof = hurst_fn(h_profile, **fit_kwargs)
 qt_prof = hurst_fn(qt_profile, **fit_kwargs)
 
-vertical_outer_scale = SPHEROSCALE * (OUTER_SCALE / SPHEROSCALE) ** H_z
+vertical_outer_scale = float(_k_z(ANISOTROPY, OUTER_SCALE, SPHEROSCALE))
 
 # Physical separations (lags * grid spacing)
 h_vert_sep = np.asarray(h_vert[2]) * dz_output

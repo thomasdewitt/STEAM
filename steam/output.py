@@ -170,6 +170,8 @@ def write_netcdf(
     ds.min_distance_to_ground = np.int32(p['min_distance_to_ground'])
     if 'turbulon_shape' in p:
         ds.turbulon_shape = p['turbulon_shape']
+    if 'anisotropy' in p:
+        ds.anisotropy = p['anisotropy']
     if 'n_size_classes' in p:
         ds.n_size_classes = np.int32(p['n_size_classes'])
     if 'size_class_gap_factor' in p:

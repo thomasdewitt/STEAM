@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import scaleinvariance
 from steam import simulate
 from steam.constants import hurst_vertical_anisotropy as H_z, hurst_horizontal as H_h
+from steam.simulate import _k_z
 import netCDF4
 from pathlib import Path
 import tempfile
@@ -31,7 +32,8 @@ def main():
 
     # Derived quantities
     H_v = H_h / H_z          # vertical Hurst exponent = (1/3)/(5/9) = 3/5 = 0.6
-    k_z_L = spheroscale * (outer_scale / spheroscale) ** H_z
+    anisotropy = 'canonical'
+    k_z_L = float(_k_z(anisotropy, outer_scale, spheroscale))
 
     print(f"Outer scale (horizontal): {outer_scale} m")
     print(f"Vertical outer scale k_z_L: {k_z_L:.0f} m")
