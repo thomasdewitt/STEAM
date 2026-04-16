@@ -3,6 +3,7 @@
 *.tex
 *.pdf
 *.pyc
+__pycache__/
 .DS_Store
 *.aux
 *.fdb_latexmk
