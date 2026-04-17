@@ -12,6 +12,7 @@ def write_netcdf(
     k_values, k_z_values, C_h_k, C_qt_k,
     simulation_params,
     group=None,
+    compress=False,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -36,6 +37,9 @@ def write_netcdf(
         If None, write to root of a new file (current behavior).
         If provided, open existing file in append mode and create a
         NetCDF4 group with this name.
+    compress : bool
+        If True, write the 3D data variables (h, qt, p_bottom) with
+        zlib compression at complevel=4. Default False (uncompressed).
 
     Returns
     -------
@@ -77,9 +81,9 @@ def write_netcdf(
     z_var.units = "m"
     z_var.long_name = "z coordinate (height)"
 
-    # Data variables — chunked and compressed
+    # Data variables — chunked, optionally compressed
     h_var = ds.createVariable(
-        "h", "f4", ("x", "y", "z"), zlib=True, complevel=4,
+        "h", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
         chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
     )
     h_var[:] = h_3d
@@ -87,7 +91,7 @@ def write_netcdf(
     h_var.long_name = "moist static energy"
 
     qt_var = ds.createVariable(
-        "qt", "f4", ("x", "y", "z"), zlib=True, complevel=4,
+        "qt", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
         chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
     )
     qt_var[:] = qt_3d
@@ -192,7 +196,8 @@ def write_netcdf(
     # parent ground).
     if 'p_bottom' in p:
         pb_var = ds.createVariable(
-            "p_bottom", "f4", ("x", "y"), zlib=True, complevel=4,
+            "p_bottom", "f4", ("x", "y"),
+            zlib=compress, complevel=4 if compress else 0,
         )
         pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
         pb_var.units = "Pa"

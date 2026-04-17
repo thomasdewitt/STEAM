@@ -71,6 +71,7 @@ def simulate(
     min_distance_to_ground=1,
     turbulon_shape='mexican_hat',
     anisotropy='canonical',
+    compress=False,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -121,6 +122,9 @@ def simulate(
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
         of the ground. Must be a non-negative integer.
+    compress : bool
+        If True, 3D data variables in the output NetCDF are written with
+        zlib compression at complevel=4. Default False (uncompressed).
 
     Returns
     -------
@@ -366,6 +370,7 @@ def simulate(
         h_profile, qt_profile, z_profile.astype(np.float32),
         k_values, k_z_values, C_h_k, C_qt_k,
         simulation_params,
+        compress=compress,
     )
     return output_path
 
@@ -948,6 +953,7 @@ def refine(
     z_min=None,
     z_max=None,
     anisotropy=None,
+    compress=False,
 ):
     """Refine a subdomain of a parent simulation to finer resolution.
 
@@ -989,6 +995,9 @@ def refine(
     anisotropy : str or None
         Grid-anisotropy function name (see _k_z). If None, inherit from
         the parent group (defaulting to 'canonical' for older files).
+    compress : bool
+        If True, 3D data variables in the output group are written with
+        zlib compression at complevel=4. Default False (uncompressed).
 
     Returns
     -------
@@ -1414,5 +1423,6 @@ def refine(
         k_values, k_z_values, C_h_k, C_qt_k,
         simulation_params,
         group=output_group,
+        compress=compress,
     )
     return parent_path

@@ -87,7 +87,7 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
 
 
-def compute_diagnostics(nc_path, chunk_nx=512, group=None):
+def compute_diagnostics(nc_path, chunk_nx=512, group=None, compress=False):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
     Opens the file in r+ mode, reads h, qt, z, and the starting pressure
@@ -103,6 +103,9 @@ def compute_diagnostics(nc_path, chunk_nx=512, group=None):
     group : str or None
         NetCDF group to operate on. None means the root group; pass e.g.
         "refinements/r0" to run diagnostics on a refinement group.
+    compress : bool
+        If True, new diagnostic variables are written with zlib
+        compression at complevel=4. Default False (uncompressed).
     """
     ds = netCDF4.Dataset(nc_path, "r+")
     grp = ds if group is None else ds[group]
@@ -124,7 +127,8 @@ def compute_diagnostics(nc_path, chunk_nx=512, group=None):
                   "p": ("Pa", "pressure")}
     for name, (units, long_name) in diag_names.items():
         if name not in grp.variables:
-            v = grp.createVariable(name, "f4", ("x", "y", "z"), zlib=True, complevel=4,
+            v = grp.createVariable(name, "f4", ("x", "y", "z"),
+                                   zlib=compress, complevel=4 if compress else 0,
                                    chunksizes=(min(chunk_nx, nx), min(64, ny), nz))
             v.units = units
             v.long_name = long_name
