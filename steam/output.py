@@ -187,6 +187,17 @@ def write_netcdf(
             else:
                 ds.setncattr(attr, np.array(val))
 
+    # Optional 2D starting pressure for hydrostatic integration
+    # (written by refine() when the inset bottom is elevated above the
+    # parent ground).
+    if 'p_bottom' in p:
+        pb_var = ds.createVariable(
+            "p_bottom", "f4", ("x", "y"), zlib=True, complevel=4,
+        )
+        pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
+        pb_var.units = "Pa"
+        pb_var.long_name = "starting pressure at inset bottom (z=z[0])"
+
     ds_root.close()
     print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))
     return output_path

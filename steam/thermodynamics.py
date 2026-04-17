@@ -13,7 +13,7 @@ from .constants import (
 def recover_diagnostics(h, qt, z_values, surface_pressure):
     """Recover T, qv, qc, qi, p from 3D h and qt fields.
 
-    Proceeds upward from the surface, vectorized over (nx, ny) at each z level.
+    Proceeds upward from z=z_values[0], vectorized over (nx, ny) at each level.
 
     Parameters
     ----------
@@ -23,8 +23,9 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
         Total water mixing ratio [kg/kg].
     z_values : ndarray, shape (nz,)
         Heights [m].
-    surface_pressure : float
-        Surface pressure [Pa].
+    surface_pressure : float or ndarray, shape (nx, ny)
+        Pressure at z=z_values[0] [Pa]. Scalar for a root simulation;
+        2D field for an elevated-bottom inset from refine().
 
     Returns
     -------
@@ -86,10 +87,11 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
 
 
-def compute_diagnostics(nc_path, chunk_nx=512):
+def compute_diagnostics(nc_path, chunk_nx=512, group=None):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
-    Opens the file in r+ mode, reads h, qt, z, surface_pressure, and appends
+    Opens the file in r+ mode, reads h, qt, z, and the starting pressure
+    (2D ``p_bottom`` if present, else scalar ``surface_pressure``), and appends
     the diagnostic variables T, qv, qc, qi, p (float32, same shape as h/qt).
 
     Parameters
@@ -98,13 +100,21 @@ def compute_diagnostics(nc_path, chunk_nx=512):
         Path to the NetCDF file produced by simulate().
     chunk_nx : int
         Number of x-columns to process at a time.
+    group : str or None
+        NetCDF group to operate on. None means the root group; pass e.g.
+        "refinements/r0" to run diagnostics on a refinement group.
     """
     ds = netCDF4.Dataset(nc_path, "r+")
-    nx = len(ds.dimensions["x"])
-    ny = len(ds.dimensions["y"])
-    nz = len(ds.dimensions["z"])
-    z_values = ds.variables["z"][:]
-    surface_pressure = float(ds.surface_pressure)
+    grp = ds if group is None else ds[group]
+    nx = len(grp.dimensions["x"])
+    ny = len(grp.dimensions["y"])
+    nz = len(grp.dimensions["z"])
+    z_values = grp.variables["z"][:]
+
+    if "p_bottom" in grp.variables:
+        starting_pressure = grp.variables["p_bottom"][:]
+    else:
+        starting_pressure = float(grp.surface_pressure)
 
     # Create output variables if they don't exist
     diag_names = {"T": ("K", "temperature"),
@@ -113,14 +123,14 @@ def compute_diagnostics(nc_path, chunk_nx=512):
                   "qi": ("kg/kg", "cloud ice mixing ratio"),
                   "p": ("Pa", "pressure")}
     for name, (units, long_name) in diag_names.items():
-        if name not in ds.variables:
-            v = ds.createVariable(name, "f4", ("x", "y", "z"), zlib=True, complevel=4,
-                                  chunksizes=(min(chunk_nx, nx), min(64, ny), nz))
+        if name not in grp.variables:
+            v = grp.createVariable(name, "f4", ("x", "y", "z"), zlib=True, complevel=4,
+                                   chunksizes=(min(chunk_nx, nx), min(64, ny), nz))
             v.units = units
             v.long_name = long_name
 
-    h_var = ds.variables["h"]
-    qt_var = ds.variables["qt"]
+    h_var = grp.variables["h"]
+    qt_var = grp.variables["qt"]
 
     for x0 in range(0, nx, chunk_nx):
         x1 = min(x0 + chunk_nx, nx)
@@ -129,13 +139,19 @@ def compute_diagnostics(nc_path, chunk_nx=512):
         h_chunk = h_var[x0:x1, :, :]
         qt_chunk = qt_var[x0:x1, :, :]
 
-        result = recover_diagnostics(h_chunk, qt_chunk, z_values, surface_pressure)
+        if isinstance(starting_pressure, np.ndarray):
+            p_chunk = starting_pressure[x0:x1, :]
+        else:
+            p_chunk = starting_pressure
+
+        result = recover_diagnostics(h_chunk, qt_chunk, z_values, p_chunk)
 
         for name in ("T", "qv", "qc", "qi", "p"):
-            ds.variables[name][x0:x1, :, :] = result[name].astype(np.float32)
+            grp.variables[name][x0:x1, :, :] = result[name].astype(np.float32)
 
     ds.close()
-    print(f"  diagnostics: done, written to {nc_path}          ")
+    tag = f" (group '{group}')" if group else ""
+    print(f"  diagnostics: done, written to {nc_path}{tag}          ")
 
 
 def _saturation_vapor_pressure(T):

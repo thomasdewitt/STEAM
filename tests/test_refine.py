@@ -14,6 +14,7 @@ from steam.simulate import (
     _compute_normalization,
     spectral_width_normalization,
 )
+from steam.thermodynamics import compute_diagnostics
 
 
 @pytest.fixture
@@ -27,13 +28,18 @@ def simple_profiles():
 
 @pytest.fixture
 def parent_nc(tmp_path, simple_profiles):
-    """Run a small parent simulation and return the NC path."""
+    """Run a small parent simulation and return the NC path.
+
+    Also runs compute_diagnostics so elevated-z refinements can read the
+    parent's 3D pressure field for their 2D p_bottom.
+    """
     h, qt = simple_profiles
     out = tmp_path / "parent.nc"
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
              outer_scale=8000, spheroscale=100,
              domain_height=3000, profile_dz=30,
              output_path=out, seed=42)
+    compute_diagnostics(out)
     return out
 
 

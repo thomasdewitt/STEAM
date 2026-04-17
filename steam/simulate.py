@@ -15,6 +15,7 @@ from .utils import (
     convolve_periodic_xy_zeropad_z_oa,
     convolve_fft_xy_oa_z,
     zoom_trilinear,
+    zoom_bilinear,
 )
 from .output import write_netcdf
 
@@ -1133,6 +1134,31 @@ def refine(
     # else SUPPORT_FACTOR * k_z_i, clipped to available parent room.
     at_ground = (z_min <= parent_z_min + 1e-6)
     at_top = (z_max >= parent_z_max - 1e-6)
+
+    # If the inset's bottom is above the parent ground, the scalar surface
+    # pressure no longer describes the pressure at z=z_min; read the parent's
+    # 3D pressure field at levels bracketing z_min for a 2D p_bottom.
+    if not at_ground:
+        with netCDF4.Dataset(parent_path, "r") as _ds_p:
+            _grp_p = _ds_p if parent_group == '/' else _ds_p[parent_group]
+            if 'p' not in _grp_p.variables:
+                raise ValueError(
+                    f"Refining with z_min ({z_min}) above the parent bottom "
+                    f"({parent_z_min}) requires pressure diagnostics on the "
+                    f"parent group {parent_group!r}. Run "
+                    f"steam.thermodynamics.compute_diagnostics on the parent "
+                    f"first."
+                )
+            z_idx_lo = int(np.searchsorted(z_coords, z_min, side='right')) - 1
+            z_idx_lo = max(0, min(len(z_coords) - 2, z_idx_lo))
+            p_slice_lo = _grp_p.variables['p'][:, :, z_idx_lo].astype(np.float32)
+            p_slice_hi = _grp_p.variables['p'][:, :, z_idx_lo + 1].astype(np.float32)
+        parent_z_lo = float(z_coords[z_idx_lo])
+        parent_z_hi = float(z_coords[z_idx_lo + 1])
+    else:
+        p_slice_lo = p_slice_hi = None
+        parent_z_lo = parent_z_hi = None
+
     if at_ground:
         pad_z_below_per_class = np.zeros(n_classes)
     else:
@@ -1317,6 +1343,30 @@ def refine(
     x_out = np.arange(nx_out, dtype=np.float32) * dx_final + x_start * parent_dx
     y_out = np.arange(ny_out, dtype=np.float32) * dy_final + y_start * parent_dy
 
+    # 2D starting pressure from parent's p, interpolated in z to z_final[0]
+    # and bilinearly upsampled to the child horizontal grid.
+    if p_slice_lo is not None:
+        z_target = float(z_final[0])
+        if parent_z_hi > parent_z_lo:
+            w = (z_target - parent_z_lo) / (parent_z_hi - parent_z_lo)
+            w = float(np.clip(w, 0.0, 1.0))
+        else:
+            w = 0.0
+        p_slice = (1.0 - w) * p_slice_lo + w * p_slice_hi
+        if parent_is_periodic:
+            ix_inner = np.arange(x_start, x_stop) % parent_nx
+            iy_inner = np.arange(y_start, y_stop) % parent_ny
+        else:
+            ix_inner = np.arange(x_start, x_stop)
+            iy_inner = np.arange(y_start, y_stop)
+        p_bottom_inner = p_slice[np.ix_(ix_inner, iy_inner)]
+        if p_bottom_inner.shape == (nx_out, ny_out):
+            p_bottom_field = p_bottom_inner.astype(np.float32)
+        else:
+            p_bottom_field = zoom_bilinear(p_bottom_inner, (nx_out, ny_out))
+    else:
+        p_bottom_field = None
+
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
@@ -1354,6 +1404,8 @@ def refine(
         'parent_x_offset': float(x_start * parent_dx),
         'parent_y_offset': float(y_start * parent_dy),
     }
+    if p_bottom_field is not None:
+        simulation_params['p_bottom'] = p_bottom_field
 
     write_netcdf(
         parent_path, h_3d_out, qt_3d_out,

@@ -195,3 +195,15 @@ def zoom_trilinear(field, target_shape):
         t, size=tuple(target_shape), mode="trilinear", align_corners=True,
     )
     return out[0, 0].numpy().astype(np.float32)
+
+
+def zoom_bilinear(field, target_shape):
+    """Resample a 2D float32 field to target_shape with bilinear interpolation.
+
+    Corner-aligned (torch's align_corners=True).
+    """
+    t = torch.from_numpy(field.astype(np.float32))[None, None]  # NCHW
+    out = torch.nn.functional.interpolate(
+        t, size=tuple(target_shape), mode="bilinear", align_corners=True,
+    )
+    return out[0, 0].numpy().astype(np.float32)
