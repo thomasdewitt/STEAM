@@ -13,3 +13,4 @@ __pycache__/
 *.synctex.gz
 *.toc
 pytest-of-thomas/
+tests/regression_data/
