@@ -315,6 +315,9 @@ def simulate(
     h_3d = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert)
     qt_3d = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert)
 
+    np.clip(h_3d, h_min, h_max, out=h_3d)
+    np.clip(qt_3d, qt_min, qt_max, out=qt_3d)
+
     nx_final_val = h_3d.shape[0]
     ny_final_val = h_3d.shape[1]
     dx_final = (nx * dx) / nx_final_val
