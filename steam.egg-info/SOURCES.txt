@@ -11,6 +11,7 @@ steam.egg-info/SOURCES.txt
 steam.egg-info/dependency_links.txt
 steam.egg-info/requires.txt
 steam.egg-info/top_level.txt
+tests/test_anisotropy.py
 tests/test_convolution.py
 tests/test_kernel.py
 tests/test_refine.py

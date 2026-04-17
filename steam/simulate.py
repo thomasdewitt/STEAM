@@ -4,7 +4,6 @@ import math
 import numpy as np
 import netCDF4
 from pathlib import Path
-from scipy.ndimage import zoom
 from .constants import (
     hurst_horizontal as H_h,
     hurst_vertical_anisotropy as H_z,
@@ -15,6 +14,7 @@ from .utils import (
     convolve_periodic_xy_zeropad_z_ndimage,
     convolve_periodic_xy_zeropad_z_oa,
     convolve_fft_xy_oa_z,
+    zoom_trilinear,
 )
 from .output import write_netcdf
 
@@ -514,13 +514,8 @@ def cascade_loop(
                     qt_perturbation = qt_perturbation[:, :, start:start+keep]
 
             if h_perturbation.shape != (nx_k, ny_k, nz_k):
-                zoom_factors = (
-                    nx_k / h_perturbation.shape[0],
-                    ny_k / h_perturbation.shape[1],
-                    nz_k / h_perturbation.shape[2],
-                )
-                h_perturbation = zoom(h_perturbation, zoom_factors, order=1).astype(np.float32)
-                qt_perturbation = zoom(qt_perturbation, zoom_factors, order=1).astype(np.float32)
+                h_perturbation = zoom_trilinear(h_perturbation, (nx_k, ny_k, nz_k))
+                qt_perturbation = zoom_trilinear(qt_perturbation, (nx_k, ny_k, nz_k))
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)

@@ -10,3 +10,4 @@ Classifier: Programming Language :: Python :: 3
 Requires-Python: >=3.8
 Requires-Dist: numpy
 Requires-Dist: scipy
+Requires-Dist: torch
