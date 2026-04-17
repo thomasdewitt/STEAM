@@ -1307,6 +1307,9 @@ def refine(
     h_3d_out = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
     qt_3d_out = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
 
+    np.clip(h_3d_out, h_min, h_max, out=h_3d_out)
+    np.clip(qt_3d_out, qt_min, qt_max, out=qt_3d_out)
+
     nx_out = h_3d_out.shape[0]
     ny_out = h_3d_out.shape[1]
     dx_final = inner_extent_x / nx_out
