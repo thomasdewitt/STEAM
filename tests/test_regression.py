@@ -37,12 +37,12 @@ CASES = {
         seed=42,
         sparsity_factors=(2, 2, 2),
     ),
-    "custom_n_classes": dict(
+    "dense_scale_classes": dict(
         nx=16, ny=16, dx=500, dy=500,
         outer_scale=8000, spheroscale=100,
         domain_height=3000, profile_dz=30,
         seed=42,
-        n_size_classes=5,
+        n_scale_classes_per_dyad=2,
     ),
     "asymmetric_grid": dict(
         nx=16, ny=20, dx=500, dy=400,

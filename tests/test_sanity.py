@@ -127,11 +127,14 @@ def test_rejects_zero_sparsity(tmp_path, simple_profiles):
                  sparsity_factors=(0, 1, 1))
 
 
-def test_rejects_invalid_n_size_classes(tmp_path, simple_profiles):
+def test_rejects_invalid_n_scale_classes_per_dyad(tmp_path, simple_profiles):
     h, qt = simple_profiles
-    with pytest.raises(ValueError, match="n_size_classes"):
+    with pytest.raises(ValueError, match="n_scale_classes_per_dyad"):
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
-                 n_size_classes=1)
+                 n_scale_classes_per_dyad=0)
+    with pytest.raises(ValueError, match="n_scale_classes_per_dyad"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, 100, 3000, 30, tmp_path / "x.nc",
+                 n_scale_classes_per_dyad=1.5)
 
 
 def test_rejects_float_sparsity(tmp_path, simple_profiles):

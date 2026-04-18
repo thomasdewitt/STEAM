@@ -24,7 +24,7 @@ def main():
     # ---- Parameters ----
     outer_scale = 5000 * 256       # m, horizontal
     dx = dy = 5000            # m  (L/dx = 32 = 2^5, gives 5 scale classes)
-    nx = ny = 256             # domain = 8192 m = 2 * outer_scale
+    nx = ny = 1024            # domain = 4 * outer_scale per side = 16 tiles
     domain_height = 20000    # m
     profile_dz = .6          # m
     spheroscale = 10    # m
@@ -73,7 +73,7 @@ def main():
                 h_profile, qt_profile, nx, ny, dx, dy,
                 outer_scale, spheroscale, domain_height, profile_dz,
                 out, seed=seed, h_min = 0.9 * h_profile.min(), h_max = 1.1 * h_profile.max(), qt_min = 0, qt_max = 1.5 * qt_profile.max(),
-                n_size_classes=10
+                n_scale_classes_per_dyad=1
             )
             ds = netCDF4.Dataset(out)
             h_3d = ds.variables['h'][:]

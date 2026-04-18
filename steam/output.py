@@ -113,6 +113,12 @@ def write_netcdf(
     qtp_var.units = "kg/kg"
     qtp_var.long_name = "input qt profile"
 
+    if 'spheroscale_profile' in simulation_params:
+        lsp_var = ds.createVariable("spheroscale_profile", "f4", ("z_profile",))
+        lsp_var[:] = np.asarray(simulation_params['spheroscale_profile'], dtype=np.float32)
+        lsp_var.units = "m"
+        lsp_var.long_name = "spheroscale profile on input profile grid"
+
     # 1D scale arrays
     kv = ds.createVariable("k_values", "f4", ("k",))
     kv[:] = k_values.astype(np.float32)
@@ -176,10 +182,8 @@ def write_netcdf(
         ds.turbulon_shape = p['turbulon_shape']
     if 'anisotropy' in p:
         ds.anisotropy = p['anisotropy']
-    if 'n_size_classes' in p:
-        ds.n_size_classes = np.int32(p['n_size_classes'])
-    if 'size_class_gap_factor' in p:
-        ds.size_class_gap_factor = np.float64(p['size_class_gap_factor'])
+    if 'n_scale_classes_per_dyad' in p:
+        ds.n_scale_classes_per_dyad = np.int32(p['n_scale_classes_per_dyad'])
 
     # Refinement-specific attributes
     for attr in ('parent_group', 'parent_x_slice', 'parent_y_slice',

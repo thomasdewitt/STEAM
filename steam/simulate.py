@@ -61,7 +61,7 @@ def simulate(
     profile_dz,
     output_path,
     sparsity_factors=(1, 1, 1),
-    n_size_classes=None,
+    n_scale_classes_per_dyad=1,
     surface_pressure=101325.0,
     seed=None,
     h_min=315 * 1004,
@@ -106,11 +106,12 @@ def simulate(
         (s_x, s_y, s_z) oversampling factors. Grid spacing at scale k is
         k/(2*s_i), so s=1 is Nyquist sampling and s=2 gives 4 grid cells
         per turbulon width.
-    n_size_classes : int or None
-        Number of size classes between outer_scale and 2*dx, inclusive.
-        If None, use the current dyadic behavior. If an integer, the
-        adjacent-class multiplicative gap is derived from the endpoint
-        constraint and this class count.
+    n_scale_classes_per_dyad : int
+        Controls the multiplicative spacing of scale classes. The gap
+        between adjacent classes is ``2 ** (1 / n_scale_classes_per_dyad)``,
+        so 1 (default) yields dyadic (powers-of-2) spacing, 2 yields
+        ``sqrt(2)`` spacing, etc. Must be a positive integer. The total
+        number of classes is chosen so the finest class sits near 2*dx.
     surface_pressure : float
         Surface pressure [Pa].
     seed : int or None
@@ -138,12 +139,11 @@ def simulate(
     for s, name in zip(sparsity_factors, ('s_x', 's_y', 's_z')):
         if not isinstance(s, int) or s < 1:
             raise ValueError(f"{name} must be a positive integer, got {s}")
-    if n_size_classes is not None:
-        if not isinstance(n_size_classes, int) or n_size_classes < 2:
-            raise ValueError(
-                "n_size_classes must be an integer >= 2 when provided, "
-                f"got {n_size_classes}"
-            )
+    if not isinstance(n_scale_classes_per_dyad, int) or n_scale_classes_per_dyad < 1:
+        raise ValueError(
+            "n_scale_classes_per_dyad must be a positive integer, "
+            f"got {n_scale_classes_per_dyad}"
+        )
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
         raise ValueError(
             f"min_distance_to_ground must be a non-negative integer, got {min_distance_to_ground}"
@@ -196,10 +196,10 @@ def simulate(
         raise ValueError(
             f"outer_scale ({outer_scale}) must be >= dx ({dx})"
         )
-    if n_size_classes is not None and outer_scale <= 2 * dx:
+    if outer_scale <= 2 * dx:
         raise ValueError(
-            "outer_scale must be greater than 2*dx when n_size_classes is "
-            f"provided, got outer_scale={outer_scale} and dx={dx}"
+            f"outer_scale ({outer_scale}) must be greater than 2*dx "
+            f"({2 * dx}); at least two scale classes are required"
         )
     for domain_size, axis in ((domain_x, 'x'), (domain_y, 'y')):
         n_tiles = domain_size / outer_scale
@@ -223,17 +223,19 @@ def simulate(
 
     z_profile = np.arange(len(h_profile), dtype=np.float64) * profile_dz
 
-    # Scale classes: L, ..., 2*dx (finest)
+    # Scale classes: L, ..., 2*dx (finest).  The multiplicative gap between
+    # adjacent classes is fully determined by n_scale_classes_per_dyad; the
+    # class count is rounded so the finest class sits near 2*dx.
     s_x, s_y, s_z = sparsity_factors
-    if n_size_classes is None:
-        size_class_gap_factor = 2.0
-        n_classes = int(
-            round(np.log(outer_scale / (2 * dx)) / np.log(size_class_gap_factor))
-        ) + 1
-    else:
-        n_classes = n_size_classes
-        size_class_gap_factor = float(
-            (outer_scale / (2 * dx)) ** (1.0 / (n_classes - 1))
+    size_class_gap_factor = 2.0 ** (1.0 / n_scale_classes_per_dyad)
+    n_classes = int(round(
+        np.log(outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
+    )) + 1
+    if n_classes < 2:
+        raise ValueError(
+            f"Fewer than 2 scale classes would be generated for "
+            f"outer_scale={outer_scale}, dx={dx}, "
+            f"n_scale_classes_per_dyad={n_scale_classes_per_dyad}"
         )
     k_values = outer_scale / size_class_gap_factor ** np.arange(n_classes)
 
@@ -333,6 +335,16 @@ def simulate(
     # k_z_values using arith-mean spheroscale as reference
     k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
 
+    # Align stored C_k onto the output z grid so descendants can inherit
+    # the (n_classes, nz_output) table without tracking per-class z arrays.
+    # Root simulations are no-pad in z, so z_arrays[i] spans the output z
+    # range; interpolation to z_final is clean (and identity for the last
+    # class in the no-pad case).
+    C_h_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_h_k[i]).astype(np.float32)
+                    for i in range(len(k_values))]
+    C_qt_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_qt_k[i]).astype(np.float32)
+                     for i in range(len(k_values))]
+
     simulation_params = {
         'nx': nx_final_val,
         'ny': ny_final_val,
@@ -341,11 +353,11 @@ def simulate(
         'dz': final_grid['dz'].astype(np.float32),
         'outer_scale': outer_scale,
         'spheroscale': spheroscale_final,
+        'spheroscale_profile': spheroscale_profile,
         'domain_height': domain_height,
         'profile_dz': profile_dz,
         'sparsity_factors': sparsity_factors,
-        'n_size_classes': n_classes,
-        'size_class_gap_factor': size_class_gap_factor,
+        'n_scale_classes_per_dyad': n_scale_classes_per_dyad,
         'surface_pressure': surface_pressure,
         'seed': seed,
         'C_h_L': C_h_L,
@@ -360,15 +372,13 @@ def simulate(
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
-        'n_size_classes': n_classes,
-        'size_class_gap_factor': size_class_gap_factor,
     }
 
     write_netcdf(
         output_path, h_3d, qt_3d,
         x_coords, y_coords, z_final,
         h_profile, qt_profile, z_profile.astype(np.float32),
-        k_values, k_z_values, C_h_k, C_qt_k,
+        k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
         simulation_params,
         compress=compress,
     )
@@ -862,8 +872,10 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     padded = np.pad(profile_on_finest_grid, (n_half, n_half - 1), mode='edge')
     response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
-    # Empirical sensitivity correction between Haar and turbulon envelope
-    response /= 1.3
+    # KEEP PLEASE  and DON'T change these comments unless I explicitely tell you!!!!
+    # Fudge factor based on empirical normalization diagnostic script
+    response /= 1.15 
+    # End DON't CHANGE
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []
@@ -946,7 +958,6 @@ def refine(
     dx, dy,
     parent_group='/',
     output_group=None,
-    n_size_classes=None,
     seed=None,
     sparsity_factors=None,
     turbulon_shape=None,
@@ -979,8 +990,6 @@ def refine(
     output_group : str or None
         NetCDF group name for output. Default: auto-generated
         "refinements/r0", "r1", ...
-    n_size_classes : int or None
-        Number of refinement size classes. If None, use dyadic classes.
     seed : int or None
         Random seed. If None, derived from parent seed + group name hash.
     sparsity_factors : tuple of 3 ints or None
@@ -1019,7 +1028,13 @@ def refine(
     qt_profile = grp.variables["qt_profile"][:]
     z_profile = grp.variables["z_profile"][:]
     k_values_parent = grp.variables["k_values"][:]
-    spheroscale_on_z = grp.variables["spheroscale"][:]
+    C_h_k_parent = grp.variables["C_h_k"][:]
+    C_qt_k_parent = grp.variables["C_qt_k"][:]
+    if "spheroscale_profile" in grp.variables:
+        spheroscale_profile = grp.variables["spheroscale_profile"][:]
+    else:
+        spheroscale_on_z = grp.variables["spheroscale"][:]
+        spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
 
     parent_dx = float(grp.dx)
     parent_dy = float(grp.dy)
@@ -1032,6 +1047,14 @@ def refine(
     qt_min = float(grp.qt_min)
     qt_max = float(grp.qt_max)
     min_distance_to_ground = int(grp.min_distance_to_ground)
+    if not hasattr(grp, 'n_scale_classes_per_dyad'):
+        raise ValueError(
+            f"Parent group {parent_group!r} has no n_scale_classes_per_dyad "
+            f"attribute; cannot extend the cascade. Regenerate the parent "
+            f"with the current version of simulate()."
+        )
+    parent_n_per_dyad = int(grp.n_scale_classes_per_dyad)
+    parent_gap = 2.0 ** (1.0 / parent_n_per_dyad)
 
     if sparsity_factors is None:
         sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
@@ -1073,35 +1096,31 @@ def refine(
     if inset_height <= 0:
         raise ValueError(f"z_max ({z_max}) must be greater than z_min ({z_min})")
 
-    # New outer scale = parent's finest k
+    # New outer scale = parent's finest k (the "ceiling" for this cascade).
+    # k_values start one log-step below new_outer_scale to avoid re-adding
+    # turbulons at the overlap scale with the parent.
     new_outer_scale = float(k_values_parent[-1])
 
     parent_nx = h_3d.shape[0]
     parent_ny = h_3d.shape[1]
 
-    # Compute new size classes from new_outer_scale down to 2*dx
+    # Extend the parent's log-spaced cascade by extrapolating with the same
+    # gap factor until k > 2*dx. Round the refining factor down to the
+    # largest gap^n that still satisfies new_outer_scale/gap^n >= 2*dx.
     s_x, s_y, s_z = sparsity_factors
-    if n_size_classes is None:
-        size_class_gap_factor = 2.0
-        n_classes = int(
-            round(np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor))
-        ) + 1
-    else:
-        n_classes = n_size_classes
-        size_class_gap_factor = float(
-            (new_outer_scale / (2 * dx)) ** (1.0 / (n_classes - 1))
-        )
-
-    if n_classes < 2:
+    size_class_gap_factor = parent_gap
+    n_classes = int(np.floor(
+        np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
+    ))
+    if n_classes < 1:
         raise ValueError(
-            f"Refinement requires at least 2 size classes, but "
-            f"new_outer_scale={new_outer_scale} and dx={dx} yield {n_classes}"
+            f"Refinement cannot add any classes: new_outer_scale="
+            f"{new_outer_scale}, dx={dx}, gap={size_class_gap_factor}. "
+            f"Decrease dx or use a parent with a larger finest scale."
         )
 
-    k_values = new_outer_scale / size_class_gap_factor ** np.arange(n_classes)
+    k_values = new_outer_scale / size_class_gap_factor ** np.arange(1, n_classes + 1)
 
-    # Interpolate spheroscale to profile z-grid
-    spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
     spheroscale_mean = float(np.mean(spheroscale_profile))
     k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
 
@@ -1250,37 +1269,33 @@ def refine(
         anisotropy=anisotropy,
     )
 
-    # Interpolate profiles to finest grid for normalization
-    z_finest = grids['z_arrays'][-1]
-    h_on_finest = np.interp(z_finest, z_profile, h_profile)
-    qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
-
-    # Vertical outer scale in finest-grid points (see simulate() for why
-    # the general form is 2*s_z * k_z(outer) / k_z(k_min)).
-    k_min = k_values[-1]
-    vertical_outer_scale_grid_pts = int(round(
-        2 * s_z * _k_z(anisotropy, new_outer_scale, spheroscale_mean)
-        / _k_z(anisotropy, k_min, spheroscale_mean)
-    ))
-
-    unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
-                                       support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
-    spectral_width_correction = spectral_width_normalization(
-        turbulon_shape, size_class_gap_factor
-    )
-
-    C_h_k = _compute_normalization(
-        h_on_finest, vertical_outer_scale_grid_pts,
-        k_values, new_outer_scale, grids,
-        unit_turbulon, turbulon_shape
-    )
-    C_qt_k = _compute_normalization(
-        qt_on_finest, vertical_outer_scale_grid_pts,
-        k_values, new_outer_scale, grids,
-        unit_turbulon, turbulon_shape
-    )
-    C_h_k = [c * spectral_width_correction for c in C_h_k]
-    C_qt_k = [c * spectral_width_correction for c in C_qt_k]
+    # Inherit amplitude normalization from the parent by extrapolating the
+    # parent's (k/outer)^H_h law with the shared gap factor. The parent's
+    # last-class amplitude is the anchor: C_parent[-1](z) lives on the
+    # parent's output z-grid and already encodes response_root *
+    # (k_parent_last/outer_root)^H_h * spectral_width_correction. Because
+    # gap is preserved, the correction is the same for every descendant,
+    # so multiplying by (k_child/k_parent_last)^H_h reproduces the unified
+    # cascade's amplitude at each new class — no re-measurement, no
+    # discontinuity at the overlap scale.
+    anchor_k = float(k_values_parent[-1])
+    anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)
+    anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)
+    # Trim fill values in case the parent's C_k array was padded to
+    # nz_k_max (refine writes per-class rows of varying length).
+    anchor_C_h = anchor_C_h[:len(z_coords)]
+    anchor_C_qt = anchor_C_qt[:len(z_coords)]
+    C_h_k = []
+    C_qt_k = []
+    for i, k in enumerate(k_values):
+        scale = float((k / anchor_k) ** H_h)
+        z_i = grids['z_arrays'][i]
+        C_h_k.append(
+            (np.interp(z_i, z_coords, anchor_C_h) * scale).astype(np.float32)
+        )
+        C_qt_k.append(
+            (np.interp(z_i, z_coords, anchor_C_qt) * scale).astype(np.float32)
+        )
 
     # Seed handling
     if seed is None and parent_seed is not None:
@@ -1379,6 +1394,14 @@ def refine(
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
+    # Align stored C_k to the output z grid (see matching block in simulate()
+    # for rationale). For refine with elevated / narrow-z insets this also
+    # trims off the pad region, so descendants can inherit cleanly.
+    C_h_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_h_k[i]).astype(np.float32)
+                    for i in range(len(k_values))]
+    C_qt_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_qt_k[i]).astype(np.float32)
+                     for i in range(len(k_values))]
+
     simulation_params = {
         'nx': nx_out,
         'ny': ny_out,
@@ -1387,12 +1410,12 @@ def refine(
         'dz': dz_final,
         'outer_scale': new_outer_scale,
         'spheroscale': spheroscale_final,
+        'spheroscale_profile': spheroscale_profile,
         'domain_height': inset_height,
         'domain_z_min': z_min,
         'profile_dz': profile_dz,
         'sparsity_factors': sparsity_factors,
-        'n_size_classes': n_classes,
-        'size_class_gap_factor': size_class_gap_factor,
+        'n_scale_classes_per_dyad': parent_n_per_dyad,
         'surface_pressure': surface_pressure,
         'seed': seed,
         'C_h_L': C_h_L,
@@ -1420,7 +1443,7 @@ def refine(
         parent_path, h_3d_out, qt_3d_out,
         x_out, y_out, z_final,
         h_profile, qt_profile, z_profile.astype(np.float32),
-        k_values, k_z_values, C_h_k, C_qt_k,
+        k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
         simulation_params,
         group=output_group,
         compress=compress,

@@ -1,13 +1,12 @@
 """Behavioral tests for different size-class discretizations."""
 
-import math
 import numpy as np
 import netCDF4
 
 from steam import simulate
 
 
-def _run_stats(tmp_path, target_gap_factor):
+def _run_stats(tmp_path, n_scale_classes_per_dyad):
     nx = ny = 64
     dx = dy = 100.0
     outer_scale = 400.0
@@ -19,20 +18,14 @@ def _run_stats(tmp_path, target_gap_factor):
     h_profile = 340e3 - 8e3 * (z_profile / domain_height)
     qt_profile = 0.016 - 0.010 * (z_profile / domain_height)
 
-    ratio = outer_scale / (2 * dx)
-    n_size_classes = max(
-        2,
-        int(round(1 + math.log(ratio) / math.log(target_gap_factor))),
-    )
-
-    out = tmp_path / f"gap_{str(target_gap_factor).replace('.', '_')}.nc"
+    out = tmp_path / f"per_dyad_{n_scale_classes_per_dyad}.nc"
     simulate(
         h_profile, qt_profile,
         nx, ny, dx, dy,
         outer_scale, spheroscale, domain_height, profile_dz,
         out,
         seed=7,
-        n_size_classes=n_size_classes,
+        n_scale_classes_per_dyad=n_scale_classes_per_dyad,
         h_min=float(h_profile.min()) - 1e3,
         h_max=float(h_profile.max()) + 1e3,
         qt_min=0.0,
@@ -43,6 +36,7 @@ def _run_stats(tmp_path, target_gap_factor):
     h = np.asarray(ds.variables["h"][:])
     qt = np.asarray(ds.variables["qt"][:])
     z_out = np.asarray(ds.variables["z"][:])
+    k_values = np.asarray(ds.variables["k_values"][:])
     ds.close()
 
     h_mean = np.interp(z_out, z_profile, h_profile)[np.newaxis, np.newaxis, :]
@@ -51,8 +45,8 @@ def _run_stats(tmp_path, target_gap_factor):
     qt_pert = qt - qt_mean
 
     return {
-        "target_gap_factor": target_gap_factor,
-        "n_size_classes": n_size_classes,
+        "n_scale_classes_per_dyad": n_scale_classes_per_dyad,
+        "n_classes": len(k_values),
         "h_mean": float(h.mean()),
         "qt_mean": float(qt.mean()),
         "h_std": float(h_pert.std()),
@@ -63,8 +57,7 @@ def _run_stats(tmp_path, target_gap_factor):
 
 
 def test_different_size_class_counts_give_grossly_similar_statistics(tmp_path):
-    target_gap_factors = [2.0, 1.4, 1.2, 1.05]
-    stats = [_run_stats(tmp_path, gap) for gap in target_gap_factors]
+    stats = [_run_stats(tmp_path, n) for n in (1, 2, 3, 4)]
     baseline = stats[0]
 
     for current in stats[1:]:
@@ -78,7 +71,7 @@ def test_different_size_class_counts_give_grossly_similar_statistics(tmp_path):
         for key in ("h_std", "qt_std", "h_abs_q95", "qt_abs_q95"):
             ratio = current[key] / baseline[key]
             assert 0.6 <= ratio <= 1.5, (
-                f"{key} changed too much for target_gap_factor="
-                f"{current['target_gap_factor']}: ratio={ratio:.3f}, "
-                f"n_size_classes={current['n_size_classes']}"
+                f"{key} changed too much for n_scale_classes_per_dyad="
+                f"{current['n_scale_classes_per_dyad']}: ratio={ratio:.3f}, "
+                f"n_classes={current['n_classes']}"
             )
