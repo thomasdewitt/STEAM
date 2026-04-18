@@ -37,7 +37,7 @@ scaleinvariance.set_numerical_precision('float32')
 
 
 # ── Config ────────────────────────────────────────────────────────────────
-N_REF         = 10                       # size classes in the reference
+# Reference's n_classes is derived from NX and OUTER_SCALE (dyadic, gap=2).
 N_PARENT      = 5                        # size classes in the parent
 NX = NY       = 1024
 DOMAIN_WIDTH  = 4_000_000.0              # m
@@ -93,8 +93,11 @@ def main():
     # 2^(N_PARENT-1):
     parent_dx = OUTER_SCALE / (2 * 2 ** (N_PARENT - 1))
     parent_nx = int(round(DOMAIN_WIDTH / parent_dx))
-    ref_dx = OUTER_SCALE / (2 * 2 ** (N_REF - 1))
-    print(f"REF: n_classes={N_REF}, dx={ref_dx:.2f}m, NX={NX}")
+    # REF uses dx=DOMAIN_WIDTH/NX; the refine target dx must equal REF's dx
+    # so parent+refine terminates at the same finest class as REF.
+    ref_dx = DOMAIN_WIDTH / NX
+    ref_n_classes = int(round(np.log2(OUTER_SCALE / (2 * ref_dx)))) + 1
+    print(f"REF: n_classes={ref_n_classes}, dx={ref_dx:.2f}m, NX={NX}")
     print(f"PARENT: n_classes={N_PARENT}, dx={parent_dx:.2f}m, NX={parent_nx}")
     print(f"REFINE target dx = {ref_dx:.2f}m (= REF dx)\n")
 
@@ -147,6 +150,16 @@ def main():
                 nest_Ch_refine = grp.variables['C_h_k'][:]
 
     # ── C_h_k comparison ────────────────────────────────────────────────
+    # NB: these ratios are not expected to be exactly 1. C_h_k is measured
+    # by convolving the mean profile with a discrete Haar kernel on each
+    # cascade's finest grid; the kernel width n_half is rounded to an
+    # integer number of cells, so a reference with many finest cells
+    # (n_half~23) and a parent with few (n_half~5) resolve slightly
+    # different effective Haar widths and edge-padding regions. The
+    # resulting amplitude offset is typically a few percent and is a
+    # measurement artifact, not a physical discrepancy — the nested
+    # cascade's k_values and (k/anchor_k)^H_h scaling are inherited
+    # faithfully from the parent's last class.
     print("\n=== C_h_k at matching scales ===")
     combined_k = np.concatenate([nest_k_parent, nest_k_refine])
     combined_C = np.concatenate(
@@ -158,6 +171,9 @@ def main():
         cr = float(ref_Ch[j].mean())
         cn = float(combined_C[match])
         print(f"{k:12.2f}   {cr:15.4f}   {cn:18.4f}   {cn/cr:.3f}")
+    print("(ratios are not expected to be exactly 1 — the discrete-Haar "
+          "normalization resolves the outer-scale width to within one "
+          "finest-grid cell, which differs between ref and parent.)")
 
     # ── Haar comparisons ────────────────────────────────────────────────
     ref_data  = np.concatenate(ref_cols,   axis=0)
@@ -197,7 +213,7 @@ def main():
 
     # ── Plot ────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.loglog(scales_r, haar_r, 'o-', ms=3, lw=1, label=f'Reference (N={N_REF})',
+    ax.loglog(scales_r, haar_r, 'o-', ms=3, lw=1, label=f'Reference (N={ref_n_classes})',
               color='#2c7bb6')
     ax.loglog(scales_n, haar_n, 's-', ms=3, lw=1,
               label=f'Nested: parent (N={N_PARENT}) + refine', color='#d7191c')
@@ -207,9 +223,12 @@ def main():
         (kz_refine_last, "$k_z$(refine-k_min)", '#ff7f00'),
     ]:
         ax.axvline(x, color=c, ls='--', lw=1, alpha=0.7, label=lab)
-    # reference H_v slope guide
+    # reference H_v slope guide, pinned to the reference curve at the
+    # upper end of the refined band (so the guide sits on the data).
+    anchor_x = 0.8 * kz_parent_last
+    anchor_y = float(np.interp(anchor_x, scales_r, haar_r))
     xr = np.array([kz_refine_last, kz_parent_outer])
-    ax.loglog(xr, 1e4 * (xr/xr[0])**H_v_expected, 'k:', lw=1,
+    ax.loglog(xr, anchor_y * (xr/anchor_x)**H_v_expected, 'k:', lw=1,
               label=f'slope = {H_v_expected:.3f}')
     ax.set_xlabel('Vertical lag [m]')
     ax.set_ylabel('Haar fluctuation (first order) [J/kg]')
