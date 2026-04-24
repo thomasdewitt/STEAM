@@ -1364,8 +1364,16 @@ def refine(
     ny_out = h_3d_out.shape[1]
     dx_final = inner_extent_x / nx_out
     dy_final = inner_extent_y / ny_out
-    x_out = np.arange(nx_out, dtype=np.float32) * dx_final + x_start * parent_dx
-    y_out = np.arange(ny_out, dtype=np.float32) * dy_final + y_start * parent_dy
+    # World-absolute coords: parent's own first-cell world position + local
+    # in-parent offset. Using only x_start * parent_dx skews deeper refinements
+    # whose parent doesn't start at world origin (e.g. a cube carved from a
+    # strip that is not y-centered on 0).
+    parent_x_origin = float(x_coords[0])
+    parent_y_origin = float(y_coords[0])
+    x_out = (np.arange(nx_out, dtype=np.float32) * dx_final
+             + x_start * parent_dx + parent_x_origin)
+    y_out = (np.arange(ny_out, dtype=np.float32) * dy_final
+             + y_start * parent_dy + parent_y_origin)
 
     # 2D starting pressure from parent's p, interpolated in z to z_final[0]
     # and bilinearly upsampled to the child horizontal grid.
