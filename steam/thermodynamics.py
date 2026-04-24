@@ -1,5 +1,8 @@
 """Thermodynamic recovery of diagnostic fields from h and qt."""
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import numpy as np
 import netCDF4
 from .constants import (
@@ -87,7 +90,8 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
 
 
-def compute_diagnostics(nc_path, chunk_nx=512, group=None, compress=False):
+def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=False,
+                        n_workers=None):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
     Opens the file in r+ mode, reads h, qt, z, and the starting pressure
@@ -106,6 +110,11 @@ def compute_diagnostics(nc_path, chunk_nx=512, group=None, compress=False):
     compress : bool
         If True, new diagnostic variables are written with zlib
         compression at complevel=4. Default False (uncompressed).
+    n_workers : int or None
+        Number of threads used to compute chunks in parallel. None (default)
+        picks ``min(8, n_chunks, cpu_count)``. Pass 1 for serial. Results are
+        bit-identical regardless of ``n_workers`` since each chunk is an
+        independent per-column calculation.
     """
     ds = netCDF4.Dataset(nc_path, "r+")
     grp = ds if group is None else ds[group]
@@ -136,25 +145,52 @@ def compute_diagnostics(nc_path, chunk_nx=512, group=None, compress=False):
     h_var = grp.variables["h"]
     qt_var = grp.variables["qt"]
 
-    for x0 in range(0, nx, chunk_nx):
-        x1 = min(x0 + chunk_nx, nx)
-        print(f"  diagnostics: x [{x0}:{x1}] / {nx}", end="\r")
+    chunks = [(x0, min(x0 + chunk_nx, nx)) for x0 in range(0, nx, chunk_nx)]
+    n_chunks = len(chunks)
 
-        h_chunk = h_var[x0:x1, :, :]
-        qt_chunk = qt_var[x0:x1, :, :]
+    if n_workers is None:
+        n_workers = min(8, n_chunks, os.cpu_count() or 1)
+    n_workers = max(1, min(int(n_workers), n_chunks))
 
+    def _p_slice(x0, x1):
         if isinstance(starting_pressure, np.ndarray):
-            p_chunk = starting_pressure[x0:x1, :]
-        else:
-            p_chunk = starting_pressure
+            return starting_pressure[x0:x1, :]
+        return starting_pressure
 
-        result = recover_diagnostics(h_chunk, qt_chunk, z_values, p_chunk)
-
+    def _write_result(x0, x1, result):
         for name in ("T", "qv", "qc", "qi", "p"):
             grp.variables[name][x0:x1, :, :] = result[name].astype(np.float32)
 
-    ds.close()
     tag = f" (group '{group}')" if group else ""
+
+    if n_workers == 1:
+        for x0, x1 in chunks:
+            print(f"  diagnostics: x [{x0}:{x1}] / {nx}", end="\r")
+            h_chunk = h_var[x0:x1, :, :]
+            qt_chunk = qt_var[x0:x1, :, :]
+            result = recover_diagnostics(h_chunk, qt_chunk, z_values,
+                                         _p_slice(x0, x1))
+            _write_result(x0, x1, result)
+    else:
+        done = 0
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for i in range(0, n_chunks, n_workers):
+                batch = chunks[i:i + n_workers]
+                futures = {}
+                for x0, x1 in batch:
+                    h_chunk = h_var[x0:x1, :, :]
+                    qt_chunk = qt_var[x0:x1, :, :]
+                    fut = pool.submit(recover_diagnostics, h_chunk, qt_chunk,
+                                      z_values, _p_slice(x0, x1))
+                    futures[fut] = (x0, x1)
+                for fut in as_completed(futures):
+                    x0, x1 = futures[fut]
+                    _write_result(x0, x1, fut.result())
+                    done += 1
+                    print(f"  diagnostics: {done}/{n_chunks} chunks "
+                          f"({n_workers} workers)", end="\r")
+
+    ds.close()
     print(f"  diagnostics: done, written to {nc_path}{tag}          ")
 
 

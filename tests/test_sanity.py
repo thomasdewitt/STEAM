@@ -571,3 +571,21 @@ def test_compute_diagnostics_chunking_matches_full(tmp_path, simple_profiles):
         np.testing.assert_array_equal(ds1.variables[name][:], ds2.variables[name][:],
                                       err_msg=f"{name} differs between chunk sizes")
     ds1.close(); ds2.close()
+
+
+def test_compute_diagnostics_parallel_matches_serial(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    kw = dict(nx=16, ny=16, dx=500, dy=500, outer_scale=8000, spheroscale=100,
+              domain_height=3000, profile_dz=30, seed=42)
+    p_serial = simulate(h, qt, output_path=tmp_path / "serial.nc", **kw)
+    p_parallel = simulate(h, qt, output_path=tmp_path / "parallel.nc", **kw)
+    compute_diagnostics(p_serial, chunk_nx=2, n_workers=1)
+    compute_diagnostics(p_parallel, chunk_nx=2, n_workers=4)
+    ds1 = netCDF4.Dataset(p_serial, "r")
+    ds2 = netCDF4.Dataset(p_parallel, "r")
+    for name in ("T", "qv", "qc", "qi", "p"):
+        np.testing.assert_array_equal(
+            ds1.variables[name][:], ds2.variables[name][:],
+            err_msg=f"{name} differs between n_workers=1 and n_workers=4"
+        )
+    ds1.close(); ds2.close()
