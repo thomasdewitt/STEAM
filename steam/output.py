@@ -4,6 +4,8 @@ import numpy as np
 import netCDF4
 from pathlib import Path
 
+from . import constants
+
 
 def write_netcdf(
     output_path, h_3d, qt_3d,
@@ -12,7 +14,7 @@ def write_netcdf(
     k_values, k_z_values, C_h_k, C_qt_k,
     simulation_params,
     group=None,
-    compress=False,
+    compress=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -37,15 +39,19 @@ def write_netcdf(
         If None, write to root of a new file (current behavior).
         If provided, open existing file in append mode and create a
         NetCDF4 group with this name.
-    compress : bool
+    compress : bool or None
         If True, write the 3D data variables (h, qt, p_bottom) with
-        zlib compression at complevel=4. Default False (uncompressed).
+        zlib compression at complevel=4. None (default) uses the
+        module-level ``steam.constants.output_compress`` setting.
 
     Returns
     -------
     Path
         The output_path as a Path object.
     """
+    if compress is None:
+        compress = constants.output_compress
+
     output_path = Path(output_path)
     nx_final, ny_final, nz_final = h_3d.shape
 

@@ -4,6 +4,7 @@ import math
 import numpy as np
 import netCDF4
 from pathlib import Path
+from . import constants
 from .constants import (
     hurst_horizontal as H_h,
     hurst_vertical_anisotropy as H_z,
@@ -71,7 +72,7 @@ def simulate(
     min_distance_to_ground=1,
     turbulon_shape='mexican_hat',
     anisotropy='canonical',
-    compress=False,
+    compress=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -123,15 +124,18 @@ def simulate(
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
         of the ground. Must be a non-negative integer.
-    compress : bool
+    compress : bool or None
         If True, 3D data variables in the output NetCDF are written with
-        zlib compression at complevel=4. Default False (uncompressed).
+        zlib compression at complevel=4. None (default) uses the module-level
+        ``steam.constants.output_compress`` setting.
 
     Returns
     -------
     Path
         The output_path as a Path object.
     """
+    if compress is None:
+        compress = constants.output_compress
     output_path = Path(output_path)
     seed_sequence = np.random.SeedSequence(seed)
 
@@ -964,7 +968,7 @@ def refine(
     z_min=None,
     z_max=None,
     anisotropy=None,
-    compress=False,
+    compress=None,
 ):
     """Refine a subdomain of a parent simulation to finer resolution.
 
@@ -1004,15 +1008,18 @@ def refine(
     anisotropy : str or None
         Grid-anisotropy function name (see _k_z). If None, inherit from
         the parent group (defaulting to 'canonical' for older files).
-    compress : bool
+    compress : bool or None
         If True, 3D data variables in the output group are written with
-        zlib compression at complevel=4. Default False (uncompressed).
+        zlib compression at complevel=4. None (default) uses the module-level
+        ``steam.constants.output_compress`` setting.
 
     Returns
     -------
     Path
         The parent_path (with the new group written into it).
     """
+    if compress is None:
+        compress = constants.output_compress
     parent_path = Path(parent_path)
 
     # Read parent data from the specified group

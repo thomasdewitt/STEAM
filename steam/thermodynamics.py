@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import netCDF4
+from . import constants
 from .constants import (
     specific_heat_dry_air as cp,
     latent_heat_vaporization as Lv,
@@ -91,7 +92,7 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
     return {"T": T, "qv": qv, "qc": qc, "qi": qi, "p": p}
 
 
-def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=False,
+def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
                         n_workers=None):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
@@ -108,15 +109,19 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=False,
     group : str or None
         NetCDF group to operate on. None means the root group; pass e.g.
         "refinements/r0" to run diagnostics on a refinement group.
-    compress : bool
+    compress : bool or None
         If True, new diagnostic variables are written with zlib
-        compression at complevel=4. Default False (uncompressed).
+        compression at complevel=4. None (default) uses the module-level
+        ``steam.constants.output_compress`` setting.
     n_workers : int or None
         Number of threads used to compute chunks in parallel. None (default)
         picks ``min(8, n_chunks, cpu_count)``. Pass 1 for serial. Results are
         bit-identical regardless of ``n_workers`` since each chunk is an
         independent per-column calculation.
     """
+    if compress is None:
+        compress = constants.output_compress
+
     ds = netCDF4.Dataset(nc_path, "r+")
     grp = ds if group is None else ds[group]
     nx = len(grp.dimensions["x"])
