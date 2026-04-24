@@ -1,6 +1,7 @@
 """Thermodynamic recovery of diagnostic fields from h and qt."""
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -163,14 +164,27 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=False,
 
     tag = f" (group '{group}')" if group else ""
 
+    t_start = time.perf_counter()
+
+    def _progress(done):
+        elapsed = time.perf_counter() - t_start
+        pct = 100.0 * done / n_chunks
+        rate = done / elapsed if elapsed > 0 else 0.0
+        eta = (n_chunks - done) / rate if rate > 0 else 0.0
+        print(f"  diagnostics: {done}/{n_chunks} chunks ({pct:5.1f}%) "
+              f"[{n_workers}w, {elapsed:5.1f}s elapsed, ~{eta:5.1f}s left]   ",
+              end="\r", flush=True)
+
     if n_workers == 1:
+        done = 0
         for x0, x1 in chunks:
-            print(f"  diagnostics: x [{x0}:{x1}] / {nx}", end="\r")
             h_chunk = h_var[x0:x1, :, :]
             qt_chunk = qt_var[x0:x1, :, :]
             result = recover_diagnostics(h_chunk, qt_chunk, z_values,
                                          _p_slice(x0, x1))
             _write_result(x0, x1, result)
+            done += 1
+            _progress(done)
     else:
         done = 0
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -187,11 +201,12 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=False,
                     x0, x1 = futures[fut]
                     _write_result(x0, x1, fut.result())
                     done += 1
-                    print(f"  diagnostics: {done}/{n_chunks} chunks "
-                          f"({n_workers} workers)", end="\r")
+                    _progress(done)
 
     ds.close()
-    print(f"  diagnostics: done, written to {nc_path}{tag}          ")
+    total = time.perf_counter() - t_start
+    print(f"  diagnostics: done in {total:.1f}s, written to {nc_path}{tag}"
+          "                    ")
 
 
 def _saturation_vapor_pressure(T):
