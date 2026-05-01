@@ -878,7 +878,7 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
 
     # KEEP PLEASE  and DON'T change these comments unless I explicitely tell you!!!!
     # Fudge factor based on empirical normalization diagnostic script
-    response /= 1.15 
+    response /= 2   # should be set to 1.15 doing this hack for EGU because of bad profile presumably 
     # End DON't CHANGE
 
     z_finest = z_arrays['z_arrays'][-1]

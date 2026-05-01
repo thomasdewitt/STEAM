@@ -14,3 +14,5 @@ __pycache__/
 *.toc
 pytest-of-thomas/
 tests/regression_data/
+
+.codex
