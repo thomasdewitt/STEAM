@@ -78,16 +78,24 @@ WEIGHTING = 'gradient'
 #   ~4 km are strongly RIGHT-skewed, skew ~ +1.8 / +2.0). Gradient weighting is
 #   symmetric in sign, so it cannot manufacture that asymmetry on its own.
 # 'levy'    : S_k ~ a Levy alpha-stable (scipy.stats.levy_stable) with index
-#   LEVY_ALPHA in (0,2] and skewness LEVY_BETA in [-1,1]. beta > 0 puts the heavy
-#   tail on the POSITIVE side (verified: heavier right tail), i.e. injects the
-#   updraft-like positive skew directly at the noise level. NOTE: for alpha < 2
-#   the variance is infinite, so the field relies on the soft-clamp / qt_max
-#   clip to bound rare extreme draws; the draw is centered to zero sample mean
-#   per scale class so it does not bias the prescribed mean profile.
-# Override at runtime via steam.simulate.NOISE_DIST / LEVY_ALPHA / LEVY_BETA.
+#   LEVY_ALPHA in (0,2] and skewness LEVY_BETA in [-1,1]. beta > 0 -> heavy right
+#   tail. NOTE: for alpha < 2 the variance is INFINITE -> a power-law tail that
+#   blows up condensate (LWP spikes ~1e5 g/m^2). Right skew, wrong tail.
+# 'gamma'   : S_k ~ centered, unit-variance Gamma(shape=NOISE_GAMMA_K): for
+#   G ~ Gamma(k,1), X = (G - k)/sqrt(k). Mean 0, var 1, skew = 2/sqrt(k), with a
+#   light EXPONENTIAL tail (finite variance). k is the skew dial: k=1 is the
+#   centered exponential (skew +2, ~ the LES MSE skew), k=4 -> skew 1,
+#   k -> inf -> Gaussian. Bounded below at -sqrt(k) (gentle bounded subsidence;
+#   sparse intense positive updraft tail) -- the convective shape, light-tailed.
+# 'skewnorm': S_k ~ centered, unit-variance Azzalini skew-normal (shape
+#   NOISE_SKEWNORM_A). Gaussian tails (lightest), continuous skew but capped ~1.
+# Unit-variance standardization means these are drop-in for N(0,1) (same fudge).
+# Override via steam.simulate.NOISE_DIST / LEVY_* / NOISE_GAMMA_K / NOISE_SKEWNORM_A.
 NOISE_DIST = 'gaussian'
 LEVY_ALPHA = 1.8
 LEVY_BETA = 0.5
+NOISE_GAMMA_K = 1.0       # Gamma shape; skew = 2/sqrt(k); 1.0 = centered exponential
+NOISE_SKEWNORM_A = 4.0    # skew-normal shape parameter
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -977,8 +985,25 @@ def _draw_noise(shape, rng):
     (the rvs sampler is float64 with several temporaries), cast to float32,
     and centered to exactly zero sample mean so it adds no DC bias to the field.
     """
-    if NOISE_DIST != 'levy':
+    if NOISE_DIST == 'gaussian':
         return rng.standard_normal(shape, dtype=np.float32)
+    if NOISE_DIST == 'gamma':
+        # centered, unit-variance Gamma(k): skew = 2/sqrt(k), exponential tail.
+        k = NOISE_GAMMA_K
+        x = (rng.gamma(k, 1.0, size=shape) - k) / np.sqrt(k)
+        return x.astype(np.float32)
+    if NOISE_DIST == 'skewnorm':
+        # Azzalini skew-normal via the |N| + N construction (numpy-native, fast),
+        # then standardized to zero-mean unit-variance. Gaussian tails.
+        a = NOISE_SKEWNORM_A
+        delta = a / np.sqrt(1.0 + a * a)
+        x = (delta * np.abs(rng.standard_normal(shape))
+             + np.sqrt(1.0 - delta * delta) * rng.standard_normal(shape))
+        m = delta * np.sqrt(2.0 / np.pi)
+        v = 1.0 - 2.0 * delta * delta / np.pi
+        return ((x - m) / np.sqrt(v)).astype(np.float32)
+    if NOISE_DIST != 'levy':
+        raise ValueError(f"unknown NOISE_DIST {NOISE_DIST!r}")
     from scipy.stats import levy_stable
     out = np.empty(shape, dtype=np.float32)
     flat = out.reshape(-1, shape[-1]) if out.ndim > 1 else out.reshape(1, -1)
