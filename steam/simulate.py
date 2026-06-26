@@ -72,6 +72,23 @@ GRADIENT_WEIGHT_POWER = 1.0
 #   `steam.simulate.WEIGHTING = 'field'`.
 WEIGHTING = 'gradient'
 
+# ─── NOISE DISTRIBUTION: shape of the sparse turbulon amplitude S_k ──────────
+# 'gaussian' (default, original): S_k ~ N(0,1), symmetric -> the field PDF is
+#   symmetric, which is the wrong shape for convection (SAM/TWPICE qt & MSE at
+#   ~4 km are strongly RIGHT-skewed, skew ~ +1.8 / +2.0). Gradient weighting is
+#   symmetric in sign, so it cannot manufacture that asymmetry on its own.
+# 'levy'    : S_k ~ a Levy alpha-stable (scipy.stats.levy_stable) with index
+#   LEVY_ALPHA in (0,2] and skewness LEVY_BETA in [-1,1]. beta > 0 puts the heavy
+#   tail on the POSITIVE side (verified: heavier right tail), i.e. injects the
+#   updraft-like positive skew directly at the noise level. NOTE: for alpha < 2
+#   the variance is infinite, so the field relies on the soft-clamp / qt_max
+#   clip to bound rare extreme draws; the draw is centered to zero sample mean
+#   per scale class so it does not bias the prescribed mean profile.
+# Override at runtime via steam.simulate.NOISE_DIST / LEVY_ALPHA / LEVY_BETA.
+NOISE_DIST = 'gaussian'
+LEVY_ALPHA = 1.8
+LEVY_BETA = 0.5
+
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
 
@@ -951,8 +968,35 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     return C_k
 
 
+def _draw_noise(shape, rng):
+    """Draw the sparse turbulon amplitude block, zero-mean, float32.
+
+    Dispatches on the module global NOISE_DIST ('gaussian' or 'levy').
+    Gaussian is N(0,1) (original). Levy is a (LEVY_ALPHA, LEVY_BETA) alpha-stable
+    via scipy.stats.levy_stable, generated in z-slabs to cap peak memory
+    (the rvs sampler is float64 with several temporaries), cast to float32,
+    and centered to exactly zero sample mean so it adds no DC bias to the field.
+    """
+    if NOISE_DIST != 'levy':
+        return rng.standard_normal(shape, dtype=np.float32)
+    from scipy.stats import levy_stable
+    out = np.empty(shape, dtype=np.float32)
+    flat = out.reshape(-1, shape[-1]) if out.ndim > 1 else out.reshape(1, -1)
+    nrow, ncol = flat.shape
+    # chunk rows so each draw is ~3e7 elements (~0.24 GB f64 + temporaries)
+    rstep = max(1, int(3e7 // max(ncol, 1)))
+    for r0 in range(0, nrow, rstep):
+        r1 = min(nrow, r0 + rstep)
+        x = levy_stable.rvs(LEVY_ALPHA, LEVY_BETA, size=(r1 - r0, ncol),
+                            random_state=rng)
+        flat[r0:r1] = x.astype(np.float32)
+    out -= np.float32(out.mean(dtype=np.float64))   # zero-mean (no DC bias)
+    return out
+
+
 def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
-    """Generate sparse N(0,1) noise field at oversampled resolution.
+    """Generate sparse noise field at oversampled resolution (see _draw_noise
+    for the per-sample distribution: N(0,1) or Levy alpha-stable via NOISE_DIST).
 
     When s=1 in all dimensions, returns a full grid of random values.
     When s>1, noise is nonzero every s grid points (one turbulon center
@@ -967,15 +1011,13 @@ def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
     rng : numpy.random.Generator
     """
     if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return rng.standard_normal((nx, ny, nz), dtype=np.float32)
+        return _draw_noise((nx, ny, nz), rng)
 
     field = np.zeros((nx, ny, nz), dtype=np.float32)
     ix = np.arange(0, nx, factor_x)
     iy = np.arange(0, ny, factor_y)
     iz = np.arange(0, nz, factor_z)
-    field[np.ix_(ix, iy, iz)] = rng.standard_normal(
-        (len(ix), len(iy), len(iz)), dtype=np.float32,
-    )
+    field[np.ix_(ix, iy, iz)] = _draw_noise((len(ix), len(iy), len(iz)), rng)
     return field
 
 
