@@ -50,6 +50,19 @@ NORMALIZATION_FUDGE = 2.0
 # via `steam.simulate.GRADIENT_WEIGHT_POWER = <value>`.
 GRADIENT_WEIGHT_POWER = 1.0
 
+# ─── WEIGHTING MODE: what concentrates turbulon amplitude ────────────────────
+# 'gradient' (default, original): weight by |grad(field)| * soft-clamp -> amplitude
+#   concentrates at edges/interfaces.
+# 'field'   : weight by the soft-clamp ALONE, i.e. (field-min)*(max-field) (the
+#   both-sides-clamped field departure). With max set to ~2x the observed field
+#   max, the data only reaches the rising half, so the weight ~ |field-min| over
+#   the real range -> amplitude concentrates in the BODY of high-field (moist/warm)
+#   regions, not edges. Aimed at building the qt-MSE joint (mixing-line) structure
+#   the gradient form misses. Overall amplitude shift is absorbed by re-tuning
+#   NORMALIZATION_FUDGE (C_*_k machinery unchanged). Override at runtime via
+#   `steam.simulate.WEIGHTING = 'field'`.
+WEIGHTING = 'gradient'
+
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
 
@@ -591,16 +604,21 @@ def cascade_loop(
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
-            # Soft-clamp: parabolic weight
+            # Soft-clamp: parabolic, both-sides weight = (field-min)*(max-field)
             u = np.clip((running_sum - var_min) / (var_max - var_min), 0, 1)
             soft_clip = u * (1 - u)
             del u
 
-            # Gradient magnitude × soft clip, normalized per z-level (Apxeq:amplitude propto gradient normalized)
-            G = _gradient_magnitude(running_sum, dx_k, dy_k, z_k)
-            del running_sum
-            G *= soft_clip
-            del soft_clip
+            if WEIGHTING == 'field':
+                # FIELD weighting: the soft-clamp IS the weight (no gradient).
+                G = soft_clip
+                del running_sum
+            else:
+                # GRADIENT weighting (original): |grad(field)| * soft-clamp.
+                G = _gradient_magnitude(running_sum, dx_k, dy_k, z_k)
+                del running_sum
+                G *= soft_clip
+                del soft_clip
             mean_G = G.mean(axis=(0, 1), keepdims=True)
             G /= np.where(mean_G > 0, mean_G, np.float32(1.0))
             del mean_G
