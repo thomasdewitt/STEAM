@@ -96,6 +96,12 @@ LEVY_ALPHA = 1.8
 LEVY_BETA = 0.5
 NOISE_GAMMA_K = 1.0       # Gamma shape; skew = 2/sqrt(k); 1.0 = centered exponential
 NOISE_SKEWNORM_A = 4.0    # skew-normal shape parameter
+# NOISE_SIGN: multiply the (zero-mean) draw by this. -1 flips the skew sign.
+# STEAM's turbulon kernel is a zero-mean wavelet (mexican-hat/morlet, negative
+# side-lobes), so the convolution INVERTS skew: a positive-skew S_k yields a
+# negative-skew field and vice versa. Hence a LEFT-skewed noise (NOISE_SIGN=-1
+# on a right-skewed dist) produces the RIGHT-skewed (convective) field we want.
+NOISE_SIGN = 1.0
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -977,6 +983,20 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
 
 
 def _draw_noise(shape, rng):
+    """Draw zero-mean unit-scale noise, then apply the global NOISE_SIGN flip.
+
+    NOISE_SIGN=-1 negates the (already zero-mean) draw, flipping its skew sign.
+    Because STEAM's wavelet kernel inverts skew through the convolution, a
+    LEFT-skewed S_k (e.g. NOISE_SIGN=-1 on a right-skewed Gamma) yields a
+    RIGHT-skewed field -- the convective direction.
+    """
+    x = _draw_noise_core(shape, rng)
+    if NOISE_SIGN < 0:
+        np.negative(x, out=x)
+    return x
+
+
+def _draw_noise_core(shape, rng):
     """Draw the sparse turbulon amplitude block, zero-mean, float32.
 
     Dispatches on the module global NOISE_DIST ('gaussian' or 'levy').
