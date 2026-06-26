@@ -23,6 +23,33 @@ from .output import write_netcdf
 CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
 
+# ─── FUDGE FACTOR (empirical normalization correction) ──────────────────────
+# Divides the Haar response in _compute_normalization, i.e. it scales the whole
+# cascade amplitude: LARGER value -> SMALLER perturbations. This is a FUDGE
+# FACTOR, kept explicit on purpose. History / tuned values:
+#   1.15  original, from the empirical normalization-diagnostic script
+#   2.0   EGU hack for a bad profile (May 2026)  [current default, unchanged]
+#   DYCOMS-RF01 stratocumulus LWP tuning (2026-06-26, steam_experiment/):
+#     ~22.6 for constant spheroscale=1000 m;  ~32 for varying ls 200->2 m.
+#     These match qt-variance / LWP but leave MSE variance too low -- a single
+#     scalar can't fix both, which is why the constants need to become
+#     HEIGHT/FIELD-SPECIFIC (roadmap). Until then LWP-tuned is the pragmatic
+#     interim choice for a cloud field.
+# Left at 2.0 so other configs are unchanged; override per run via
+# `steam.simulate.NORMALIZATION_FUDGE = <value>`.
+NORMALIZATION_FUDGE = 2.0
+
+# ─── INTERMITTENCY KNOB: gradient-weight exponent ───────────────────────────
+# The per-class gradient-magnitude weights (normalized to per-z-level mean 1) are
+# what give the cascade its emergent intermittency. Raising them to a power > 1
+# (then renormalizing back to mean 1) sharpens the weighting -> turbulon amplitude
+# concentrates where gradients are large -> MORE intermittent / spikier field,
+# WITHOUT changing the field mean (so mean LWP is preserved; no re-tuning needed).
+# 1.0 = unchanged (current behavior). DYCOMS/TWPICE/GATE under-intermittency work
+# (2026-06-26) uses this to push concentration toward the LES. Override at runtime
+# via `steam.simulate.GRADIENT_WEIGHT_POWER = <value>`.
+GRADIENT_WEIGHT_POWER = 1.0
+
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
 
@@ -578,6 +605,14 @@ def cascade_loop(
             G /= np.where(mean_G > 0, mean_G, np.float32(1.0))
             del mean_G
 
+            # Intermittency knob: sharpen the (mean-1) weights, renormalize to
+            # mean 1 so the field mean is unchanged. See GRADIENT_WEIGHT_POWER.
+            if GRADIENT_WEIGHT_POWER != 1.0:
+                G **= np.float32(GRADIENT_WEIGHT_POWER)
+                mean_Gp = G.mean(axis=(0, 1), keepdims=True)
+                G /= np.where(mean_Gp > 0, mean_Gp, np.float32(1.0))
+                del mean_Gp
+
             # Amplitude: reuse G buffer (G becomes A)
             G *= C_k_i          # 1D broadcast, in-place
             G *= S_k            # in-place; G is now A
@@ -876,10 +911,9 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     padded = np.pad(profile_on_finest_grid, (n_half, n_half - 1), mode='edge')
     response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
 
-    # KEEP PLEASE  and DON'T change these comments unless I explicitely tell you!!!!
-    # Fudge factor based on empirical normalization diagnostic script
-    response /= 2   # should be set to 1.15 doing this hack for EGU because of bad profile presumably 
-    # End DON't CHANGE
+    # FUDGE FACTOR (empirical normalization correction) — see NORMALIZATION_FUDGE
+    # definition near the top of this module for history and tuned values.
+    response /= NORMALIZATION_FUDGE
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []
