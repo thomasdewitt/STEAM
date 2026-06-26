@@ -39,6 +39,15 @@ SUPPORT_FACTOR = 5
 # `steam.simulate.NORMALIZATION_FUDGE = <value>`.
 NORMALIZATION_FUDGE = 2.0
 
+# Optional per-field fudge overrides (independent h vs qt cascade amplitude).
+# None -> use NORMALIZATION_FUDGE for both (current behaviour). STEAM carries
+# ~3x too much variance in qt relative to h vs LES; a single fudge can match
+# sigma_h OR sigma_qt/LWP but not both, so independent fudges (smaller for h ->
+# more h variance) are the lever for the qt/h variance ratio. Override via
+# steam.simulate.FUDGE_H / FUDGE_QT.
+FUDGE_H = None
+FUDGE_QT = None
+
 # ─── INTERMITTENCY KNOB: gradient-weight exponent ───────────────────────────
 # The per-class gradient-magnitude weights (normalized to per-z-level mean 1) are
 # what give the cascade its emergent intermittency. Raising them to a power > 1
@@ -331,12 +340,12 @@ def simulate(
     C_h_k = _compute_normalization(
         h_on_finest, vertical_outer_scale_grid_pts,
         k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape
+        unit_turbulon, turbulon_shape, fudge=FUDGE_H
     )
     C_qt_k = _compute_normalization(
         qt_on_finest, vertical_outer_scale_grid_pts,
         k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape
+        unit_turbulon, turbulon_shape, fudge=FUDGE_QT
     )
     C_h_k = [c * spectral_width_correction for c in C_h_k]
     C_qt_k = [c * spectral_width_correction for c in C_qt_k]
@@ -882,7 +891,7 @@ def spectral_width_normalization(shape, size_class_gap_factor):
 
 def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
                            k_values, outer_scale, z_arrays,
-                           turbulon, shape='mexican_hat'):
+                           turbulon, shape='mexican_hat', fudge=None):
     """Compute scale- and height-dependent amplitude arrays C_k.
 
     (Apxeq:norm factor computation)
@@ -931,7 +940,7 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
 
     # FUDGE FACTOR (empirical normalization correction) — see NORMALIZATION_FUDGE
     # definition near the top of this module for history and tuned values.
-    response /= NORMALIZATION_FUDGE
+    response /= (NORMALIZATION_FUDGE if fudge is None else fudge)
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []
