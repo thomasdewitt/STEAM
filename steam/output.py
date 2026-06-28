@@ -15,6 +15,7 @@ def write_netcdf(
     simulation_params,
     group=None,
     compress=None,
+    flux_3d=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -103,6 +104,15 @@ def write_netcdf(
     qt_var[:] = qt_3d
     qt_var.units = "kg/kg"
     qt_var.long_name = "total water mixing ratio"
+
+    if flux_3d is not None:
+        flux_var = ds.createVariable(
+            "flux", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
+            chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
+        )
+        flux_var[:] = flux_3d
+        flux_var.units = "1"
+        flux_var.long_name = "conserved multiplicative flux (mean 1)"
 
     # Profile variables
     zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))

@@ -103,6 +103,24 @@ NOISE_SKEWNORM_A = 4.0    # skew-normal shape parameter
 # on a right-skewed dist) produces the RIGHT-skewed (convective) field we want.
 NOISE_SIGN = 1.0
 
+# ─── FLUX CASCADE: conserved multiplicative flux replaces independent S_k ─────
+# When FLUX_CASCADE is True, the independent per-scale noise S_k is replaced by a
+# single shared, conserved multiplicative flux field F (mean 1, positive only)
+# carried across scale classes. At each class k:
+#     dF = CONVOLVE(FLUX_SCALE * xi * F_prev, psi_k);   F = F_prev + dF
+# with xi ~ N(0,1) sparse at turbulon centers. F is clipped >= 0 and renormalized
+# to per-z-level mean 1 each step (positivity handling). The h/qt perturbations
+# then use F in place of S_k:  A = G * C_*_k * F;  pert += CONVOLVE(A, psi_k).
+# The turbulon kernel is zero-sum, so (a) dF is zero-mean -> F's mean is conserved,
+# and (b) F's DC is removed in the h/qt convolution and only the ~scale-k band
+# passes, so using the *cumulative* F does not double-count coarser scales.
+# FLUX_SCALE is tuned (externally) so the flux field has C1 ~ 0.1 (Haar, horizontal).
+# This is the "implicit C1 / FIF-from-atoms" construction: intermittency becomes a
+# real tunable rather than an emergent, uncontrolled property.
+FLUX_CASCADE = False
+FLUX_SCALE = 0.5            # cascade step amplitude; tune to hit C1 = 0.1
+FLUX_USE_INCREMENT = False  # False: h/qt use cumulative F (default); True: use dF
+
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
 
@@ -386,7 +404,7 @@ def simulate(
 
     child_seeds = seed_sequence.spawn(n_classes)
 
-    h_pert, qt_pert, final_grid = cascade_loop(
+    h_pert, qt_pert, flux_field, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -408,6 +426,9 @@ def simulate(
 
     np.clip(h_3d, h_min, h_max, out=h_3d)
     np.clip(qt_3d, qt_min, qt_max, out=qt_3d)
+
+    # Conserved multiplicative flux output (FLUX_CASCADE mode); None otherwise.
+    flux_3d = np.ascontiguousarray(flux_field) if flux_field is not None else None
 
     nx_final_val = h_3d.shape[0]
     ny_final_val = h_3d.shape[1]
@@ -465,6 +486,7 @@ def simulate(
         k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
         simulation_params,
         compress=compress,
+        flux_3d=flux_3d,
     )
     return output_path
 
@@ -563,6 +585,7 @@ def cascade_loop(
     prev_padded_extent_y = None
     prev_padded_height = None
     prev_z_min = None
+    flux = None   # conserved multiplicative flux (FLUX_CASCADE mode); None otherwise
 
     for i in range(n_classes):
         k = grids['k'][i]
@@ -584,6 +607,8 @@ def cascade_loop(
         if h_perturbation is None:
             h_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
             qt_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
+            if FLUX_CASCADE:
+                flux = np.ones((nx_k, ny_k, nz_k), dtype=np.float32)
         else:
             # Crop-before-zoom when padded extent shrinks between classes.
             # Cropping happens in physical units at the previous class's
@@ -597,6 +622,8 @@ def cascade_loop(
                     start = (cur_nx - keep) // 2
                     h_perturbation = h_perturbation[start:start+keep, :, :]
                     qt_perturbation = qt_perturbation[start:start+keep, :, :]
+                    if flux is not None:
+                        flux = flux[start:start+keep, :, :]
                 if padded_y_i < prev_padded_extent_y - eps:
                     cur_ny = h_perturbation.shape[1]
                     keep = int(round(padded_y_i / prev_dy))
@@ -604,6 +631,8 @@ def cascade_loop(
                     start = (cur_ny - keep) // 2
                     h_perturbation = h_perturbation[:, start:start+keep, :]
                     qt_perturbation = qt_perturbation[:, start:start+keep, :]
+                    if flux is not None:
+                        flux = flux[:, start:start+keep, :]
                 if padded_h_i < prev_padded_height - eps:
                     cur_nz = h_perturbation.shape[2]
                     keep = int(round(padded_h_i / prev_dz_mean))
@@ -615,10 +644,14 @@ def cascade_loop(
                     start = max(0, min(cur_nz - keep, start))
                     h_perturbation = h_perturbation[:, :, start:start+keep]
                     qt_perturbation = qt_perturbation[:, :, start:start+keep]
+                    if flux is not None:
+                        flux = flux[:, :, start:start+keep]
 
             if h_perturbation.shape != (nx_k, ny_k, nz_k):
                 h_perturbation = zoom_trilinear(h_perturbation, (nx_k, ny_k, nz_k))
                 qt_perturbation = zoom_trilinear(qt_perturbation, (nx_k, ny_k, nz_k))
+                if flux is not None:
+                    flux = zoom_trilinear(flux, (nx_k, ny_k, nz_k))
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
@@ -629,11 +662,34 @@ def cascade_loop(
             rng = np.random.default_rng(seeds_or_rng[i])
         else:
             rng = seeds_or_rng
-        S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
-        if zero_bottom and n_zero > 0:
-            S_k[:, :, :n_zero] = 0
-        if zero_top and n_zero > 0:
-            S_k[:, :, -n_zero:] = 0
+
+        if FLUX_CASCADE:
+            # Conserved multiplicative flux replaces the independent S_k. The
+            # increment is scaled by the *previous* flux (multiplicative cascade);
+            # the zero-sum kernel keeps dF zero-mean so F's mean stays ~1.
+            xi = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng, dist='gaussian')
+            if zero_bottom and n_zero > 0:
+                xi[:, :, :n_zero] = 0
+            if zero_top and n_zero > 0:
+                xi[:, :, -n_zero:] = 0
+            xi *= np.float32(FLUX_SCALE)
+            xi *= flux                       # FLUX_SCALE * xi * F_prev  (sparse)
+            dflux = CONVOLVE(xi, kernel)
+            del xi
+            flux += dflux                    # F = F_prev + dF
+            np.maximum(flux, np.float32(0.0), out=flux)        # positivity
+            mflux = flux.mean(axis=(0, 1), keepdims=True)      # renorm per z-level
+            flux /= np.where(mflux > 0, mflux, np.float32(1.0))
+            del mflux
+            # Flux (or its increment) plays the role of S_k for h and qt below.
+            S_k = dflux if FLUX_USE_INCREMENT else flux
+            del dflux
+        else:
+            S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
+            if zero_bottom and n_zero > 0:
+                S_k[:, :, :n_zero] = 0
+            if zero_top and n_zero > 0:
+                S_k[:, :, -n_zero:] = 0
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -696,7 +752,7 @@ def cascade_loop(
         'dz': grids['dz_arrays'][i],   # 1D array (uniform for scalar ls, variable for profile ls)
         'z': z_k,
     }
-    return h_perturbation, qt_perturbation, final_grid_info
+    return h_perturbation, qt_perturbation, flux, final_grid_info
 
 
 def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
@@ -982,14 +1038,20 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     return C_k
 
 
-def _draw_noise(shape, rng):
+def _draw_noise(shape, rng, dist=None):
     """Draw zero-mean unit-scale noise, then apply the global NOISE_SIGN flip.
 
     NOISE_SIGN=-1 negates the (already zero-mean) draw, flipping its skew sign.
     Because STEAM's wavelet kernel inverts skew through the convolution, a
     LEFT-skewed S_k (e.g. NOISE_SIGN=-1 on a right-skewed Gamma) yields a
     RIGHT-skewed field -- the convective direction.
+
+    dist=None uses the module NOISE_DIST (and applies NOISE_SIGN); dist='gaussian'
+    forces a plain N(0,1) draw with no sign flip -- used for the flux-cascade
+    innovations, which must stay symmetric Gaussian regardless of NOISE_DIST.
     """
+    if dist == 'gaussian':
+        return rng.standard_normal(shape, dtype=np.float32)
     x = _draw_noise_core(shape, rng)
     if NOISE_SIGN < 0:
         np.negative(x, out=x)
@@ -1039,7 +1101,7 @@ def _draw_noise_core(shape, rng):
     return out
 
 
-def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
+def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng, dist=None):
     """Generate sparse noise field at oversampled resolution (see _draw_noise
     for the per-sample distribution: N(0,1) or Levy alpha-stable via NOISE_DIST).
 
@@ -1056,13 +1118,13 @@ def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
     rng : numpy.random.Generator
     """
     if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return _draw_noise((nx, ny, nz), rng)
+        return _draw_noise((nx, ny, nz), rng, dist=dist)
 
     field = np.zeros((nx, ny, nz), dtype=np.float32)
     ix = np.arange(0, nx, factor_x)
     iy = np.arange(0, ny, factor_y)
     iz = np.arange(0, nz, factor_z)
-    field[np.ix_(ix, iy, iz)] = _draw_noise((len(ix), len(iy), len(iz)), rng)
+    field[np.ix_(ix, iy, iz)] = _draw_noise((len(ix), len(iy), len(iz)), rng, dist=dist)
     return field
 
 
@@ -1459,7 +1521,11 @@ def refine(
     child_seeds = seed_sequence.spawn(n_classes)
 
     # Run cascade on padded domain
-    h_pert_refined, qt_pert_refined, final_grid = cascade_loop(
+    if FLUX_CASCADE:
+        raise NotImplementedError(
+            "FLUX_CASCADE is not supported in refine()/nested refinement; "
+            "run the flux cascade only on root simulate() calls.")
+    h_pert_refined, qt_pert_refined, _flux_unused, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
