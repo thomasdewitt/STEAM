@@ -24,10 +24,9 @@ def _root_grids():
 
 
 def test_flux_cascade_default_scale():
-    assert sm.FLUX_SCALE == 0.5
+    assert sm.FLUX_SCALE == 0.21
     assert sm.FLUX_ALPHA == 1.8
     assert sm.N_FLUX_SUBSTEPS == 4
-    assert sm.SCALAR_NOISE_SIGN == 1.0
 
 
 def test_levy_log_mean_reduces_to_lognormal_at_alpha_two():
@@ -65,7 +64,7 @@ def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     noise = np.expm1(gamma0.ravel() * c - shift)
     noise[gamma0.ravel() == 0.0] = 0.0
     mean_abs = np.abs(noise).sum() / np.count_nonzero(noise)
-    expected_scalar = sm.SCALAR_NOISE_SIGN * noise / mean_abs
+    expected_scalar = noise / mean_abs
     np.testing.assert_allclose(amplitude.ravel(), expected_scalar, rtol=1e-5)
     assert amplitude.ravel()[1] == 0.0                      # off-center: no turbulon
     assert diagnostics["n_clipped"] == 0                    # bounded-below: no clip here
@@ -93,13 +92,11 @@ def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
     )
 
     # Scalar amplitude uses only the first substep; equal draws give
-    # |noise| = mean_abs, so S_k = SCALAR_NOISE_SIGN * sign(noise) exactly.
+    # |noise| = mean_abs, so S_k = sign(noise) exactly.
     scale = c / n ** (1.0 / sm.FLUX_ALPHA)
     shift = sm.LEVY_LOG_MEAN * scale ** sm.FLUX_ALPHA
     noise0 = np.expm1(-0.25 * scale - shift)
-    np.testing.assert_allclose(
-        amplitude, sm.SCALAR_NOISE_SIGN * noise0 / abs(noise0),
-    )
+    np.testing.assert_allclose(amplitude, noise0 / abs(noise0))
     assert diagnostics["n_points"] == 8
     assert len(diagnostics["substeps"]) == 2
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)

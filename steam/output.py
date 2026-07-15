@@ -190,7 +190,6 @@ def write_netcdf(
     ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
     ds.flux_alpha = np.float32(p['flux_alpha'])
     ds.n_flux_substeps = np.int32(p['n_flux_substeps'])
-    ds.scalar_noise_sign = np.float32(p['scalar_noise_sign'])
 
     ds.close()
     print(f"Written {output_path}")

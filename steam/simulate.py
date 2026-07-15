@@ -72,20 +72,19 @@ WEIGHTING = 'gradient'
 # clip at zero less often. gamma is shifted so <exp(gamma)> = 1 exactly (the
 # alpha-generalization of the lognormal -sigma^2/2 shift; see LEVY_LOG_MEAN),
 # which conserves the flux mean. Scalar turbulons inherit the signed first-
-# substep multiplier noise, so they are skewed too (SCALAR_NOISE_SIGN).
+# substep multiplier noise, so they are skewed too; the extremal generator is
+# heavy-tailed on the low-multiplier side, giving the h'/qt' interior a
+# convective right-skew.
 #
-# Realized intermittency calibrates as  C1 ~= A * FLUX_SCALE**alpha  (fit in
+# Realized intermittency calibrates as  C1 = A * FLUX_SCALE**alpha  (fit in
 # turbulon-analysis/calibration); at alpha=2 the generator is Gaussian and the
 # whole scheme reduces to the lognormal cascade.
-FLUX_SCALE = 0.5
+# FLUX_SCALE is set so the realized flux C1 = 0.1, the measured TWPICE
+# horizontal-wind intermittency; C1 = 1.674 c^1.8 from calibration
+# (turbulon-analysis/calibration), so c = (0.1/1.674)^(1/1.8) = 0.21.
+FLUX_SCALE = 0.21
 FLUX_ALPHA = 1.8
 N_FLUX_SUBSTEPS = 4
-# Sign of the scalar turbulon amplitude relative to the flux multiplier noise.
-# The extremal generator is heavy-tailed on the low-multiplier side, so the two
-# signs give oppositely skewed scalar fields; +1 gives convective right-skew in
-# the h'/qt' interior (256x256x64 seed 20260715: interior skew ~ +1.3 for +1
-# vs ~ -0.1 for -1), chosen from the 2026-07-15 both-signs experiment.
-SCALAR_NOISE_SIGN = 1.0
 
 
 def _extremal_levy(alpha, size, rng):
@@ -531,7 +530,6 @@ def simulate(
         'flux_noise_scale': FLUX_SCALE,
         'flux_alpha': FLUX_ALPHA,
         'n_flux_substeps': N_FLUX_SUBSTEPS,
-        'scalar_noise_sign': SCALAR_NOISE_SIGN,
     }
 
     write_netcdf(
@@ -811,7 +809,7 @@ def _advance_flux(
     mean, giving the bounded-below update F += conv(psi, (exp(gamma)-1)*F). The
     scalar turbulon amplitude carries the SIGNED first-substep multiplier noise
     and the entering flux, normalized to mean absolute value one:
-    S_k = SCALAR_NOISE_SIGN * (exp(gamma_1)-1) * F_{k-1} / <|exp(gamma_1)-1|>.
+    S_k = (exp(gamma_1)-1) * F_{k-1} / <|exp(gamma_1)-1|>.
     """
     s_x, s_y, s_z = sparsity_factors
     substep_scale = flux_noise_scale / n_flux_substeps ** (1.0 / FLUX_ALPHA)
@@ -837,7 +835,7 @@ def _advance_flux(
             mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
             scalar_amplitude = noise * flux
             if mean_abs > 0:
-                scalar_amplitude *= np.float32(SCALAR_NOISE_SIGN / mean_abs)
+                scalar_amplitude *= np.float32(1.0 / mean_abs)
 
         noise *= flux
         flux += CONVOLVE(noise, kernel)
