@@ -15,17 +15,17 @@ H_z = 5/9
 ANISOTROPY = 'canonical'
 
 # ---- Config ----
-NX = NY = 128*10
-DOMAIN_SIZE = 10000
-DX = DY = DOMAIN_SIZE // NX
+NX = NY = 1280
+DX = DY = 8
+DOMAIN_SIZE = NX * DX
 SPARSITY = 1
-OUTER_SCALE = 1000
+OUTER_SCALE = 1024
 SPHEROSCALE = 100.0
 DOMAIN_HEIGHT = 3600.0
 PROFILE_DZ = 30.0
 SEED = 42
-OUTPUT_PATH = "/Users/thomas/code-and-data/turbulon-model/examples/steam_output.nc"
-PLOT_DIR = "/Users/thomas/code-and-data/turbulon-model/examples/plots/steam_sf"
+OUTPUT_PATH = str(Path(__file__).parent / "steam_output.nc")
+PLOT_DIR = str(Path(__file__).parent / "plots" / "steam_sf")
 
 # Toggle: which scaleinvariance function to use
 # hurst_fn = scaleinvariance.structure_function_hurst
@@ -57,7 +57,7 @@ nc_path = simulate(
 ds = netCDF4.Dataset(nc_path, "r")
 h_field = ds.variables["h"][:]
 qt_field = ds.variables["qt"][:]
-dz_output = float(ds.dz)
+dz_output = float(np.mean(ds.variables["dz"][:]))
 ds.close()
 
 print(f"Output grid: {h_field.shape}, dz={dz_output:.1f} m")
