@@ -83,8 +83,8 @@ N_FLUX_SUBSTEPS = 4
 # Sign of the scalar turbulon amplitude relative to the flux multiplier noise.
 # The extremal generator is heavy-tailed on the low-multiplier side, so the two
 # signs give oppositely skewed scalar fields; +1 gives convective right-skew in
-# the h'/qt' interior (256x256x64 seed 20260715: interior skew ~ +2.9 for +1
-# vs ~ +0.15 for -1), chosen from the 2026-07-15 both-signs experiment.
+# the h'/qt' interior (256x256x64 seed 20260715: interior skew ~ +1.3 for +1
+# vs ~ -0.1 for -1), chosen from the 2026-07-15 both-signs experiment.
 SCALAR_NOISE_SIGN = 1.0
 
 
