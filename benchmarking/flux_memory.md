@@ -1,16 +1,17 @@
 # Flux-cascade memory benchmark
 
-Date: 2026-07-15. Canonical model revision: `439f735`. The current run used
-seed 123, float32 fields, `FLUX_SCALE=0.5`, the default four flux substeps,
-uncompressed NetCDF output, and CPU FFTs.
+Date: 2026-07-15. Canonical model revision: `e74acec` (extremal-Levy flux
+multiplier). The current run used seed 123, float32 fields, `FLUX_SCALE=0.5`,
+`FLUX_ALPHA=1.8`, the default four flux substeps, uncompressed NetCDF output,
+and CPU FFTs.
 
 ## Current canonical re-check
 
 | Final grid | Flux substeps | Peak RSS | Simulation wall time |
 |---|---:|---:|---:|
-| 2048 x 2048 x 84 | 4 | 13.35 GiB | 39.12 s |
+| 2048 x 2048 x 84 | 4 | 14.74 GiB | 48.99 s |
 
-Peak RSS was 14,339,584,000 bytes (13,675.3 MiB). It was measured with
+Peak RSS was 15,825,485,824 bytes (15,092.3 MiB). It was measured with
 `resource.getrusage(RUSAGE_SELF).ru_maxrss` in a fresh worker process. Wall
 time was measured around `simulate()`, including NetCDF output but excluding
 environment startup. Torch tensors remained on CPU.
@@ -20,11 +21,13 @@ The grid used `dx=dy=500 m`, a 1024-km square horizontal domain, outer scale
 
 `uv run --frozen --with netCDF4 --with numba python benchmarking/benchmark_simulate.py --worker --seed 123 --nx 2048 --ny 2048 --dx 500 --dy 500 --outer-scale 512000 --spheroscale 100 --domain-height 15000 --profile-dz 30 --nz 50 --output-path /tmp/steam_flux_memory_n4.nc`
 
-The previous one-substep result on the same grid was 12.93 GiB and 21.09 s.
-Four substeps therefore raised measured peak RSS by 3.3% and runtime by 85.5%.
-The small memory change is expected because substeps reuse the same flux and
-innovation buffers; the runtime increase comes from three additional flux
-convolutions per size class.
+Switching the flux innovation from additive Gaussian noise to the extremal-Levy
+multiplier raised peak RSS by 10.4% (13.35 -> 14.74 GiB) and runtime by 25.2%
+(39.12 -> 48.99 s) versus the Gaussian four-substep baseline. The extra runtime
+is the Chambers-Mallows-Stuck generator's transcendentals (four per substep per
+class); the extra memory is its few float32 buffers. Drawing the generator in
+float32 with in-place buffer reuse is essential here -- a first float64
+implementation peaked at 24.7 GiB on this grid.
 
 ## Historical memory optimization reference
 
