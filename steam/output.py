@@ -13,7 +13,6 @@ def write_netcdf(
     h_profile, qt_profile, z_profile,
     k_values, k_z_values, C_h_k, C_qt_k,
     simulation_params,
-    group=None,
     compress=None,
     flux_3d=None,
 ):
@@ -36,12 +35,8 @@ def write_netcdf(
         profile_dz, sparsity_factors, surface_pressure, seed, C_h_L,
         C_qt_L, n_large_turbulons, H_h, H_z, h_min, h_max, qt_min,
         qt_max, min_distance_to_ground.
-    group : str or None
-        If None, write to root of a new file (current behavior).
-        If provided, open existing file in append mode and create a
-        NetCDF4 group with this name.
     compress : bool or None
-        If True, write the 3D data variables (h, qt, p_bottom) with
+        If True, write the 3D data variables with
         zlib compression at complevel=4. None (default) uses the
         module-level ``steam.constants.output_compress`` setting.
 
@@ -56,14 +51,8 @@ def write_netcdf(
     output_path = Path(output_path)
     nx_final, ny_final, nz_final = h_3d.shape
 
-    if group is not None:
-        print(f"Writing NetCDF group '{group}' to {output_path} ...")
-        ds_root = netCDF4.Dataset(output_path, "a", format="NETCDF4")
-        ds = ds_root.createGroup(group)
-    else:
-        print(f"Writing NetCDF to {output_path} ...")
-        ds_root = netCDF4.Dataset(output_path, "w", format="NETCDF4")
-        ds = ds_root
+    print(f"Writing NetCDF to {output_path} ...")
+    ds = netCDF4.Dataset(output_path, "w", format="NETCDF4")
 
     # Dimensions
     ds.createDimension("x", nx_final)
@@ -178,8 +167,6 @@ def write_netcdf(
     ls_var.units = "m"
     ls_var.long_name = "spheroscale profile"
     ds.domain_height = np.float32(p['domain_height'])
-    if 'domain_z_min' in p:
-        ds.domain_z_min = np.float32(p['domain_z_min'])
     ds.profile_dz = np.float32(p['profile_dz'])
     ds.sparsity_factors = np.array(p['sparsity_factors'], dtype=np.int32)
     ds.surface_pressure = np.float32(p['surface_pressure'])
@@ -200,34 +187,8 @@ def write_netcdf(
         ds.anisotropy = p['anisotropy']
     if 'n_scale_classes_per_dyad' in p:
         ds.n_scale_classes_per_dyad = np.int32(p['n_scale_classes_per_dyad'])
-    if 'flux_cascade' in p:
-        ds.flux_cascade = np.int8(p['flux_cascade'])
-        ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
-        ds.flux_use_increment = np.int8(p['flux_use_increment'])
-        ds.noise_dist = p['noise_dist']
+    ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
 
-    # Refinement-specific attributes
-    for attr in ('parent_group', 'parent_x_slice', 'parent_y_slice',
-                 'parent_x_offset', 'parent_y_offset'):
-        if attr in p:
-            val = p[attr]
-            if isinstance(val, str):
-                ds.setncattr(attr, val)
-            else:
-                ds.setncattr(attr, np.array(val))
-
-    # Optional 2D starting pressure for hydrostatic integration
-    # (written by refine() when the inset bottom is elevated above the
-    # parent ground).
-    if 'p_bottom' in p:
-        pb_var = ds.createVariable(
-            "p_bottom", "f4", ("x", "y"),
-            zlib=compress, complevel=4 if compress else 0,
-        )
-        pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
-        pb_var.units = "Pa"
-        pb_var.long_name = "starting pressure at inset bottom (z=z[0])"
-
-    ds_root.close()
-    print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))
+    ds.close()
+    print(f"Written {output_path}")
     return output_path

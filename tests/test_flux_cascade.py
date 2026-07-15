@@ -23,10 +23,8 @@ def _root_grids():
     )
 
 
-def test_flux_cascade_defaults_to_gaussian_dyadic_mode():
-    assert sm.FLUX_CASCADE is True
-    assert sm.FLUX_USE_INCREMENT is True
-    assert sm.NOISE_DIST == "gaussian"
+def test_flux_cascade_default_scale():
+    assert sm.FLUX_SCALE == 0.5
 
 
 def test_flux_only_rejects_non_dyadic_classes():

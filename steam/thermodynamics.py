@@ -30,7 +30,7 @@ def recover_diagnostics(h, qt, z_values, surface_pressure):
         Heights [m].
     surface_pressure : float or ndarray, shape (nx, ny)
         Pressure at z=z_values[0] [Pa]. Scalar for a root simulation;
-        2D field for an elevated-bottom inset from refine().
+        Optional 2D field for elevated-bottom data.
 
     Returns
     -------

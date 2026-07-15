@@ -3,5 +3,5 @@
 __version__ = "0.1.0"
 __author__ = "Thomas DeWitt"
 
-from .simulate import simulate, cascade_loop, refine
+from .simulate import simulate, cascade_loop
 from .thermodynamics import recover_diagnostics, compute_diagnostics

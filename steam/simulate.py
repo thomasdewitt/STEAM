@@ -2,7 +2,6 @@
 
 import math
 import numpy as np
-import netCDF4
 from pathlib import Path
 from . import constants
 from .constants import (
@@ -16,7 +15,6 @@ from .utils import (
     convolve_periodic_xy_zeropad_z_oa,
     convolve_fft_xy_oa_z,
     zoom_trilinear,
-    zoom_bilinear,
 )
 from .output import write_netcdf
 
@@ -38,15 +36,6 @@ SUPPORT_FACTOR = 5
 # Left at 2.0 so other configs are unchanged; override per run via
 # `steam.simulate.NORMALIZATION_FUDGE = <value>`.
 NORMALIZATION_FUDGE = 2.0
-
-# Optional per-field fudge overrides (independent h vs qt cascade amplitude).
-# None -> use NORMALIZATION_FUDGE for both (current behaviour). STEAM carries
-# ~3x too much variance in qt relative to h vs LES; a single fudge can match
-# sigma_h OR sigma_qt/LWP but not both, so independent fudges (smaller for h ->
-# more h variance) are the lever for the qt/h variance ratio. Override via
-# steam.simulate.FUDGE_H / FUDGE_QT.
-FUDGE_H = None
-FUDGE_QT = None
 
 # ─── INTERMITTENCY KNOB: gradient-weight exponent ───────────────────────────
 # The per-class gradient-magnitude weights (normalized to per-z-level mean 1) are
@@ -72,57 +61,18 @@ GRADIENT_WEIGHT_POWER = 1.0
 #   `steam.simulate.WEIGHTING = 'field'`.
 WEIGHTING = 'gradient'
 
-# ─── NOISE DISTRIBUTION: shape of the sparse turbulon amplitude S_k ──────────
-# 'gaussian' (default): S_k ~ N(0,1), symmetric -> the field PDF is
-#   symmetric, which is the wrong shape for convection (SAM/TWPICE qt & MSE at
-#   ~4 km are strongly RIGHT-skewed, skew ~ +1.8 / +2.0). Gradient weighting is
-#   symmetric in sign, so it cannot manufacture that asymmetry on its own.
-# 'levy'    : S_k ~ a Levy alpha-stable (scipy.stats.levy_stable) with index
-#   LEVY_ALPHA in (0,2] and skewness LEVY_BETA in [-1,1]. beta > 0 -> heavy right
-#   tail. NOTE: for alpha < 2 the variance is INFINITE -> a power-law tail that
-#   blows up condensate (LWP spikes ~1e5 g/m^2). Right skew, wrong tail.
-# 'gamma'   : S_k ~ centered, unit-variance Gamma(shape=NOISE_GAMMA_K): for
-#   G ~ Gamma(k,1), X = (G - k)/sqrt(k). Mean 0, var 1, skew = 2/sqrt(k), with a
-#   light EXPONENTIAL tail (finite variance). k is the skew dial: k=1 is the
-#   centered exponential (skew +2, ~ the LES MSE skew), k=4 -> skew 1,
-#   k -> inf -> Gaussian. Bounded below at -sqrt(k) (gentle bounded subsidence;
-#   sparse intense positive updraft tail) -- the convective shape, light-tailed.
-# 'skewnorm': S_k ~ centered, unit-variance Azzalini skew-normal (shape
-#   NOISE_SKEWNORM_A). Gaussian tails (lightest), continuous skew but capped ~1.
-# Unit-variance standardization means these are drop-in for N(0,1) (same fudge).
-# Override via steam.simulate.NOISE_DIST / LEVY_* / NOISE_GAMMA_K / NOISE_SKEWNORM_A.
-NOISE_DIST = 'gaussian'
-LEVY_ALPHA = 1.8
-LEVY_BETA = 0.5
-NOISE_GAMMA_K = 1.0       # Gamma shape; skew = 2/sqrt(k); 1.0 = centered exponential
-NOISE_SKEWNORM_A = 4.0    # skew-normal shape parameter
-# NOISE_SIGN: multiply the (zero-mean) draw by this. -1 flips the skew sign.
-# STEAM's turbulon kernel is a zero-mean wavelet (mexican-hat/morlet, negative
-# side-lobes), so the convolution INVERTS skew: a positive-skew S_k yields a
-# negative-skew field and vice versa. Hence a LEFT-skewed noise (NOISE_SIGN=-1
-# on a right-skewed dist) produces the RIGHT-skewed (convective) field we want.
-NOISE_SIGN = 1.0
-
-# ─── FLUX CASCADE: conserved flux modulates the signed scalar amplitudes ──────
+# ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. One octave is taken per dyadic size
 # class. At each class k:
 #     dF = CONVOLVE(FLUX_SCALE * xi * F_prev, psi_k);   F = F_prev + dF
 # with xi ~ N(0,1) sparse at turbulon centers. F is clipped >= 0 and normalized
-# to per-z-level mean 1 after every step. The *signed center amplitude* xi*F_prev
-# replaces the old independent S_k for h/qt:
-#     A_scalar = xi * F_prev * G_scalar,k * C_scalar,k.
-# Thus scalar amplitudes remain conditionally sign-symmetric and F only modulates
-# their local scale; FLUX_SCALE tunes flux intermittency without rescaling h/qt.
+# to per-z-level mean 1 after every step.
 #
 # For a lognormal cascade, the realized intermittency is approximately
 #     C1 ~= kappa * FLUX_SCALE**2 / (2 ln 2),
 # where kappa is an envelope-overlap (packing) factor near 0.6 for the default
 # Mexican-hat/spacing configuration, calibrated empirically.
-FLUX_CASCADE = True
 FLUX_SCALE = 0.5
-# True means h/qt use the signed turbulon-center source of dF (xi*F_prev).
-# The old False mode used positive cumulative F and violated sign symmetry.
-FLUX_USE_INCREMENT = True
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -249,9 +199,9 @@ def simulate(
             "n_scale_classes_per_dyad must be a positive integer, "
             f"got {n_scale_classes_per_dyad}"
         )
-    if FLUX_CASCADE and n_scale_classes_per_dyad != 1:
+    if n_scale_classes_per_dyad != 1:
         raise ValueError(
-            "FLUX_CASCADE requires one dyadic size class per octave; "
+            "The flux cascade requires one dyadic size class per octave; "
             "set n_scale_classes_per_dyad=1"
         )
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
@@ -397,12 +347,12 @@ def simulate(
     C_h_k = _compute_normalization(
         h_on_finest, vertical_outer_scale_grid_pts,
         k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape, fudge=FUDGE_H
+        unit_turbulon, turbulon_shape,
     )
     C_qt_k = _compute_normalization(
         qt_on_finest, vertical_outer_scale_grid_pts,
         k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape, fudge=FUDGE_QT
+        unit_turbulon, turbulon_shape,
     )
     C_h_k = [c * spectral_width_correction for c in C_h_k]
     C_qt_k = [c * spectral_width_correction for c in C_qt_k]
@@ -440,8 +390,7 @@ def simulate(
     np.clip(h_3d, h_min, h_max, out=h_3d)
     np.clip(qt_3d, qt_min, qt_max, out=qt_3d)
 
-    # Conserved multiplicative flux output (FLUX_CASCADE mode); None otherwise.
-    flux_3d = np.ascontiguousarray(flux_field) if flux_field is not None else None
+    flux_3d = np.ascontiguousarray(flux_field)
 
     nx_final_val = h_3d.shape[0]
     ny_final_val = h_3d.shape[1]
@@ -490,10 +439,7 @@ def simulate(
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
-        'flux_cascade': FLUX_CASCADE,
         'flux_noise_scale': FLUX_SCALE,
-        'flux_use_increment': FLUX_USE_INCREMENT,
-        'noise_dist': NOISE_DIST,
     }
 
     write_netcdf(
@@ -573,8 +519,8 @@ def cascade_loop(
     -------
     h_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
     qt_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
-    flux : ndarray or None
-        Final dimensionless unit-mean flux when ``FLUX_CASCADE`` is enabled.
+    flux : ndarray
+        Final dimensionless unit-mean flux.
     final_grid_info : dict
         Keys nx, ny, nz, dx, dy, dz (mean), z (1D coordinate array) from
         the last (finest) iteration.
@@ -583,18 +529,12 @@ def cascade_loop(
     n_classes = len(grids['k'])
     n_zero = int(round(2 * s_z * min_distance_to_ground))
 
-    if FLUX_CASCADE:
-        if not FLUX_USE_INCREMENT:
+    if n_classes > 1:
+        class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
+        if not np.allclose(class_ratios, 2.0):
             raise ValueError(
-                "FLUX_USE_INCREMENT must remain True: cumulative positive F "
-                "does not provide sign-symmetric scalar amplitudes"
+                "The flux cascade requires dyadic size classes (one octave per step)"
             )
-        if n_classes > 1:
-            class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
-            if not np.allclose(class_ratios, 2.0):
-                raise ValueError(
-                    "FLUX_CASCADE requires dyadic size classes (one octave per step)"
-                )
 
     # Determine whether we have per-class seeds or a shared Generator
     use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
@@ -617,7 +557,7 @@ def cascade_loop(
     prev_padded_extent_y = None
     prev_padded_height = None
     prev_z_min = None
-    flux = None   # conserved multiplicative flux (FLUX_CASCADE mode); None otherwise
+    flux = None
 
     for i in range(n_classes):
         k = grids['k'][i]
@@ -639,8 +579,7 @@ def cascade_loop(
         if h_perturbation is None:
             h_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
             qt_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
-            if FLUX_CASCADE:
-                flux = np.ones((nx_k, ny_k, nz_k), dtype=np.float32)
+            flux = np.ones((nx_k, ny_k, nz_k), dtype=np.float32)
         else:
             # Crop-before-zoom when padded extent shrinks between classes.
             # Cropping happens in physical units at the previous class's
@@ -654,8 +593,7 @@ def cascade_loop(
                     start = (cur_nx - keep) // 2
                     h_perturbation = h_perturbation[start:start+keep, :, :]
                     qt_perturbation = qt_perturbation[start:start+keep, :, :]
-                    if flux is not None:
-                        flux = flux[start:start+keep, :, :]
+                    flux = flux[start:start+keep, :, :]
                 if padded_y_i < prev_padded_extent_y - eps:
                     cur_ny = h_perturbation.shape[1]
                     keep = int(round(padded_y_i / prev_dy))
@@ -663,8 +601,7 @@ def cascade_loop(
                     start = (cur_ny - keep) // 2
                     h_perturbation = h_perturbation[:, start:start+keep, :]
                     qt_perturbation = qt_perturbation[:, start:start+keep, :]
-                    if flux is not None:
-                        flux = flux[:, start:start+keep, :]
+                    flux = flux[:, start:start+keep, :]
                 if padded_h_i < prev_padded_height - eps:
                     cur_nz = h_perturbation.shape[2]
                     keep = int(round(padded_h_i / prev_dz_mean))
@@ -676,14 +613,12 @@ def cascade_loop(
                     start = max(0, min(cur_nz - keep, start))
                     h_perturbation = h_perturbation[:, :, start:start+keep]
                     qt_perturbation = qt_perturbation[:, :, start:start+keep]
-                    if flux is not None:
-                        flux = flux[:, :, start:start+keep]
+                    flux = flux[:, :, start:start+keep]
 
             if h_perturbation.shape != (nx_k, ny_k, nz_k):
                 h_perturbation = zoom_trilinear(h_perturbation, (nx_k, ny_k, nz_k))
                 qt_perturbation = zoom_trilinear(qt_perturbation, (nx_k, ny_k, nz_k))
-                if flux is not None:
-                    flux = zoom_trilinear(flux, (nx_k, ny_k, nz_k))
+                flux = zoom_trilinear(flux, (nx_k, ny_k, nz_k))
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
@@ -695,25 +630,12 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
-        if FLUX_CASCADE:
-            # The same Gaussian innovation does two jobs: xi*F_prev is the
-            # sign-symmetric scalar turbulon amplitude, and c*xi*F_prev drives
-            # the next flux octave. It is never replaced by positive cumulative F.
-            xi = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng, dist='gaussian')
-            if zero_bottom and n_zero > 0:
-                xi[:, :, :n_zero] = 0
-            if zero_top and n_zero > 0:
-                xi[:, :, -n_zero:] = 0
-            flux_amplitude, _ = _advance_flux(
-                flux, xi, kernel, FLUX_SCALE,
-            )
-            S_k = flux_amplitude
-        else:
-            S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
-            if zero_bottom and n_zero > 0:
-                S_k[:, :, :n_zero] = 0
-            if zero_top and n_zero > 0:
-                S_k[:, :, -n_zero:] = 0
+        xi = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
+        if zero_bottom and n_zero > 0:
+            xi[:, :, :n_zero] = 0
+        if zero_top and n_zero > 0:
+            xi[:, :, -n_zero:] = 0
+        S_k, _ = _advance_flux(flux, xi, kernel, FLUX_SCALE)
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -901,9 +823,7 @@ def simulate_flux_only(
             flux = zoom_trilinear(flux, shape)
 
         rng = np.random.default_rng(seeds[i])
-        innovation = _sparse_noise(
-            *shape, s_x, s_y, s_z, rng, dist='gaussian',
-        )
+        innovation = _sparse_noise(*shape, s_x, s_y, s_z, rng)
         if zero_bottom and n_zero > 0:
             innovation[:, :, :n_zero] = 0
         if zero_top and n_zero > 0:
@@ -1158,7 +1078,7 @@ def spectral_width_normalization(shape, size_class_gap_factor):
 
 def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
                            k_values, outer_scale, z_arrays,
-                           turbulon, shape='mexican_hat', fudge=None):
+                           turbulon, shape='mexican_hat'):
     """Compute scale- and height-dependent amplitude arrays C_k.
 
     (Apxeq:norm factor computation)
@@ -1207,7 +1127,7 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
 
     # FUDGE FACTOR (empirical normalization correction) — see NORMALIZATION_FUDGE
     # definition near the top of this module for history and tuned values.
-    response /= (NORMALIZATION_FUDGE if fudge is None else fudge)
+    response /= NORMALIZATION_FUDGE
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []
@@ -1218,72 +1138,8 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     return C_k
 
 
-def _draw_noise(shape, rng, dist=None):
-    """Draw zero-mean unit-scale noise, then apply the global NOISE_SIGN flip.
-
-    NOISE_SIGN=-1 negates the (already zero-mean) draw, flipping its skew sign.
-    Because STEAM's wavelet kernel inverts skew through the convolution, a
-    LEFT-skewed S_k (e.g. NOISE_SIGN=-1 on a right-skewed Gamma) yields a
-    RIGHT-skewed field -- the convective direction.
-
-    dist=None uses the module NOISE_DIST (and applies NOISE_SIGN); dist='gaussian'
-    forces a plain N(0,1) draw with no sign flip -- used for the flux-cascade
-    innovations, which must stay symmetric Gaussian regardless of NOISE_DIST.
-    """
-    if dist == 'gaussian':
-        return rng.standard_normal(shape, dtype=np.float32)
-    x = _draw_noise_core(shape, rng)
-    if NOISE_SIGN < 0:
-        np.negative(x, out=x)
-    return x
-
-
-def _draw_noise_core(shape, rng):
-    """Draw the sparse turbulon amplitude block, zero-mean, float32.
-
-    Dispatches on the module global NOISE_DIST ('gaussian' or 'levy').
-    Gaussian is N(0,1) (original). Levy is a (LEVY_ALPHA, LEVY_BETA) alpha-stable
-    via scipy.stats.levy_stable, generated in z-slabs to cap peak memory
-    (the rvs sampler is float64 with several temporaries), cast to float32,
-    and centered to exactly zero sample mean so it adds no DC bias to the field.
-    """
-    if NOISE_DIST == 'gaussian':
-        return rng.standard_normal(shape, dtype=np.float32)
-    if NOISE_DIST == 'gamma':
-        # centered, unit-variance Gamma(k): skew = 2/sqrt(k), exponential tail.
-        k = NOISE_GAMMA_K
-        x = (rng.gamma(k, 1.0, size=shape) - k) / np.sqrt(k)
-        return x.astype(np.float32)
-    if NOISE_DIST == 'skewnorm':
-        # Azzalini skew-normal via the |N| + N construction (numpy-native, fast),
-        # then standardized to zero-mean unit-variance. Gaussian tails.
-        a = NOISE_SKEWNORM_A
-        delta = a / np.sqrt(1.0 + a * a)
-        x = (delta * np.abs(rng.standard_normal(shape))
-             + np.sqrt(1.0 - delta * delta) * rng.standard_normal(shape))
-        m = delta * np.sqrt(2.0 / np.pi)
-        v = 1.0 - 2.0 * delta * delta / np.pi
-        return ((x - m) / np.sqrt(v)).astype(np.float32)
-    if NOISE_DIST != 'levy':
-        raise ValueError(f"unknown NOISE_DIST {NOISE_DIST!r}")
-    from scipy.stats import levy_stable
-    out = np.empty(shape, dtype=np.float32)
-    flat = out.reshape(-1, shape[-1]) if out.ndim > 1 else out.reshape(1, -1)
-    nrow, ncol = flat.shape
-    # chunk rows so each draw is ~3e7 elements (~0.24 GB f64 + temporaries)
-    rstep = max(1, int(3e7 // max(ncol, 1)))
-    for r0 in range(0, nrow, rstep):
-        r1 = min(nrow, r0 + rstep)
-        x = levy_stable.rvs(LEVY_ALPHA, LEVY_BETA, size=(r1 - r0, ncol),
-                            random_state=rng)
-        flat[r0:r1] = x.astype(np.float32)
-    out -= np.float32(out.mean(dtype=np.float64))   # zero-mean (no DC bias)
-    return out
-
-
-def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng, dist=None):
-    """Generate sparse noise field at oversampled resolution (see _draw_noise
-    for the per-sample distribution: N(0,1) or Levy alpha-stable via NOISE_DIST).
+def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
+    """Generate sparse Gaussian noise at the turbulon centers.
 
     When s=1 in all dimensions, returns a full grid of random values.
     When s>1, noise is nonzero every s grid points (one turbulon center
@@ -1298,13 +1154,15 @@ def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng, dist=None):
     rng : numpy.random.Generator
     """
     if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return _draw_noise((nx, ny, nz), rng, dist=dist)
+        return rng.standard_normal((nx, ny, nz), dtype=np.float32)
 
     field = np.zeros((nx, ny, nz), dtype=np.float32)
     ix = np.arange(0, nx, factor_x)
     iy = np.arange(0, ny, factor_y)
     iz = np.arange(0, nz, factor_z)
-    field[np.ix_(ix, iy, iz)] = _draw_noise((len(ix), len(iy), len(iz)), rng, dist=dist)
+    field[np.ix_(ix, iy, iz)] = rng.standard_normal(
+        (len(ix), len(iy), len(iz)), dtype=np.float32,
+    )
     return field
 
 
@@ -1343,518 +1201,3 @@ def _gradient_magnitude(field_3d, dx, dy, z_coords):
 
     np.sqrt(result, out=result)
     return result
-
-
-def refine(
-    parent_path,
-    x_start, x_stop,
-    y_start, y_stop,
-    dx, dy,
-    parent_group='/',
-    output_group=None,
-    seed=None,
-    sparsity_factors=None,
-    turbulon_shape=None,
-    z_min=None,
-    z_max=None,
-    anisotropy=None,
-    compress=None,
-):
-    """Refine a subdomain of a parent simulation to finer resolution.
-
-    Loads a completed STEAM simulation (or a previous refinement group),
-    extracts a spatial subset (with padding to capture turbulon tails),
-    and continues the cascade from the parent's finest scale down to 2*dx.
-
-    For recursive refinement, pass the group path of an existing
-    refinement as parent_group (e.g. "refinements/r0").
-
-    Parameters
-    ----------
-    parent_path : str or Path
-        Path to the NetCDF file.
-    x_start, x_stop : int
-        Index range into parent x-grid for the inner subdomain.
-    y_start, y_stop : int
-        Index range into parent y-grid for the inner subdomain.
-    dx, dy : float
-        New finest horizontal resolution [m].
-    parent_group : str
-        NetCDF group to read parent data from. Default '/' (root).
-    output_group : str or None
-        NetCDF group name for output. Default: auto-generated
-        "refinements/r0", "r1", ...
-    seed : int or None
-        Random seed. If None, derived from parent seed + group name hash.
-    sparsity_factors : tuple of 3 ints or None
-        If None, inherit from parent.
-    turbulon_shape : str or None
-        If None, inherit from parent.
-    z_min : float or None
-        Bottom altitude of the inset [m].  If None, inherit from parent
-        (0 for a root simulation).
-    z_max : float or None
-        Top altitude of the inset [m].  If None, use parent's top altitude.
-    anisotropy : str or None
-        Grid-anisotropy function name (see _k_z). If None, inherit from
-        the parent group (defaulting to 'canonical' for older files).
-    compress : bool or None
-        If True, 3D data variables in the output group are written with
-        zlib compression at complevel=4. None (default) uses the module-level
-        ``steam.constants.output_compress`` setting.
-
-    Returns
-    -------
-    Path
-        The parent_path (with the new group written into it).
-    """
-    if compress is None:
-        compress = constants.output_compress
-    parent_path = Path(parent_path)
-
-    # Read parent data from the specified group
-    ds = netCDF4.Dataset(parent_path, "r")
-    grp = ds if parent_group == '/' else ds[parent_group]
-
-    h_3d = grp.variables["h"][:].astype(np.float32)
-    qt_3d = grp.variables["qt"][:].astype(np.float32)
-    x_coords = grp.variables["x"][:]
-    y_coords = grp.variables["y"][:]
-    z_coords = grp.variables["z"][:]
-    h_profile = grp.variables["h_profile"][:]
-    qt_profile = grp.variables["qt_profile"][:]
-    z_profile = grp.variables["z_profile"][:]
-    k_values_parent = grp.variables["k_values"][:]
-    C_h_k_parent = grp.variables["C_h_k"][:]
-    C_qt_k_parent = grp.variables["C_qt_k"][:]
-    if "spheroscale_profile" in grp.variables:
-        spheroscale_profile = grp.variables["spheroscale_profile"][:]
-    else:
-        spheroscale_on_z = grp.variables["spheroscale"][:]
-        spheroscale_profile = np.interp(z_profile, z_coords, spheroscale_on_z)
-
-    parent_dx = float(grp.dx)
-    parent_dy = float(grp.dy)
-    domain_height = float(grp.domain_height)
-    profile_dz = float(grp.profile_dz)
-    surface_pressure = float(grp.surface_pressure)
-    parent_seed = int(grp.seed) if int(grp.seed) != -1 else None
-    h_min = float(grp.h_min)
-    h_max = float(grp.h_max)
-    qt_min = float(grp.qt_min)
-    qt_max = float(grp.qt_max)
-    min_distance_to_ground = int(grp.min_distance_to_ground)
-    if not hasattr(grp, 'n_scale_classes_per_dyad'):
-        raise ValueError(
-            f"Parent group {parent_group!r} has no n_scale_classes_per_dyad "
-            f"attribute; cannot extend the cascade. Regenerate the parent "
-            f"with the current version of simulate()."
-        )
-    parent_n_per_dyad = int(grp.n_scale_classes_per_dyad)
-    parent_gap = 2.0 ** (1.0 / parent_n_per_dyad)
-
-    if sparsity_factors is None:
-        sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
-    if turbulon_shape is None:
-        turbulon_shape = grp.turbulon_shape if hasattr(grp, 'turbulon_shape') else 'mexican_hat'
-    if anisotropy is None:
-        anisotropy = grp.anisotropy if hasattr(grp, 'anisotropy') else 'canonical'
-    if anisotropy not in VALID_ANISOTROPY:
-        raise ValueError(
-            f"anisotropy must be one of {VALID_ANISOTROPY}, got {anisotropy!r}"
-        )
-
-    parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
-
-    # Determine existing refinement groups for auto-naming
-    if output_group is None:
-        existing = []
-        if "refinements" in ds.groups:
-            existing = list(ds.groups["refinements"].groups.keys())
-        idx = 0
-        while f"r{idx}" in existing:
-            idx += 1
-        output_group = f"refinements/r{idx}"
-
-    ds.close()
-
-    # Resolve vertical extent of the inset
-    parent_z_max = parent_z_min + domain_height
-    if z_min is None:
-        z_min = parent_z_min
-    if z_max is None:
-        z_max = parent_z_max
-    if z_min < parent_z_min - 1e-6 or z_max > parent_z_max + 1e-6:
-        raise ValueError(
-            f"Requested altitude range [{z_min}, {z_max}] m exceeds parent "
-            f"range [{parent_z_min}, {parent_z_max}] m"
-        )
-    inset_height = z_max - z_min
-    if inset_height <= 0:
-        raise ValueError(f"z_max ({z_max}) must be greater than z_min ({z_min})")
-
-    # New outer scale = parent's finest k (the "ceiling" for this cascade).
-    # k_values start one log-step below new_outer_scale to avoid re-adding
-    # turbulons at the overlap scale with the parent.
-    new_outer_scale = float(k_values_parent[-1])
-
-    parent_nx = h_3d.shape[0]
-    parent_ny = h_3d.shape[1]
-
-    # Extend the parent's log-spaced cascade by extrapolating with the same
-    # gap factor until k > 2*dx. Round the refining factor down to the
-    # largest gap^n that still satisfies new_outer_scale/gap^n >= 2*dx.
-    s_x, s_y, s_z = sparsity_factors
-    size_class_gap_factor = parent_gap
-    n_classes = int(np.floor(
-        np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
-    ))
-    if n_classes < 1:
-        raise ValueError(
-            f"Refinement cannot add any classes: new_outer_scale="
-            f"{new_outer_scale}, dx={dx}, gap={size_class_gap_factor}. "
-            f"Decrease dx or use a parent with a larger finest scale."
-        )
-
-    k_values = new_outer_scale / size_class_gap_factor ** np.arange(1, n_classes + 1)
-
-    spheroscale_mean = float(np.mean(spheroscale_profile))
-    k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
-
-    # Inner subdomain physical extent
-    inner_nx = x_stop - x_start
-    inner_ny = y_stop - y_start
-    inner_extent_x = inner_nx * parent_dx
-    inner_extent_y = inner_ny * parent_dy
-
-    # Validate: inner extent must be integer multiple of new_outer_scale
-    for extent, axis_name in ((inner_extent_x, 'x'), (inner_extent_y, 'y')):
-        n_tiles = extent / new_outer_scale
-        if abs(n_tiles - round(n_tiles)) > 1e-9:
-            raise ValueError(
-                f"Inner subdomain {axis_name}-extent ({extent} m) must be an "
-                f"integer multiple of new_outer_scale ({new_outer_scale} m), "
-                f"got ratio={n_tiles}"
-            )
-
-    # Detect spanning dims and parent periodicity.
-    # Root sim is periodic in x/y; any nested refinement is non-periodic.
-    spans_x = (inner_nx == parent_nx)
-    spans_y = (inner_ny == parent_ny)
-    parent_is_periodic = (parent_group == '/')
-
-    # Per-class physical pad on each side.
-    # Spanning dim → pad = 0 so FFT period = inner_extent = parent_extent.
-    # Non-spanning dim → pad = SUPPORT_FACTOR * k_i, shrinking with cascade.
-    if spans_x:
-        pad_x_per_class = np.zeros(n_classes)
-    else:
-        pad_x_per_class = SUPPORT_FACTOR * k_values
-    if spans_y:
-        pad_y_per_class = np.zeros(n_classes)
-    else:
-        pad_y_per_class = SUPPORT_FACTOR * k_values
-
-    # z pad: 0 at parent ground/top (parent was already zero-padded there);
-    # else SUPPORT_FACTOR * k_z_i, clipped to available parent room.
-    at_ground = (z_min <= parent_z_min + 1e-6)
-    at_top = (z_max >= parent_z_max - 1e-6)
-
-    # If the inset's bottom is above the parent ground, the scalar surface
-    # pressure no longer describes the pressure at z=z_min; read the parent's
-    # 3D pressure field at levels bracketing z_min for a 2D p_bottom.
-    if not at_ground:
-        with netCDF4.Dataset(parent_path, "r") as _ds_p:
-            _grp_p = _ds_p if parent_group == '/' else _ds_p[parent_group]
-            if 'p' not in _grp_p.variables:
-                raise ValueError(
-                    f"Refining with z_min ({z_min}) above the parent bottom "
-                    f"({parent_z_min}) requires pressure diagnostics on the "
-                    f"parent group {parent_group!r}. Run "
-                    f"steam.thermodynamics.compute_diagnostics on the parent "
-                    f"first."
-                )
-            z_idx_lo = int(np.searchsorted(z_coords, z_min, side='right')) - 1
-            z_idx_lo = max(0, min(len(z_coords) - 2, z_idx_lo))
-            p_slice_lo = _grp_p.variables['p'][:, :, z_idx_lo].astype(np.float32)
-            p_slice_hi = _grp_p.variables['p'][:, :, z_idx_lo + 1].astype(np.float32)
-        parent_z_lo = float(z_coords[z_idx_lo])
-        parent_z_hi = float(z_coords[z_idx_lo + 1])
-    else:
-        p_slice_lo = p_slice_hi = None
-        parent_z_lo = parent_z_hi = None
-
-    if at_ground:
-        pad_z_below_per_class = np.zeros(n_classes)
-    else:
-        pad_z_below_per_class = np.minimum(
-            SUPPORT_FACTOR * k_z_values, z_min - parent_z_min
-        )
-    if at_top:
-        pad_z_above_per_class = np.zeros(n_classes)
-    else:
-        pad_z_above_per_class = np.minimum(
-            SUPPORT_FACTOR * k_z_values, parent_z_max - z_max
-        )
-
-    # Pad cell counts at parent resolution (used only for class-0 extraction
-    # from the parent's netCDF grid).
-    pad_cells_x = int(math.ceil(pad_x_per_class[0] / parent_dx)) if not spans_x else 0
-    pad_cells_y = int(math.ceil(pad_y_per_class[0] / parent_dy)) if not spans_y else 0
-
-    # Non-periodic parent: the extraction can't wrap, so the nest must leave
-    # enough room on each non-spanning side. Reject otherwise — (4)'s
-    # shrinking pad only relaxes cascade memory, not the class-0 extraction.
-    if not parent_is_periodic:
-        if not spans_x and (x_start < pad_cells_x or x_stop > parent_nx - pad_cells_x):
-            raise ValueError(
-                f"Refinement of non-periodic parent {parent_group!r} at x=[{x_start},{x_stop}] "
-                f"is too close to the parent's x boundary; need at least {pad_cells_x} cells "
-                f"of room on each side (parent_nx={parent_nx})"
-            )
-        if not spans_y and (y_start < pad_cells_y or y_stop > parent_ny - pad_cells_y):
-            raise ValueError(
-                f"Refinement of non-periodic parent {parent_group!r} at y=[{y_start},{y_stop}] "
-                f"is too close to the parent's y boundary; need at least {pad_cells_y} cells "
-                f"of room on each side (parent_ny={parent_ny})"
-            )
-
-    # Build extraction index arrays at parent resolution.
-    if spans_x:
-        x_indices = np.arange(x_start, x_stop) % parent_nx
-    elif parent_is_periodic:
-        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x) % parent_nx
-    else:
-        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x)
-    if spans_y:
-        y_indices = np.arange(y_start, y_stop) % parent_ny
-    elif parent_is_periodic:
-        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y) % parent_ny
-    else:
-        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y)
-
-    # z slice with padded range
-    z_range_low = z_min - pad_z_below_per_class[0]
-    z_range_high = z_max + pad_z_above_per_class[0]
-    z_indices = np.where(
-        (z_coords >= z_range_low - 1e-6) & (z_coords < z_range_high + 1e-6)
-    )[0]
-    if len(z_indices) == 0:
-        raise ValueError(
-            f"No parent z-levels found in [{z_range_low}, {z_range_high}] m. "
-            f"Parent z ranges from {z_coords[0]:.1f} to {z_coords[-1]:.1f} m"
-        )
-    z_coords_slice = z_coords[z_indices]
-
-    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
-    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
-
-    # Compute perturbation: subtract mean profile
-    h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
-    qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
-    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
-    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
-
-    # Compute grids with per-class pad (shrinks as k shrinks in non-spanning dims).
-    grids = _compute_all_grids(
-        k_values, inner_extent_x, inner_extent_y, inset_height,
-        sparsity_factors, spheroscale_profile, z_profile, z_min=z_min,
-        pad_x_per_class=pad_x_per_class,
-        pad_y_per_class=pad_y_per_class,
-        pad_z_below_per_class=pad_z_below_per_class,
-        pad_z_above_per_class=pad_z_above_per_class,
-        anisotropy=anisotropy,
-    )
-
-    # Inherit amplitude normalization from the parent by extrapolating the
-    # parent's (k/outer)^H_h law with the shared gap factor. The parent's
-    # last-class amplitude is the anchor: C_parent[-1](z) lives on the
-    # parent's output z-grid and already encodes response_root *
-    # (k_parent_last/outer_root)^H_h * spectral_width_correction. Because
-    # gap is preserved, the correction is the same for every descendant,
-    # so multiplying by (k_child/k_parent_last)^H_h reproduces the unified
-    # cascade's amplitude at each new class — no re-measurement, no
-    # discontinuity at the overlap scale.
-    anchor_k = float(k_values_parent[-1])
-    anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)
-    anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)
-    # Trim fill values in case the parent's C_k array was padded to
-    # nz_k_max (refine writes per-class rows of varying length).
-    anchor_C_h = anchor_C_h[:len(z_coords)]
-    anchor_C_qt = anchor_C_qt[:len(z_coords)]
-    C_h_k = []
-    C_qt_k = []
-    for i, k in enumerate(k_values):
-        scale = float((k / anchor_k) ** H_h)
-        z_i = grids['z_arrays'][i]
-        C_h_k.append(
-            (np.interp(z_i, z_coords, anchor_C_h) * scale).astype(np.float32)
-        )
-        C_qt_k.append(
-            (np.interp(z_i, z_coords, anchor_C_qt) * scale).astype(np.float32)
-        )
-
-    # Seed handling
-    if seed is None and parent_seed is not None:
-        seed = parent_seed + hash(output_group) % (2**31)
-    seed_sequence = np.random.SeedSequence(seed)
-    child_seeds = seed_sequence.spawn(n_classes)
-
-    # Run cascade on padded domain
-    if FLUX_CASCADE:
-        raise NotImplementedError(
-            "FLUX_CASCADE is not supported in refine()/nested refinement; "
-            "run the flux cascade only on root simulate() calls.")
-    h_pert_refined, qt_pert_refined, _flux_unused, final_grid = cascade_loop(
-        h_profile, qt_profile, z_profile,
-        grids,
-        C_h_k, C_qt_k,
-        h_min, h_max, qt_min, qt_max,
-        min_distance_to_ground,
-        sparsity_factors,
-        child_seeds,
-        h_perturbation=h_pert_pad,
-        qt_perturbation=qt_pert_pad,
-        turbulon_shape=turbulon_shape,
-        zero_bottom=at_ground,
-        zero_top=at_top,
-    )
-
-    # Trim pad region to get inner subdomain (x, y, z).
-    final_nx = final_grid['nx']
-    final_ny = final_grid['ny']
-    inner_nx_fine = int(round(inner_extent_x / final_grid['dx']))
-    inner_ny_fine = int(round(inner_extent_y / final_grid['dy']))
-    trim_x = (final_nx - inner_nx_fine) // 2
-    trim_y = (final_ny - inner_ny_fine) // 2
-
-    # z trim: find cells whose left-edge lies within [z_min, z_max).
-    z_full = final_grid['z']
-    dz_full = final_grid['dz']
-    z_inner_mask = (z_full >= z_min - 1e-6) & (z_full < z_max - 1e-6)
-    z_inner_indices = np.where(z_inner_mask)[0]
-    if len(z_inner_indices) == 0:
-        # Fallback: use centered trim based on inset_height
-        inner_nz_fine = int(round(inset_height / float(final_grid['dz'].mean())))
-        z_trim_start = (len(z_full) - inner_nz_fine) // 2
-        z_inner_indices = np.arange(z_trim_start, z_trim_start + inner_nz_fine)
-    z_trim_start = int(z_inner_indices[0])
-    z_trim_stop = int(z_inner_indices[-1]) + 1
-
-    h_pert_inner = h_pert_refined[trim_x:trim_x+inner_nx_fine,
-                                   trim_y:trim_y+inner_ny_fine,
-                                   z_trim_start:z_trim_stop]
-    qt_pert_inner = qt_pert_refined[trim_x:trim_x+inner_nx_fine,
-                                     trim_y:trim_y+inner_ny_fine,
-                                     z_trim_start:z_trim_stop]
-
-    # Construct final 3D fields
-    z_final = z_full[z_trim_start:z_trim_stop].astype(np.float32)
-    dz_final = dz_full[z_trim_start:z_trim_stop].astype(np.float32)
-    h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
-    qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
-    spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
-
-    h_3d_out = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
-    qt_3d_out = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
-
-    np.clip(h_3d_out, h_min, h_max, out=h_3d_out)
-    np.clip(qt_3d_out, qt_min, qt_max, out=qt_3d_out)
-
-    nx_out = h_3d_out.shape[0]
-    ny_out = h_3d_out.shape[1]
-    dx_final = inner_extent_x / nx_out
-    dy_final = inner_extent_y / ny_out
-    # World-absolute coords: parent's own first-cell world position + local
-    # in-parent offset. Using only x_start * parent_dx skews deeper refinements
-    # whose parent doesn't start at world origin (e.g. a cube carved from a
-    # strip that is not y-centered on 0).
-    parent_x_origin = float(x_coords[0])
-    parent_y_origin = float(y_coords[0])
-    x_out = (np.arange(nx_out, dtype=np.float32) * dx_final
-             + x_start * parent_dx + parent_x_origin)
-    y_out = (np.arange(ny_out, dtype=np.float32) * dy_final
-             + y_start * parent_dy + parent_y_origin)
-
-    # 2D starting pressure from parent's p, interpolated in z to z_final[0]
-    # and bilinearly upsampled to the child horizontal grid.
-    if p_slice_lo is not None:
-        z_target = float(z_final[0])
-        if parent_z_hi > parent_z_lo:
-            w = (z_target - parent_z_lo) / (parent_z_hi - parent_z_lo)
-            w = float(np.clip(w, 0.0, 1.0))
-        else:
-            w = 0.0
-        p_slice = (1.0 - w) * p_slice_lo + w * p_slice_hi
-        if parent_is_periodic:
-            ix_inner = np.arange(x_start, x_stop) % parent_nx
-            iy_inner = np.arange(y_start, y_stop) % parent_ny
-        else:
-            ix_inner = np.arange(x_start, x_stop)
-            iy_inner = np.arange(y_start, y_stop)
-        p_bottom_inner = p_slice[np.ix_(ix_inner, iy_inner)]
-        if p_bottom_inner.shape == (nx_out, ny_out):
-            p_bottom_field = p_bottom_inner.astype(np.float32)
-        else:
-            p_bottom_field = zoom_bilinear(p_bottom_inner, (nx_out, ny_out))
-    else:
-        p_bottom_field = None
-
-    C_h_L = float(np.mean(C_h_k[0]))
-    C_qt_L = float(np.mean(C_qt_k[0]))
-
-    # Align stored C_k to the output z grid (see matching block in simulate()
-    # for rationale). For refine with elevated / narrow-z insets this also
-    # trims off the pad region, so descendants can inherit cleanly.
-    C_h_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_h_k[i]).astype(np.float32)
-                    for i in range(len(k_values))]
-    C_qt_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_qt_k[i]).astype(np.float32)
-                     for i in range(len(k_values))]
-
-    simulation_params = {
-        'nx': nx_out,
-        'ny': ny_out,
-        'dx': dx_final,
-        'dy': dy_final,
-        'dz': dz_final,
-        'outer_scale': new_outer_scale,
-        'spheroscale': spheroscale_final,
-        'spheroscale_profile': spheroscale_profile,
-        'domain_height': inset_height,
-        'domain_z_min': z_min,
-        'profile_dz': profile_dz,
-        'sparsity_factors': sparsity_factors,
-        'n_scale_classes_per_dyad': parent_n_per_dyad,
-        'surface_pressure': surface_pressure,
-        'seed': seed,
-        'C_h_L': C_h_L,
-        'C_qt_L': C_qt_L,
-        'n_large_turbulons': 0,  # refinement doesn't define this
-        'H_h': H_h,
-        'H_z': H_z,
-        'h_min': h_min,
-        'h_max': h_max,
-        'qt_min': qt_min,
-        'qt_max': qt_max,
-        'min_distance_to_ground': min_distance_to_ground,
-        'turbulon_shape': turbulon_shape,
-        'anisotropy': anisotropy,
-        'parent_group': parent_group,
-        'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
-        'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),
-        'parent_x_offset': float(x_start * parent_dx),
-        'parent_y_offset': float(y_start * parent_dy),
-    }
-    if p_bottom_field is not None:
-        simulation_params['p_bottom'] = p_bottom_field
-
-    write_netcdf(
-        parent_path, h_3d_out, qt_3d_out,
-        x_out, y_out, z_final,
-        h_profile, qt_profile, z_profile.astype(np.float32),
-        k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
-        simulation_params,
-        group=output_group,
-        compress=compress,
-    )
-    return parent_path

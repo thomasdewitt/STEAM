@@ -3,9 +3,8 @@
 import numpy as np
 import pytest
 import netCDF4
-import importlib
 
-from steam.simulate import simulate, refine, _k_z
+from steam.simulate import simulate, _k_z
 from steam.constants import hurst_vertical_anisotropy as H_z
 
 
@@ -108,77 +107,6 @@ def test_simulate_canonical_unchanged(tmp_path, profiles):
     np.testing.assert_allclose(k_z_values, expected, rtol=1e-5)
 
 
-def test_refine_with_different_anisotropy(tmp_path, profiles, monkeypatch):
-    """Refine the same canonical parent twice with two different anisotropy functions."""
-    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
-    h, qt = profiles
-    parent = tmp_path / "parent.nc"
-    simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
-             outer_scale=4000, spheroscale=700,
-             domain_height=3000, profile_dz=30,
-             output_path=parent, seed=42)
-
-    # Refinement inner must be an integer multiple of new_outer_scale = parent's finest k.
-    ds = netCDF4.Dataset(parent, "r")
-    parent_dx = float(ds.dx)
-    k_finest = float(ds.variables["k_values"][:][-1])
-    parent_nx = len(ds.dimensions["x"])
-    ds.close()
-
-    # Use spanning x/y so we avoid boundary-pad issues, and a smaller dx so at
-    # least one refined class sits below spheroscale (1000 m).
-    new_dx = new_dy = k_finest / 4
-
-    refine(parent, 0, parent_nx, 0, parent_nx, new_dx, new_dy,
-           seed=99, anisotropy='canonical')
-    refine(parent, 0, parent_nx, 0, parent_nx, new_dx, new_dy,
-           seed=100, anisotropy='piecewise_isotropic_below_spheroscale')
-
-    ds = netCDF4.Dataset(parent, "r")
-    r0 = ds.groups["refinements"].groups["r0"]
-    r1 = ds.groups["refinements"].groups["r1"]
-
-    assert r0.anisotropy == 'canonical'
-    assert r1.anisotropy == 'piecewise_isotropic_below_spheroscale'
-
-    h0 = r0.variables["h"][:]
-    h1 = r1.variables["h"][:]
-    assert np.all(np.isfinite(h0))
-    assert np.all(np.isfinite(h1))
-
-    # Piecewise k_z_values must differ from canonical at the refined (small-k) classes
-    # since the refined k_values fall below spheroscale.
-    k_r1 = r1.variables["k_values"][:]
-    k_z_r1 = r1.variables["k_z_values"][:]
-    spheroscale_mean = float(np.mean(r1.variables["spheroscale"][:]))
-    below = k_r1 < spheroscale_mean
-    assert np.any(below), "Test setup should produce refined classes below spheroscale"
-    np.testing.assert_allclose(k_z_r1[below], k_r1[below], rtol=1e-5)
-    ds.close()
-
-
-def test_refine_inherits_anisotropy_from_parent(tmp_path, profiles, monkeypatch):
-    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
-    h, qt = profiles
-    parent = tmp_path / "parent.nc"
-    simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
-             outer_scale=4000, spheroscale=700,
-             domain_height=3000, profile_dz=30,
-             output_path=parent, seed=42,
-             anisotropy='piecewise_isotropic_below_spheroscale')
-
-    ds = netCDF4.Dataset(parent, "r")
-    k_finest = float(ds.variables["k_values"][:][-1])
-    parent_nx = len(ds.dimensions["x"])
-    ds.close()
-
-    refine(parent, 0, parent_nx, 0, parent_nx, k_finest / 4, k_finest / 4,
-           seed=99)  # anisotropy omitted → inherit
-
-    ds = netCDF4.Dataset(parent, "r")
-    r0 = ds.groups["refinements"].groups["r0"]
-    assert r0.anisotropy == 'piecewise_isotropic_below_spheroscale'
-    ds.close()
 
 
 def test_simulate_rejects_unknown_anisotropy(tmp_path, profiles):
