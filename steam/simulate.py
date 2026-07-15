@@ -97,24 +97,50 @@ def _extremal_levy(alpha, size, rng):
     and <exp(gamma)> is finite -- the property that lets the multiplier be
     renormalized to unit mean. At alpha=2 it is exactly N(0, 2), i.e. the
     lognormal case. Valid for alpha in (1, 2].
+
+    Assembled with in-place float32 ops (commutative reorderings of the single
+    CMS expression) so only a few field-sized buffers are ever live -- the
+    generator is drawn at the flux cascade's finest resolution.
     """
-    phi = (rng.random(size, dtype=np.float64) - 0.5) * np.pi
-    R = rng.exponential(1.0, size)
-    phi0 = -(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha
-    sign = 1.0 if alpha > 1.0 else -1.0
-    factor = (np.clip(np.cos(phi), 1e-12, None) * abs(alpha - 1.0)) ** (-1.0 / alpha)
-    shifted = alpha * (phi - phi0)
-    tail = (np.clip(np.cos(phi - shifted), 1e-12, None) / R) ** ((1.0 - alpha) / alpha)
-    return sign * np.sin(shifted) * factor * tail
+    alpha = float(alpha)
+    phi0 = np.float32(-(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha)
+    sign = np.float32(1.0 if alpha > 1.0 else -1.0)
+    eps = np.float32(1e-12)
+
+    phi = (rng.random(size, dtype=np.float32) - np.float32(0.5)) * np.float32(np.pi)
+    R = rng.random(size, dtype=np.float32)       # -log(U) ~ Exp(1), all float32
+    np.clip(R, eps, None, out=R)
+    np.log(R, out=R)
+    R *= np.float32(-1.0)
+
+    factor = np.clip(np.cos(phi), eps, None)     # (|a-1| cos phi) ** (-1/a)
+    factor *= np.float32(abs(alpha - 1.0))
+    factor **= np.float32(-1.0 / alpha)
+
+    shifted = phi - phi0
+    shifted *= np.float32(alpha)                 # a (phi - phi0)
+    phi -= shifted                               # phi - a(phi - phi0); reuse phi
+    np.cos(phi, out=phi)
+    np.clip(phi, eps, None, out=phi)
+    phi /= R                                     # cos(...)/R
+    phi **= np.float32((1.0 - alpha) / alpha)    # -> tail factor
+    del R
+
+    np.sin(shifted, out=shifted)                 # sin(a(phi - phi0))
+    shifted *= sign
+    shifted *= factor
+    shifted *= phi
+    return shifted
 
 
 # log<exp(gamma_0)> for the unit-scale extremal generator above. Subtracting
 # LEVY_LOG_MEAN * scale**alpha from a scale-times-gamma_0 draw sets the
 # multiplier to unit mean (the alpha-generalization of the lognormal -sigma^2/2;
 # it equals 1 at alpha=2). There is no closed form in this generator's scale
-# convention, so it is measured once from a large deterministic draw.
+# convention, so it is measured once from a large deterministic draw (in float64
+# for an accurate mean).
 LEVY_LOG_MEAN = float(np.log(np.mean(np.exp(
-    _extremal_levy(FLUX_ALPHA, 8_000_000, np.random.default_rng(0))
+    _extremal_levy(FLUX_ALPHA, 8_000_000, np.random.default_rng(0)).astype(np.float64)
 ))))
 
 
@@ -125,7 +151,7 @@ def _sparse_levy(nx, ny, nz, factor_x, factor_y, factor_z, alpha, rng):
     spacing at the oversampled resolution); at s=1 every cell is a center.
     """
     if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return _extremal_levy(alpha, nx * ny * nz, rng).reshape(nx, ny, nz).astype(np.float32)
+        return _extremal_levy(alpha, nx * ny * nz, rng).reshape(nx, ny, nz)
 
     field = np.zeros((nx, ny, nz), dtype=np.float32)
     ix = np.arange(0, nx, factor_x)
@@ -133,7 +159,7 @@ def _sparse_levy(nx, ny, nz, factor_x, factor_y, factor_z, alpha, rng):
     iz = np.arange(0, nz, factor_z)
     field[np.ix_(ix, iy, iz)] = _extremal_levy(
         alpha, len(ix) * len(iy) * len(iz), rng
-    ).reshape(len(ix), len(iy), len(iz)).astype(np.float32)
+    ).reshape(len(ix), len(iy), len(iz))
     return field
 
 
