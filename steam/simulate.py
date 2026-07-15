@@ -423,18 +423,20 @@ def simulate(
                                      support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
 
     # Pre-flight host-memory estimate so a doomed config fails in milliseconds.
-    # This is approximate. On CPU the finest-grid convolution working set
-    # (precisely guarded inside convolve_fft_xy_oa_z) rides on top of the
-    # persistent finest-grid fields (h, qt, flux plus one transient weight/amp
-    # buffer). On CUDA that FFT working set lives on the GPU, so the host floor
-    # is just the coexisting full-domain arrays. Real fields are float32.
+    # The cascade's concurrent peak is EIGHT field-sized float32 arrays at the
+    # finest grid, not just the three persistent ones (h, qt, flux): the
+    # gradient-weighting peak adds S_k, the running-sum buffer, the gradient
+    # accumulator and a np.roll/np.gradient temporary; the flux-advance peak
+    # equivalently adds gamma, noise, S_k and the convolution result. On CPU
+    # the FFT spectral working set (precisely guarded inside
+    # convolve_fft_xy_oa_z) rides on top; on CUDA it lives in VRAM and only
+    # the eight host arrays remain. (2026-07-15: a 5-field estimate passed
+    # preflight at (2048, 2048, 363) and the kernel OOM-killed the session.)
     nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
     field_bytes = nx_f * ny_f * nz_f * 4
-    if device == 'cuda':
-        peak_bytes = 5 * field_bytes  # h, qt, flux + running-field + amplitude buffers
-    else:
-        peak_bytes = (fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
-                      + 3 * field_bytes)
+    peak_bytes = 8 * field_bytes
+    if device != 'cuda':
+        peak_bytes += fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
     available = available_memory_bytes()
     if available is not None and peak_bytes > available - MEMORY_HEADROOM_BYTES:
         raise MemoryError(
