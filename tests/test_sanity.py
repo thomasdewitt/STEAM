@@ -11,7 +11,6 @@ from steam.simulate import (
     _turbulon_envelope,
     _sparse_levy,
     _gradient_magnitude,
-    spectral_width_normalization,
 )
 from steam.utils import (
     fold_kernel_to_field,
@@ -223,18 +222,6 @@ def test_compute_all_grids_uses_actual_spacing_from_rounded_counts():
     np.testing.assert_array_equal(grids["ny"], np.array([5, 10]))
     np.testing.assert_allclose(grids["dx"], 30.0 / grids["nx"])
     np.testing.assert_allclose(grids["dy"], 18.0 / grids["ny"])
-
-
-def test_spectral_width_normalization_uses_hardcoded_shape_widths():
-    np.testing.assert_allclose(
-        spectral_width_normalization("mexican_hat", 2.0),
-        2.0 / 2.7954,
-    )
-    np.testing.assert_allclose(
-        spectral_width_normalization("morlet_omega0_6", 2.0),
-        2.0 / 3.0465,
-    )
-    assert spectral_width_normalization("mexican_hat", 4.0) == 1.0
 
 
 # ===================================================================

@@ -14,27 +14,14 @@ from .utils import (
     convolve_periodic_xy_zeropad_z_oa,
     convolve_fft_xy_oa_z,
     zoom_trilinear,
+    available_memory_bytes,
+    fft_convolution_bytes,
+    MEMORY_HEADROOM_BYTES,
 )
 from .output import write_netcdf
 
 CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
-
-# ─── FUDGE FACTOR (empirical normalization correction) ──────────────────────
-# Divides the Haar response in _compute_normalization, i.e. it scales the whole
-# cascade amplitude: LARGER value -> SMALLER perturbations. This is a FUDGE
-# FACTOR, kept explicit on purpose. History / tuned values:
-#   1.15  original, from the empirical normalization-diagnostic script
-#   2.0   EGU hack for a bad profile (May 2026)  [current default, unchanged]
-#   DYCOMS-RF01 stratocumulus LWP tuning (2026-06-26, steam_experiment/):
-#     ~22.6 for constant spheroscale=1000 m;  ~32 for varying ls 200->2 m.
-#     These match qt-variance / LWP but leave MSE variance too low -- a single
-#     scalar can't fix both, which is why the constants need to become
-#     HEIGHT/FIELD-SPECIFIC (roadmap). Until then LWP-tuned is the pragmatic
-#     interim choice for a cloud field.
-# Left at 2.0 so other configs are unchanged; override per run via
-# `steam.simulate.NORMALIZATION_FUDGE = <value>`.
-NORMALIZATION_FUDGE = 2.0
 
 # ─── INTERMITTENCY KNOB: gradient-weight exponent ───────────────────────────
 # The per-class gradient-magnitude weights (normalized to per-z-level mean 1) are
@@ -55,8 +42,7 @@ GRADIENT_WEIGHT_POWER = 1.0
 #   max, the data only reaches the rising half, so the weight ~ |field-min| over
 #   the real range -> amplitude concentrates in the BODY of high-field (moist/warm)
 #   regions, not edges. Aimed at building the qt-MSE joint (mixing-line) structure
-#   the gradient form misses. Overall amplitude shift is absorbed by re-tuning
-#   NORMALIZATION_FUDGE (C_*_k machinery unchanged). Override at runtime via
+#   the gradient form misses. Override at runtime via
 #   `steam.simulate.WEIGHTING = 'field'`.
 WEIGHTING = 'gradient'
 
@@ -425,25 +411,35 @@ def simulate(
         / _k_z(anisotropy, k_min, spheroscale_mean)
     ))
 
-    # Unit turbulon z-slice for normalization correction
+    # Outer-scale turbulon envelope; its x=y=0 center column is the 1D response
+    # used to normalize against the mean profile (Eqn apxeq:norm factor computation).
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                      support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
-    spectral_width_correction = spectral_width_normalization(
-        turbulon_shape, size_class_gap_factor
-    )
+
+    # Pre-flight memory estimate so a doomed config fails in milliseconds. This
+    # is approximate; the finest-grid convolution working set (precisely guarded
+    # inside convolve_fft_xy_oa_z) plus the three persistent finest-grid fields
+    # (h, qt, flux). Real fields are float32.
+    nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
+    peak_bytes = (fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
+                  + 3 * nx_f * ny_f * nz_f * 4)
+    available = available_memory_bytes()
+    if available is not None and peak_bytes > available - MEMORY_HEADROOM_BYTES:
+        raise MemoryError(
+            f"STEAM needs ~{peak_bytes / 1024**3:.1f} GiB (approximate) for the "
+            f"finest grid {(nx_f, ny_f, nz_f)} but only "
+            f"{available / 1024**3:.1f} GiB is available; refusing to risk OOM. "
+            f"Reduce resolution, domain size, or vertical levels."
+        )
 
     C_h_k = _compute_normalization(
-        h_on_finest, vertical_outer_scale_grid_pts,
-        k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape,
+        h_on_finest, vertical_outer_scale_grid_pts, n_large_turbulons,
+        k_values, outer_scale, grids, unit_turbulon,
     )
     C_qt_k = _compute_normalization(
-        qt_on_finest, vertical_outer_scale_grid_pts,
-        k_values, outer_scale, grids,
-        unit_turbulon, turbulon_shape,
+        qt_on_finest, vertical_outer_scale_grid_pts, n_large_turbulons,
+        k_values, outer_scale, grids, unit_turbulon,
     )
-    C_h_k = [c * spectral_width_correction for c in C_h_k]
-    C_qt_k = [c * spectral_width_correction for c in C_qt_k]
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
@@ -1154,106 +1150,54 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
     return envelope
 
 
-def spectral_width_normalization(shape, size_class_gap_factor):
-    """Return an overlap correction from kernel spectral width and class spacing.
-
-    The returned factor is a simple linear overlap correction:
-
-        min(1, size_class_gap_factor / spectral_width_factor)
-
-    where ``size_class_gap_factor`` is the multiplicative ratio between
-    adjacent size-class values and ``spectral_width_factor`` is a hard-coded
-    estimate of the kernel's PSD e-folding width in the same multiplicative
-    sense.
-
-    The width constants were estimated once offline from the continuous
-    dimensionless kernel shapes at unit scale:
-
-    - ``mexican_hat``: PSD width factor 2.7954
-      This comes from the analytic 1D band-pass form of the line-profile PSD,
-      ``P(q) ∝ q^4 exp(-q^2)``, using the ratio of the two wavenumbers where
-      the PSD falls to ``peak / e`` around the nonzero spectral peak.
-    - ``morlet_omega0_6``: PSD width factor 3.0465
-      This comes from the corresponding Gaussian-modulated cosine line-profile
-      PSD at ``omega0 = 6`` and ``sigma = 1/pi``, again using the ratio of the
-      two wavenumbers where the PSD falls to ``peak / e`` around the main
-      nonzero spectral peak.
-
-    These constants are heuristic shape descriptors. They are not recomputed
-    at runtime because they depend only on the dimensionless kernel family.
-    """
-    if size_class_gap_factor <= 1:
-        raise ValueError(
-            "size_class_gap_factor must be greater than 1, "
-            f"got {size_class_gap_factor}"
-        )
-
-    spectral_width_factor = {
-        'mexican_hat': 2.7954,
-        'morlet_omega0_6': 3.0465,
-    }.get(shape)
-    if spectral_width_factor is None:
-        raise ValueError(
-            f"No spectral width normalization defined for shape {shape!r}"
-        )
-
-    if spectral_width_factor < size_class_gap_factor:
-        return 1.0
-    return float(size_class_gap_factor / spectral_width_factor)
-
-
 def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
-                           k_values, outer_scale, z_arrays,
-                           turbulon, shape='mexican_hat'):
-    """Compute scale- and height-dependent amplitude arrays C_k.
+                           n_large_turbulons, k_values, outer_scale, z_arrays,
+                           turbulon):
+    """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
 
-    Measures profile variation at the vertical outer scale using a first-order
-    Haar wavelet (step function: -1 below center, +1 above) on the finest
-    resolution grid. The Haar width is adjusted so its spectral peak matches
-    the envelope shape's spectral peak, then scales by (k/outer_scale)^H_h.
+        C_{Phi,L}(z) = (N_L / N_p) |T_L(x=y=0) * <Phi>_t(z)|
+
+    The outer-scale envelope's center column T_L(x=y=0) is convolved along the
+    mean profile (edge-padded), kept height-dependent. N_L = floor(L_z / k_z,L)
+    outer-scale turbulons fit vertically; N_p is the number of profile samples,
+    so N_L/N_p makes the summed response independent of profile resolution.
+    C_{Phi,k} then follows (k/L)^H_h.
+
+    The column is a slice of the 3D-mean-subtracted envelope, so it is not itself
+    zero-mean; it is made zero-mean here (the discretized-wavelet admissibility
+    criterion) by subtracting its own mean before convolving.
 
     Parameters
     ----------
     profile_on_finest_grid : ndarray, shape (nz_finest,)
-        Profile interpolated to the finest-resolution z-grid.
+        Mean profile <Phi>_t interpolated to the finest-resolution z-grid.
     vertical_outer_scale_grid_pts : int
-        Number of finest-grid cells spanning the vertical outer scale.
-        Constant across height: 2 * s_z * (outer_scale / k_min)^H_z.
+        Finest-grid cells spanning the vertical outer scale k_z,L.
+    n_large_turbulons : int
+        N_L, outer-scale turbulons fitting vertically in the domain.
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
-    z_arrays : list of n_classes 1D arrays — z-coords per scale class
-    shape : str
-        Envelope shape name. Used to match Haar spectral peak to envelope peak.
+    z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
+    turbulon : ndarray
+        Outer-scale 3D envelope (already 3D-mean-subtracted).
 
     Returns
     -------
     list of n_classes 1D float32 arrays.
     """
-    # Spectral peak wavelengths in units of k, measured numerically at high
-    # resolution.  The Haar peak ratio is per unit of total width.
-    HAAR_PEAK_PER_WIDTH = 1.3443
-    SHAPE_PEAK_PER_K = {
-        'mexican_hat': 1.4170,
-        'morlet_omega0_6': 1.0486,
-    }
-    shape_peak = SHAPE_PEAK_PER_K.get(shape, 1.4170)
+    # Center column T_L(x=y=0), resampled from the +/-SUPPORT_FACTOR*k envelope
+    # onto the finest grid (k_z,L spans vertical_outer_scale_grid_pts cells).
+    column = turbulon[turbulon.shape[0] // 2, turbulon.shape[1] // 2, :].astype(np.float64)
+    n_half = SUPPORT_FACTOR * vertical_outer_scale_grid_pts
+    kernel = np.interp(np.arange(-n_half, n_half + 1),
+                       np.linspace(-n_half, n_half, column.size), column)
+    kernel -= kernel.mean()
 
-    # Adjust Haar width so its spectral peak matches the envelope's
-    corrected_width_pts = vertical_outer_scale_grid_pts * shape_peak / HAAR_PEAK_PER_WIDTH
-    n_half = max(1, int(round(corrected_width_pts / 2)))
-
-    kernel_haar = np.empty(2 * n_half, dtype=np.float64)
-    kernel_haar[:n_half] = -1.0 / n_half
-    kernel_haar[n_half:] = 1.0 / n_half
-
-    padded = np.pad(profile_on_finest_grid, (n_half, n_half - 1), mode='edge')
-    response = np.abs(np.convolve(padded, kernel_haar, mode='valid'))
-
-    # FUDGE FACTOR (empirical normalization correction) — see NORMALIZATION_FUDGE
-    # definition near the top of this module for history and tuned values.
-    response /= NORMALIZATION_FUDGE
+    padded = np.pad(profile_on_finest_grid, (n_half, n_half), mode='edge')
+    response = np.abs(np.convolve(padded, kernel, mode='valid'))
+    response *= n_large_turbulons / profile_on_finest_grid.size
 
     z_finest = z_arrays['z_arrays'][-1]
     C_k = []

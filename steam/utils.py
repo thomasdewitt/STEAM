@@ -6,6 +6,32 @@ from numba import njit, prange
 from scipy import ndimage
 from scipy.signal import oaconvolve
 
+MEMORY_HEADROOM_BYTES = 2 * 1024**3  # keep this much RAM free; OOM swap-thrashes the host
+
+
+def available_memory_bytes():
+    """RAM currently available to allocate, from /proc/meminfo (Linux)."""
+    with open('/proc/meminfo') as meminfo:
+        for line in meminfo:
+            if line.startswith('MemAvailable:'):
+                return int(line.split()[1]) * 1024  # kB -> bytes
+    return None
+
+
+def fft_convolution_bytes(nx, ny, nz, kz, itemsize):
+    """Peak working-set bytes of :func:`convolve_fft_xy_oa_z` for one field.
+
+    Overlap-add along z allocates a real accumulator (nx, ny, nz+kz-1), the
+    kernel and one block spectrum (nx, ny, n_fft//2+1) complex, and one real
+    block (nx, ny, n_fft), where n_fft is the smallest power of two admitting a
+    linear kz-tap block convolution.
+    """
+    n_fft = 1 << max(4, (2 * kz - 1).bit_length())
+    half = n_fft // 2 + 1
+    return nx * ny * ((nz + kz - 1) * itemsize     # accumulator
+                      + 2 * half * 2 * itemsize    # kernel + block spectra (complex)
+                      + n_fft * itemsize)          # block output
+
 
 @njit(parallel=True, cache=True)
 def convolve_periodic_xy_zeropad_z(field, kernel):
@@ -158,6 +184,18 @@ def convolve_fft_xy_oa_z(field, kernel):
     n_fft = 1 << max(4, (2 * kz - 1).bit_length())
     block_len = n_fft - kz + 1
     transform_shape = (nx, ny, n_fft)
+
+    # Refuse to allocate the spectral working set if it would not fit with
+    # headroom: an OOM here swap-thrashes and bricks the whole host.
+    requested = fft_convolution_bytes(nx, ny, nz, kz, field_t.element_size())
+    available = available_memory_bytes()
+    if available is not None and requested > available - MEMORY_HEADROOM_BYTES:
+        raise MemoryError(
+            f"convolve_fft_xy_oa_z needs {requested / 1024**3:.1f} GiB for field "
+            f"shape {(nx, ny, nz)} (kernel {(kx, ky, kz)}) but only "
+            f"{available / 1024**3:.1f} GiB is available; refusing to risk OOM. "
+            f"Reduce resolution, domain size, or vertical levels."
+        )
 
     kernel_padded = torch.zeros((nx, ny, kz), dtype=kernel_t.dtype)
     kernel_padded[:kx, :ky, :] = kernel_t
