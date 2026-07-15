@@ -1,96 +1,49 @@
 # Flux-cascade memory benchmark
 
-Date: 2026-07-15. Physics baseline: `730aa1b`. Both runs used seed 123,
-float32 model fields, the Gaussian unit-mean flux cascade, uncompressed NetCDF
-output, and the same CPU-only execution path. The optimized code is the memory
-commit containing this note.
+Date: 2026-07-15. Canonical model revision: `439f735`. The current run used
+seed 123, float32 fields, `FLUX_SCALE=0.5`, the default four flux substeps,
+uncompressed NetCDF output, and CPU FFTs.
 
-## Outcome
+## Current canonical re-check
 
-The largest measured case, `2048 x 2048 x 84`, fell from 15.15 GiB to
-12.93 GiB peak RSS (-14.7%) and from 26.88 s to 21.09 s (-21.5%). The small
-reference case improved less because Python, Torch, and FFT-library startup
-memory dominate a 256-grid run.
+| Final grid | Flux substeps | Peak RSS | Simulation wall time |
+|---|---:|---:|---:|
+| 2048 x 2048 x 84 | 4 | 13.35 GiB | 39.12 s |
 
-| Final grid | Version | Peak RSS | Simulation wall time | Memory change | Time change |
-|---|---:|---:|---:|---:|---:|
-| 256 x 256 x 84 | before | 884.95 MiB | 0.287 s | -- | -- |
-| 256 x 256 x 84 | after | 861.95 MiB | 0.274 s | -2.6% | -4.5% |
-| 2048 x 2048 x 84 | before | 15.15 GiB | 26.88 s | -- | -- |
-| 2048 x 2048 x 84 | after | 12.93 GiB | 21.09 s | -14.7% | -21.5% |
+Peak RSS was 14,339,584,000 bytes (13,675.3 MiB). It was measured with
+`resource.getrusage(RUSAGE_SELF).ru_maxrss` in a fresh worker process. Wall
+time was measured around `simulate()`, including NetCDF output but excluding
+environment startup. Torch tensors remained on CPU.
 
-Peak RSS is `resource.getrusage(RUSAGE_SELF).ru_maxrss` from a fresh worker
-process. Wall time is measured inside `simulate()`, so environment startup is
-excluded. `/usr/bin/time -v` independently reported the same RSS peaks to
-rounding. Torch tensors remained on CPU; CUDA allocation was zero, so GPU memory
-is not applicable even though the host has an RTX 5080.
+The grid used `dx=dy=500 m`, a 1024-km square horizontal domain, outer scale
+512 km, spheroscale 100 m, and a 15-km-deep column. The exact command was:
 
-The measured configurations were:
+`uv run --frozen --with netCDF4 --with numba python benchmarking/benchmark_simulate.py --worker --seed 123 --nx 2048 --ny 2048 --dx 500 --dy 500 --outer-scale 512000 --spheroscale 100 --domain-height 15000 --profile-dz 30 --nz 50 --output-path /tmp/steam_flux_memory_n4.nc`
 
-- Small: `nx=ny=256`, `dx=dy=500 m`, outer scale 128 km, 15 km deep.
-- Large: `nx=ny=2048`, `dx=dy=500 m`, outer scale 512 km (two outer-scale
-  tiles across the 1024-km domain), 15 km deep.
+The previous one-substep result on the same grid was 12.93 GiB and 21.09 s.
+Four substeps therefore raised measured peak RSS by 3.3% and runtime by 85.5%.
+The small memory change is expected because substeps reuse the same flux and
+innovation buffers; the runtime increase comes from three additional flux
+convolutions per size class.
 
-The worker command was `uv run --frozen --with netCDF4 --with numba python
-benchmarking/benchmark_simulate.py --worker ...`; the two configurations above
-supplied the numeric arguments and wrote temporary NetCDF files under `/tmp`.
+## Historical memory optimization reference
 
-## Changes
+The real-FFT and buffer-reuse work at `f956a98` was measured with one flux
+substep:
 
-1. The convolution now transforms each real overlap-add block directly with
-   `torch.fft.rfftn/irfftn`. The previous path retained a complex horizontal
-   `rfft2` field, performed complex FFTs along z, and accumulated complex
-   half-plane output. The new accumulator and inverse output are real.
-2. Scalar gradient weighting is computed before soft clipping, after which the
-   no-longer-needed running-field buffer is reused for the soft-clip weight.
-   This removes one full-domain live array at the gradient peak.
-3. Final h and qt means are added into their perturbation buffers in place,
-   instead of allocating two additional full-domain result arrays.
-4. The convolved flux increment and FFT block buffers are deleted as soon as
-   their consumers finish. No size-class history is retained; the existing
-   cascade already interpolates only the current coarsened fields to the next
-   grid.
+| Final grid | Version | Peak RSS | Simulation wall time |
+|---|---:|---:|---:|
+| 256 x 256 x 84 | before | 884.95 MiB | 0.287 s |
+| 256 x 256 x 84 | after | 861.95 MiB | 0.274 s |
+| 2048 x 2048 x 84 | before | 15.15 GiB | 26.88 s |
+| 2048 x 2048 x 84 | after | 12.93 GiB | 21.09 s |
 
-No dtype or numerical-precision setting changed. STEAM already uses explicit
-float32 working fields, so no new float32 opt-in mode was needed.
+That optimization changed the convolution to real `rfftn/irfftn`, reused the
+soft-clamp and final-field buffers, and released convolution temporaries as
+soon as possible. Fixed-seed fields remained numerically equivalent, and the
+test suite passed.
 
-## Fixed-seed correctness gate
-
-The pre/post files for the small configuration used identical seed 123 and
-inputs. Coordinates, scale arrays, and `C_h_k`/`C_qt_k` were bit-identical.
-The real-FFT operation order changes float32 rounding, so 3-D fields are not
-bit-identical, but they are numerically equivalent:
-
-| Field | Maximum absolute difference | RMSE | RMSE / field-fluctuation std | Correlation |
-|---|---:|---:|---:|---:|
-| h | 2.90625 J kg^-1 | 0.01678 J kg^-1 | 6.50e-6 | 0.999999999979 |
-| qt | 6.63e-7 kg kg^-1 | 1.82e-9 kg kg^-1 | 8.64e-7 | 1.000000000000 |
-| F | 3.05e-5 | 7.17e-7 | 4.39e-7 | 1.000000000000 |
-
-The full test suite also passes (`109 passed, 60 skipped`). Convolution tests
-compare the new implementation against the mixed-boundary ndimage reference at
-`rtol=atol=1e-4`; direct old/new convolution comparisons were within about
-`3e-7` relative error.
-
-## Feasible-domain projection
-
-For the same 84-level vertical grid and outer-scale schedule, fitting
-`RSS = b + a*N^2` through the measured 256 and 2048 cases projects:
-
-| Horizontal grid | Before | After |
-|---|---:|---:|
-| 4096 x 4096 x 84 | 58.7 GiB | 49.8 GiB |
-
-The workstation has 60 GiB physical RAM and about 52 GiB available during the
-benchmark. Before the change, the next dyadic 4096 grid had effectively no
-headroom for the OS and was not a safe run; 2048 was the largest conservative
-case. After the change, 4096 is projected to fit with roughly 10 GiB relative to
-total RAM (about 2 GiB at the observed concurrent system load). For a production
-matched-domain run, stop other memory-heavy jobs and monitor RSS, because 4096
-is still borderline rather than comfortable. With an 80%-of-RAM safety budget
-(48 GiB), the projected limit is about `4020 x 4020 x 84`; with the measured
-52-GiB available budget it is about `4190 x 4190 x 84`.
-
-These projections scale only horizontal area. A GIGALES match with more than 84
-vertical levels, larger sparsity factors, or a different finest vertical scale
-must be reduced by approximately the square root of the vertical-size ratio.
+The old two-point projection of 49.8 GiB for a 4096 x 4096 x 84 grid applies
+to the one-substep model. It was not recomputed from this single canonical
+re-check. The measured 3.3% increase suggests less headroom with four substeps,
+so a 4096 run remains borderline on a 60-GiB workstation and should be monitored.
