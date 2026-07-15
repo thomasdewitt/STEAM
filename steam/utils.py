@@ -136,52 +136,57 @@ def convolve_periodic_xy_zeropad_z_ndimage(field, kernel):
 
 
 def convolve_fft_xy_oa_z(field, kernel):
-    """Hybrid method: circular FFT in x/y and OA convolution in z.
+    """Real-FFT overlap-add convolution: circular x/y, linear zero-padded z.
 
-    Torch implementation of the same strategy as the previous scipy version
-    (rfft2 across x,y; overlap-add linear convolution along z). Matches scipy
-    to float32 precision (~5e-7 relative error) and uses roughly 4.5x the
-    field's memory footprint at peak vs ~7-9x for the scipy path.
+    Each real z block is transformed in all three dimensions with
+    :func:`torch.fft.rfftn`; the one-sided spectral axis is z. This avoids the
+    persistent complex horizontal transform and complex overlap accumulator
+    required by the former ``rfft2`` + complex-z-FFT implementation. It matches
+    the ndimage reference to float32 precision (typically <3e-7 relative error).
     """
     kernel = fold_kernel_to_field(kernel, field.shape)
-    ft = torch.from_numpy(field)
-    kt = torch.from_numpy(kernel)
-    nx, ny, nz = ft.shape
-    kx, ky, kz = kt.shape
+    field_t = torch.from_numpy(field)
+    kernel_t = torch.from_numpy(kernel)
+    nx, ny, nz = field_t.shape
+    kx, ky, kz = kernel_t.shape
     cx = (kx - 1) // 2
     cy = (ky - 1) // 2
     cz = (kz - 1) // 2
 
-    F = torch.fft.rfft2(ft, dim=(0, 1))
-    del ft
-
-    kernel_padded = torch.zeros((nx, ny, kz), dtype=kt.dtype)
-    kernel_padded[:kx, :ky, :] = kt
-    kernel_padded = torch.roll(kernel_padded, shifts=(-cx, -cy), dims=(0, 1))
-    K = torch.fft.rfft2(kernel_padded, dim=(0, 1))
-    del kt, kernel_padded
-
-    # Overlap-add along z: N_fft = next power of 2 >= 2*kz, block len L = N_fft - kz + 1.
+    # Overlap-add along z: N_fft is large enough for a linear block/kernel
+    # convolution, while x/y retain their exact periods.
     n_fft = 1 << max(4, (2 * kz - 1).bit_length())
     block_len = n_fft - kz + 1
-    Kz = torch.fft.fft(K, n=n_fft, dim=2)
-    del K
+    transform_shape = (nx, ny, n_fft)
+
+    kernel_padded = torch.zeros((nx, ny, kz), dtype=kernel_t.dtype)
+    kernel_padded[:kx, :ky, :] = kernel_t
+    kernel_padded = torch.roll(kernel_padded, shifts=(-cx, -cy), dims=(0, 1))
+    kernel_spectrum = torch.fft.rfftn(
+        kernel_padded, s=transform_shape, dim=(0, 1, 2),
+    )
+    del kernel_t, kernel_padded
 
     nz_lin = nz + kz - 1
-    accum = torch.zeros((F.shape[0], F.shape[1], nz_lin), dtype=F.dtype)
+    accum = torch.zeros((nx, ny, nz_lin), dtype=field_t.dtype)
     for start in range(0, nz, block_len):
         end = min(start + block_len, nz)
-        B = torch.fft.fft(F[..., start:end], n=n_fft, dim=2)
-        B.mul_(Kz)
-        b_out = torch.fft.ifft(B, n=n_fft, dim=2)
+        block_spectrum = torch.fft.rfftn(
+            field_t[..., start:end], s=transform_shape, dim=(0, 1, 2),
+        )
+        block_spectrum.mul_(kernel_spectrum)
+        block_out = torch.fft.irfftn(
+            block_spectrum, s=transform_shape, dim=(0, 1, 2),
+        )
+        del block_spectrum
         seg_len = min(n_fft, nz_lin - start)
-        accum[..., start:start + seg_len] += b_out[..., :seg_len]
-    del F, Kz
+        accum[..., start:start + seg_len] += block_out[..., :seg_len]
+        del block_out
+    del field_t, kernel_spectrum
 
     trimmed = accum[..., cz:cz + nz].contiguous()
     del accum
-    out = torch.fft.irfft2(trimmed, s=(nx, ny), dim=(0, 1))
-    return out.numpy().astype(np.float32)
+    return trimmed.numpy()
 
 
 def zoom_trilinear(field, target_shape):

@@ -42,12 +42,11 @@ def test_advance_flux_applies_local_multiplicative_update_and_clips(monkeypatch)
     flux = np.ones((2, 2, 1), dtype=np.float32)
     innovation = np.array([-2.0, 0.0, 1.0, 1.0], dtype=np.float32).reshape(2, 2, 1)
 
-    amplitude, increment, n_clipped = sm._advance_flux(
+    amplitude, n_clipped = sm._advance_flux(
         flux, innovation, np.ones((1, 1, 1), dtype=np.float32), 1.0,
     )
 
     np.testing.assert_array_equal(amplitude.ravel(), [-2.0, 0.0, 1.0, 1.0])
-    np.testing.assert_array_equal(increment.ravel(), [-2.0, 0.0, 1.0, 1.0])
     np.testing.assert_allclose(flux.ravel(), [0.0, 0.8, 1.6, 1.6])
     assert n_clipped == 1
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
@@ -85,7 +84,7 @@ def test_scalar_convolutions_receive_signed_flux_center_amplitudes(monkeypatch):
     def fake_advance(flux, innovation, kernel, flux_noise_scale):
         amplitude = np.ones_like(innovation)
         amplitude[::2, :, :] = -1.0
-        return amplitude, np.zeros_like(innovation), 0
+        return amplitude, 0
 
     def record_convolution(field, kernel):
         convolved_fields.append(field.copy())

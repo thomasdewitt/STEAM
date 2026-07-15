@@ -429,8 +429,13 @@ def simulate(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    h_3d = np.ascontiguousarray(h_mean_final[np.newaxis, np.newaxis, :] + h_pert)
-    qt_3d = np.ascontiguousarray(qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert)
+    # The perturbation buffers are no longer needed separately. Reuse them for
+    # final fields instead of holding two additional full-domain arrays.
+    h_pert += h_mean_final[np.newaxis, np.newaxis, :]
+    qt_pert += qt_mean_final[np.newaxis, np.newaxis, :]
+    h_3d = np.ascontiguousarray(h_pert)
+    qt_3d = np.ascontiguousarray(qt_pert)
+    del h_pert, qt_pert
 
     np.clip(h_3d, h_min, h_max, out=h_3d)
     np.clip(qt_3d, qt_min, qt_max, out=qt_3d)
@@ -699,11 +704,10 @@ def cascade_loop(
                 xi[:, :, :n_zero] = 0
             if zero_top and n_zero > 0:
                 xi[:, :, -n_zero:] = 0
-            flux_amplitude, dflux, _ = _advance_flux(
+            flux_amplitude, _ = _advance_flux(
                 flux, xi, kernel, FLUX_SCALE,
             )
             S_k = flux_amplitude
-            del dflux
         else:
             S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
             if zero_bottom and n_zero > 0:
@@ -720,21 +724,26 @@ def cascade_loop(
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
-            # Soft-clamp: parabolic, both-sides weight = (field-min)*(max-field)
-            u = np.clip((running_sum - var_min) / (var_max - var_min), 0, 1)
-            soft_clip = u * (1 - u)
-            del u
-
             if WEIGHTING == 'field':
-                # FIELD weighting: the soft-clamp IS the weight (no gradient).
-                G = soft_clip
-                del running_sum
+                G = None
             else:
                 # GRADIENT weighting (original): |grad(field)| * soft-clamp.
+                # Compute it before reusing running_sum as the soft-clip buffer.
                 G = _gradient_magnitude(running_sum, dx_k, dy_k, z_k)
+
+            # Soft-clamp in the no-longer-needed running-field buffer. Reordering
+            # this after the gradient removes one full-domain live array at the
+            # gradient peak without changing the calculation.
+            running_sum -= np.float32(var_min)
+            running_sum /= np.float32(var_max - var_min)
+            np.clip(running_sum, 0, 1, out=running_sum)
+            running_sum *= (1 - running_sum)
+            if G is None:
+                # FIELD weighting: the soft-clamp IS the weight (no gradient).
+                G = running_sum
+            else:
+                G *= running_sum
                 del running_sum
-                G *= soft_clip
-                del soft_clip
             mean_G = G.mean(axis=(0, 1), keepdims=True)
             G /= np.where(mean_G > 0, mean_G, np.float32(1.0))
             del mean_G
@@ -794,9 +803,10 @@ def _advance_flux(flux, innovation, kernel, flux_noise_scale):
     """
     innovation *= flux
     flux_amplitude = innovation
-    dflux = CONVOLVE(flux_amplitude, kernel)
-    dflux *= np.float32(flux_noise_scale)
-    flux += dflux
+    flux_increment = CONVOLVE(flux_amplitude, kernel)
+    flux_increment *= np.float32(flux_noise_scale)
+    flux += flux_increment
+    del flux_increment
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
@@ -807,7 +817,7 @@ def _advance_flux(flux, innovation, kernel, flux_noise_scale):
         mean_flux[:, :, empty_levels] = np.float32(1.0)
     flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
     del empty_levels, mean_flux
-    return flux_amplitude, dflux, n_clipped
+    return flux_amplitude, n_clipped
 
 
 def simulate_flux_only(
@@ -899,10 +909,10 @@ def simulate_flux_only(
         if zero_top and n_zero > 0:
             innovation[:, :, -n_zero:] = 0
 
-        flux_amplitude, dflux, n_clipped = _advance_flux(
+        flux_amplitude, n_clipped = _advance_flux(
             flux, innovation, kernel, c,
         )
-        del flux_amplitude, dflux
+        del flux_amplitude
 
         n_points = int(flux.size)
         total_clipped += n_clipped
