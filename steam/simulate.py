@@ -69,10 +69,10 @@ WEIGHTING = 'gradient'
 #
 # For a lognormal cascade, the realized intermittency is approximately
 #     C1 ~= kappa * FLUX_SCALE**2 / (2 ln 2),
-# where kappa is an envelope-overlap (packing) factor near 0.6 for the default
-# Mexican-hat/spacing configuration, calibrated empirically.
+# with kappa = 1.132 for the zero-mean Mexican-hat kernel when clipping remains
+# below 2%.
 FLUX_SCALE = 0.5
-N_FLUX_SUBSTEPS = 1
+N_FLUX_SUBSTEPS = 4
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 

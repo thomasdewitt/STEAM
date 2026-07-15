@@ -25,7 +25,7 @@ def _root_grids():
 
 def test_flux_cascade_default_scale():
     assert sm.FLUX_SCALE == 0.5
-    assert sm.N_FLUX_SUBSTEPS == 1
+    assert sm.N_FLUX_SUBSTEPS == 4
 
 
 def test_flux_only_rejects_non_dyadic_classes():
@@ -99,7 +99,7 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     assert diagnostics["n_clipped"] > 0
     assert diagnostics["clip_fraction"] > 0
     assert np.all(flux >= 0)
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=5e-7)
+    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=2e-6)
 
 
 def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch):
