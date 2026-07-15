@@ -9,8 +9,15 @@ import numpy as np
 import pytest
 import netCDF4
 from pathlib import Path
+import importlib
 
 from steam.simulate import simulate
+
+
+@pytest.fixture(autouse=True)
+def _legacy_mode_for_historical_reference_files(monkeypatch):
+    """The stored arrays predate the default unit-mean flux cascade."""
+    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
 
 REFERENCE_DIR = Path(__file__).parent / "regression_data"
 

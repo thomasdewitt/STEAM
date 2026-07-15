@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import netCDF4
+import importlib
 
 from steam.simulate import simulate, refine, _k_z
 from steam.constants import hurst_vertical_anisotropy as H_z
@@ -107,8 +108,9 @@ def test_simulate_canonical_unchanged(tmp_path, profiles):
     np.testing.assert_allclose(k_z_values, expected, rtol=1e-5)
 
 
-def test_refine_with_different_anisotropy(tmp_path, profiles):
+def test_refine_with_different_anisotropy(tmp_path, profiles, monkeypatch):
     """Refine the same canonical parent twice with two different anisotropy functions."""
+    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
     h, qt = profiles
     parent = tmp_path / "parent.nc"
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
@@ -155,7 +157,8 @@ def test_refine_with_different_anisotropy(tmp_path, profiles):
     ds.close()
 
 
-def test_refine_inherits_anisotropy_from_parent(tmp_path, profiles):
+def test_refine_inherits_anisotropy_from_parent(tmp_path, profiles, monkeypatch):
+    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
     h, qt = profiles
     parent = tmp_path / "parent.nc"
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,

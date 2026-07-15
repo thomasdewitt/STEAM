@@ -23,6 +23,20 @@ def _root_grids():
     )
 
 
+def test_flux_cascade_defaults_to_gaussian_dyadic_mode():
+    assert sm.FLUX_CASCADE is True
+    assert sm.FLUX_USE_INCREMENT is True
+    assert sm.NOISE_DIST == "gaussian"
+
+
+def test_flux_only_rejects_non_dyadic_classes():
+    grids = _root_grids()
+    grids["k"] = np.array([8.0, 5.0, 2.0])
+
+    with np.testing.assert_raises_regex(ValueError, "dyadic"):
+        sm.simulate_flux_only(grids, seed=1)
+
+
 def test_advance_flux_applies_local_multiplicative_update_and_clips(monkeypatch):
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
@@ -59,3 +73,36 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     assert diagnostics["clip_fraction"] > 0
     assert np.all(flux >= 0)
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=5e-7)
+
+
+def test_scalar_convolutions_receive_signed_flux_center_amplitudes(monkeypatch):
+    grids = _root_grids()
+    z_profile = np.arange(17, dtype=np.float32)
+    h_profile = 330_000.0 + 100.0 * z_profile
+    qt_profile = 0.005 + 0.0001 * z_profile
+    convolved_fields = []
+
+    def fake_advance(flux, innovation, kernel, flux_noise_scale):
+        amplitude = np.ones_like(innovation)
+        amplitude[::2, :, :] = -1.0
+        return amplitude, np.zeros_like(innovation), 0
+
+    def record_convolution(field, kernel):
+        convolved_fields.append(field.copy())
+        return np.zeros_like(field)
+
+    monkeypatch.setattr(sm, "_advance_flux", fake_advance)
+    monkeypatch.setattr(sm, "CONVOLVE", record_convolution)
+    C_h = [np.ones(int(nz), dtype=np.float32) for nz in grids["nz"]]
+    C_qt = [np.ones(int(nz), dtype=np.float32) for nz in grids["nz"]]
+
+    sm.cascade_loop(
+        h_profile, qt_profile, z_profile, grids, C_h, C_qt,
+        315 * 1004, 355 * 1004, 0.0, 0.03,
+        0, (1, 1, 1), np.random.SeedSequence(4).spawn(len(grids["k"])),
+    )
+
+    assert len(convolved_fields) == 2 * len(grids["k"])
+    for amplitude in convolved_fields:
+        assert np.any(amplitude > 0)
+        assert np.any(amplitude < 0)

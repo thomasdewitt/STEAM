@@ -73,7 +73,7 @@ GRADIENT_WEIGHT_POWER = 1.0
 WEIGHTING = 'gradient'
 
 # ─── NOISE DISTRIBUTION: shape of the sparse turbulon amplitude S_k ──────────
-# 'gaussian' (default, original): S_k ~ N(0,1), symmetric -> the field PDF is
+# 'gaussian' (default): S_k ~ N(0,1), symmetric -> the field PDF is
 #   symmetric, which is the wrong shape for convection (SAM/TWPICE qt & MSE at
 #   ~4 km are strongly RIGHT-skewed, skew ~ +1.8 / +2.0). Gradient weighting is
 #   symmetric in sign, so it cannot manufacture that asymmetry on its own.
@@ -103,23 +103,26 @@ NOISE_SKEWNORM_A = 4.0    # skew-normal shape parameter
 # on a right-skewed dist) produces the RIGHT-skewed (convective) field we want.
 NOISE_SIGN = 1.0
 
-# ─── FLUX CASCADE: conserved multiplicative flux replaces independent S_k ─────
-# When FLUX_CASCADE is True, the independent per-scale noise S_k is replaced by a
-# single shared, conserved multiplicative flux field F (mean 1, positive only)
-# carried across scale classes. At each class k:
+# ─── FLUX CASCADE: conserved flux modulates the signed scalar amplitudes ──────
+# F is dimensionless and initialized to one. One octave is taken per dyadic size
+# class. At each class k:
 #     dF = CONVOLVE(FLUX_SCALE * xi * F_prev, psi_k);   F = F_prev + dF
-# with xi ~ N(0,1) sparse at turbulon centers. F is clipped >= 0 and renormalized
-# to per-z-level mean 1 each step (positivity handling). The h/qt perturbations
-# then use F in place of S_k:  A = G * C_*_k * F;  pert += CONVOLVE(A, psi_k).
-# The turbulon kernel is zero-sum, so (a) dF is zero-mean -> F's mean is conserved,
-# and (b) F's DC is removed in the h/qt convolution and only the ~scale-k band
-# passes, so using the *cumulative* F does not double-count coarser scales.
-# FLUX_SCALE is tuned (externally) so the flux field has C1 ~ 0.1 (Haar, horizontal).
-# This is the "implicit C1 / FIF-from-atoms" construction: intermittency becomes a
-# real tunable rather than an emergent, uncontrolled property.
-FLUX_CASCADE = False
-FLUX_SCALE = 0.5            # cascade step amplitude; tune to hit C1 = 0.1
-FLUX_USE_INCREMENT = False  # False: h/qt use cumulative F (default); True: use dF
+# with xi ~ N(0,1) sparse at turbulon centers. F is clipped >= 0 and normalized
+# to per-z-level mean 1 after every step. The *signed center amplitude* xi*F_prev
+# replaces the old independent S_k for h/qt:
+#     A_scalar = xi * F_prev * G_scalar,k * C_scalar,k.
+# Thus scalar amplitudes remain conditionally sign-symmetric and F only modulates
+# their local scale; FLUX_SCALE tunes flux intermittency without rescaling h/qt.
+#
+# For a lognormal cascade, the realized intermittency is approximately
+#     C1 ~= kappa * FLUX_SCALE**2 / (2 ln 2),
+# where kappa is an envelope-overlap (packing) factor near 0.6 for the default
+# Mexican-hat/spacing configuration, calibrated empirically.
+FLUX_CASCADE = True
+FLUX_SCALE = 0.5
+# True means h/qt use the signed turbulon-center source of dF (xi*F_prev).
+# The old False mode used positive cumulative F and violated sign symmetry.
+FLUX_USE_INCREMENT = True
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -245,6 +248,11 @@ def simulate(
         raise ValueError(
             "n_scale_classes_per_dyad must be a positive integer, "
             f"got {n_scale_classes_per_dyad}"
+        )
+    if FLUX_CASCADE and n_scale_classes_per_dyad != 1:
+        raise ValueError(
+            "FLUX_CASCADE requires one dyadic size class per octave; "
+            "set n_scale_classes_per_dyad=1"
         )
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
         raise ValueError(
@@ -477,6 +485,10 @@ def simulate(
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
+        'flux_cascade': FLUX_CASCADE,
+        'flux_noise_scale': FLUX_SCALE,
+        'flux_use_increment': FLUX_USE_INCREMENT,
+        'noise_dist': NOISE_DIST,
     }
 
     write_netcdf(
@@ -556,6 +568,8 @@ def cascade_loop(
     -------
     h_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
     qt_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
+    flux : ndarray or None
+        Final dimensionless unit-mean flux when ``FLUX_CASCADE`` is enabled.
     final_grid_info : dict
         Keys nx, ny, nz, dx, dy, dz (mean), z (1D coordinate array) from
         the last (finest) iteration.
@@ -563,6 +577,19 @@ def cascade_loop(
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(grids['k'])
     n_zero = int(round(2 * s_z * min_distance_to_ground))
+
+    if FLUX_CASCADE:
+        if not FLUX_USE_INCREMENT:
+            raise ValueError(
+                "FLUX_USE_INCREMENT must remain True: cumulative positive F "
+                "does not provide sign-symmetric scalar amplitudes"
+            )
+        if n_classes > 1:
+            class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
+            if not np.allclose(class_ratios, 2.0):
+                raise ValueError(
+                    "FLUX_CASCADE requires dyadic size classes (one octave per step)"
+                )
 
     # Determine whether we have per-class seeds or a shared Generator
     use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
@@ -664,9 +691,9 @@ def cascade_loop(
             rng = seeds_or_rng
 
         if FLUX_CASCADE:
-            # Conserved multiplicative flux replaces the independent S_k. The
-            # increment is scaled by the *previous* flux (multiplicative cascade);
-            # the zero-sum kernel keeps dF zero-mean so F's mean stays ~1.
+            # The same Gaussian innovation does two jobs: xi*F_prev is the
+            # sign-symmetric scalar turbulon amplitude, and c*xi*F_prev drives
+            # the next flux octave. It is never replaced by positive cumulative F.
             xi = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng, dist='gaussian')
             if zero_bottom and n_zero > 0:
                 xi[:, :, :n_zero] = 0
@@ -675,9 +702,8 @@ def cascade_loop(
             flux_amplitude, dflux, _ = _advance_flux(
                 flux, xi, kernel, FLUX_SCALE,
             )
-            # Flux (or its increment) plays the role of S_k for h and qt below.
-            S_k = dflux if FLUX_USE_INCREMENT else flux
-            del flux_amplitude, dflux
+            S_k = flux_amplitude
+            del dflux
         else:
             S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
             if zero_bottom and n_zero > 0:
@@ -775,8 +801,12 @@ def _advance_flux(flux, innovation, kernel, flux_noise_scale):
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
     mean_flux = flux.mean(axis=(0, 1), keepdims=True)
+    empty_levels = (mean_flux <= 0).reshape(-1)
+    if np.any(empty_levels):
+        flux[:, :, empty_levels] = np.float32(1.0)
+        mean_flux[:, :, empty_levels] = np.float32(1.0)
     flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
-    del mean_flux
+    del empty_levels, mean_flux
     return flux_amplitude, dflux, n_clipped
 
 
@@ -831,6 +861,13 @@ def simulate_flux_only(
         raise ValueError(f"flux_noise_scale must be finite and non-negative, got {c}")
 
     n_classes = len(grids['k'])
+    if n_classes > 1:
+        class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
+        if not np.allclose(class_ratios, 2.0):
+            raise ValueError(
+                "simulate_flux_only requires dyadic size classes "
+                "(one octave per step)"
+            )
     seeds = np.random.SeedSequence(seed).spawn(n_classes)
     n_zero = int(round(2 * s_z * min_distance_to_ground))
     kernel = _turbulon_envelope(

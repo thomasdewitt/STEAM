@@ -2,8 +2,16 @@
 
 import numpy as np
 import netCDF4
+import pytest
+import importlib
 
 from steam import simulate
+
+
+@pytest.fixture(autouse=True)
+def _legacy_scalar_mode_for_dense_class_tests(monkeypatch):
+    """Dense sub-octave classes are intentionally outside flux-cascade mode."""
+    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
 
 
 def _run_stats(tmp_path, n_scale_classes_per_dyad):

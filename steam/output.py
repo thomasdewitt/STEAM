@@ -112,7 +112,7 @@ def write_netcdf(
         )
         flux_var[:] = flux_3d
         flux_var.units = "1"
-        flux_var.long_name = "conserved multiplicative flux (mean 1)"
+        flux_var.long_name = "dimensionless conserved flux (horizontal mean 1)"
 
     # Profile variables
     zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))
@@ -200,6 +200,11 @@ def write_netcdf(
         ds.anisotropy = p['anisotropy']
     if 'n_scale_classes_per_dyad' in p:
         ds.n_scale_classes_per_dyad = np.int32(p['n_scale_classes_per_dyad'])
+    if 'flux_cascade' in p:
+        ds.flux_cascade = np.int8(p['flux_cascade'])
+        ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
+        ds.flux_use_increment = np.int8(p['flux_use_increment'])
+        ds.noise_dist = p['noise_dist']
 
     # Refinement-specific attributes
     for attr in ('parent_group', 'parent_x_slice', 'parent_y_slice',

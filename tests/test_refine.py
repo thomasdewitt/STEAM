@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import netCDF4
 from pathlib import Path
+import importlib
 
 from steam.simulate import (
     simulate,
@@ -15,6 +16,12 @@ from steam.simulate import (
     spectral_width_normalization,
 )
 from steam.thermodynamics import compute_diagnostics
+
+
+@pytest.fixture(autouse=True)
+def _disable_flux_for_refinement_tests(monkeypatch):
+    """refine() deliberately remains unavailable while flux mode is enabled."""
+    monkeypatch.setattr(importlib.import_module("steam.simulate"), "FLUX_CASCADE", False)
 
 
 @pytest.fixture
@@ -102,7 +109,7 @@ class TestPerClassSeeding:
         seed_sequence = np.random.SeedSequence(seed)
         all_seeds = seed_sequence.spawn(n_classes)
 
-        h_pert_full, qt_pert_full, _ = cascade_loop(
+        h_pert_full, qt_pert_full, _flux_full, _ = cascade_loop(
             h, qt, z_profile, grids,
             C_h_k, C_qt_k,
             315*1004, 355*1004, 0.0, 30/1000,
@@ -136,14 +143,14 @@ class TestPerClassSeeding:
         first = slice(0, split_point)
         second = slice(split_point, n_classes)
 
-        h_pert_1, qt_pert_1, _ = cascade_loop(
+        h_pert_1, qt_pert_1, _flux_1, _ = cascade_loop(
             h, qt, z_profile, split_grids(grids, first),
             C_h_k[:split_point], C_qt_k[:split_point],
             315*1004, 355*1004, 0.0, 30/1000,
             1, sparsity_factors, all_seeds2[:split_point],
         )
 
-        h_pert_2, qt_pert_2, _ = cascade_loop(
+        h_pert_2, qt_pert_2, _flux_2, _ = cascade_loop(
             h, qt, z_profile, split_grids(grids, second),
             C_h_k[split_point:], C_qt_k[split_point:],
             315*1004, 355*1004, 0.0, 30/1000,
