@@ -25,7 +25,18 @@ def _root_grids():
 
 def test_flux_cascade_default_scale():
     assert sm.FLUX_SCALE == 0.5
+    assert sm.FLUX_ALPHA == 1.8
     assert sm.N_FLUX_SUBSTEPS == 4
+    assert sm.SCALAR_NOISE_SIGN == 1.0
+
+
+def test_levy_log_mean_reduces_to_lognormal_at_alpha_two():
+    # At alpha=2 the extremal generator is N(0, 2), so log<exp(gamma_0)> = 1
+    # (the -sigma^2/2 lognormal shift); zero mean and skew confirm the reduction.
+    draw = sm._extremal_levy(2.0, 2_000_000, np.random.default_rng(0))
+    assert abs(draw.mean()) < 0.01
+    assert abs(draw.var() - 2.0) < 0.02
+    assert abs(float(np.log(np.mean(np.exp(draw)))) - 1.0) < 0.01
 
 
 def test_flux_only_rejects_non_dyadic_classes():
@@ -36,26 +47,34 @@ def test_flux_only_rejects_non_dyadic_classes():
         sm.simulate_flux_only(grids, seed=1)
 
 
-def test_advance_flux_uses_signed_noise_but_returns_positive_scalars(monkeypatch):
+def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
-    monkeypatch.setattr(
-        sm, "_sparse_noise",
-        lambda *args: np.array(
-            [-2.0, 0.0, 1.0, 1.0], dtype=np.float32,
-        ).reshape(2, 2, 1),
-    )
+    gamma0 = np.array([-2.0, 0.0, 1.0, 0.5], dtype=np.float32).reshape(2, 2, 1)
+    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: gamma0.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
+    c = 0.4
     amplitude, diagnostics = sm._advance_flux(
         flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
-        1.0, 1, (1, 1, 1),
+        c, 1, (1, 1, 1),
     )
 
-    expected = np.array([2.0, 0.0, 1.0, 1.0]) / np.sqrt(2.0 / np.pi)
-    np.testing.assert_allclose(amplitude.ravel(), expected)
-    np.testing.assert_allclose(flux.ravel(), [0.0, 0.8, 1.6, 1.6])
-    assert diagnostics["n_clipped"] == 1
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
+    # One substep: substep_scale = c, multiplier noise = exp(c*gamma0 - shift)-1,
+    # zero at the off-center (gamma0 == 0) draw.
+    shift = sm.LEVY_LOG_MEAN * c ** sm.FLUX_ALPHA
+    noise = np.expm1(gamma0.ravel() * c - shift)
+    noise[gamma0.ravel() == 0.0] = 0.0
+    mean_abs = np.abs(noise).sum() / np.count_nonzero(noise)
+    expected_scalar = sm.SCALAR_NOISE_SIGN * noise / mean_abs
+    np.testing.assert_allclose(amplitude.ravel(), expected_scalar, rtol=1e-5)
+    assert amplitude.ravel()[1] == 0.0                      # off-center: no turbulon
+    assert diagnostics["n_clipped"] == 0                    # bounded-below: no clip here
+
+    # F += (exp(gamma)-1)*F with identity convolution, then unit-mean renorm.
+    updated = 1.0 + noise
+    updated /= updated.mean()
+    np.testing.assert_allclose(flux.ravel(), updated, rtol=1e-5)
+    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, rtol=1e-6)
 
 
 def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
@@ -63,17 +82,23 @@ def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
         np.full((2, 2, 1), -0.25, dtype=np.float32),
         np.full((2, 2, 1), 0.25, dtype=np.float32),
     ])
-    monkeypatch.setattr(sm, "_sparse_noise", lambda *args: next(draws))
+    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: next(draws))
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
+    c, n = 0.4, 2
     amplitude, diagnostics = sm._advance_flux(
         flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
-        0.4, 2, (1, 1, 1),
+        c, n, (1, 1, 1),
     )
 
+    # Scalar amplitude uses only the first substep; equal draws give
+    # |noise| = mean_abs, so S_k = SCALAR_NOISE_SIGN * sign(noise) exactly.
+    scale = c / n ** (1.0 / sm.FLUX_ALPHA)
+    shift = sm.LEVY_LOG_MEAN * scale ** sm.FLUX_ALPHA
+    noise0 = np.expm1(-0.25 * scale - shift)
     np.testing.assert_allclose(
-        amplitude, 0.25 / np.sqrt(2.0 / np.pi),
+        amplitude, sm.SCALAR_NOISE_SIGN * noise0 / abs(noise0),
     )
     assert diagnostics["n_points"] == 8
     assert len(diagnostics["substeps"]) == 2

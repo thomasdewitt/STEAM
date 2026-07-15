@@ -9,7 +9,7 @@ from steam.simulate import (
     simulate,
     _compute_all_grids,
     _turbulon_envelope,
-    _sparse_noise,
+    _sparse_levy,
     _gradient_magnitude,
     spectral_width_normalization,
 )
@@ -378,17 +378,17 @@ def test_kernel_shape_is_odd():
     assert all(s % 2 == 1 for s in kernel.shape)
 
 
-def test_sparse_noise_density():
+def test_sparse_levy_density():
     rng = np.random.default_rng(0)
-    field = _sparse_noise(20, 20, 20, 2, 2, 2, rng)
+    field = _sparse_levy(20, 20, 20, 2, 2, 2, 1.8, rng)
     n_nonzero = np.count_nonzero(field)
     expected = 10 * 10 * 10  # (20/2)^3
     assert n_nonzero == expected
 
 
-def test_sparse_noise_s1_all_nonzero():
+def test_sparse_levy_s1_all_nonzero():
     rng = np.random.default_rng(0)
-    field = _sparse_noise(10, 10, 10, 1, 1, 1, rng)
+    field = _sparse_levy(10, 10, 10, 1, 1, 1, 1.8, rng)
     # Probability of any element being exactly 0.0 is essentially 0
     assert np.count_nonzero(field) == 1000
 

@@ -1,6 +1,5 @@
 """Core STEAM cascade algorithm."""
 
-import math
 import numpy as np
 from pathlib import Path
 from . import constants
@@ -63,16 +62,80 @@ WEIGHTING = 'gradient'
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. One octave is taken per dyadic size
-# class. Independent substeps divide the octave's variance while making negative
-# flux updates rare. Scalar turbulons use |xi| from the first substep so their
-# mean absolute amplitude remains C_Phi,k.
+# class. Each substep multiplies the flux by exp(gamma), where gamma is an
+# EXTREMAL (maximally skewed, beta=-1) Levy alpha-stable field -- the log-
+# generator of a universal-multifractal random measure, so the cascade converges
+# to a true multifractal as the substep count grows. gamma is scaled by
+# FLUX_SCALE / N_FLUX_SUBSTEPS**(1/alpha): by alpha-stability the per-octave
+# generator is EXACTLY invariant in distribution under the substep count, so more
+# substeps only make the bounded-below update  F += conv(psi, (exp(gamma)-1)*F)
+# clip at zero less often. gamma is shifted so <exp(gamma)> = 1 exactly (the
+# alpha-generalization of the lognormal -sigma^2/2 shift; see LEVY_LOG_MEAN),
+# which conserves the flux mean. Scalar turbulons inherit the signed first-
+# substep multiplier noise, so they are skewed too (SCALAR_NOISE_SIGN).
 #
-# For a lognormal cascade, the realized intermittency is approximately
-#     C1 ~= kappa * FLUX_SCALE**2 / (2 ln 2),
-# with kappa = 1.132 for the zero-mean Mexican-hat kernel when clipping remains
-# below 2%.
+# Realized intermittency calibrates as  C1 ~= A * FLUX_SCALE**alpha  (fit in
+# turbulon-analysis/calibration); at alpha=2 the generator is Gaussian and the
+# whole scheme reduces to the lognormal cascade.
 FLUX_SCALE = 0.5
+FLUX_ALPHA = 1.8
 N_FLUX_SUBSTEPS = 4
+# Sign of the scalar turbulon amplitude relative to the flux multiplier noise.
+# The extremal generator is heavy-tailed on the low-multiplier side, so the two
+# signs give oppositely skewed scalar fields; +1 gives convective right-skew in
+# the h'/qt' interior (256x256x64 seed 20260715: interior skew ~ +2.9 for +1
+# vs ~ +0.15 for -1), chosen from the 2026-07-15 both-signs experiment.
+SCALAR_NOISE_SIGN = 1.0
+
+
+def _extremal_levy(alpha, size, rng):
+    """Extremal (maximally skewed, beta=-1) Levy alpha-stable draws.
+
+    Chambers-Mallows-Stuck generator, reusing the convention of Thomas's
+    ``scaleinvariance.extremal_levy`` (its universal-multifractal log-generator).
+    The distribution is maximally skewed toward -inf, so the RIGHT tail is light
+    and <exp(gamma)> is finite -- the property that lets the multiplier be
+    renormalized to unit mean. At alpha=2 it is exactly N(0, 2), i.e. the
+    lognormal case. Valid for alpha in (1, 2].
+    """
+    phi = (rng.random(size, dtype=np.float64) - 0.5) * np.pi
+    R = rng.exponential(1.0, size)
+    phi0 = -(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha
+    sign = 1.0 if alpha > 1.0 else -1.0
+    factor = (np.clip(np.cos(phi), 1e-12, None) * abs(alpha - 1.0)) ** (-1.0 / alpha)
+    shifted = alpha * (phi - phi0)
+    tail = (np.clip(np.cos(phi - shifted), 1e-12, None) / R) ** ((1.0 - alpha) / alpha)
+    return sign * np.sin(shifted) * factor * tail
+
+
+# log<exp(gamma_0)> for the unit-scale extremal generator above. Subtracting
+# LEVY_LOG_MEAN * scale**alpha from a scale-times-gamma_0 draw sets the
+# multiplier to unit mean (the alpha-generalization of the lognormal -sigma^2/2;
+# it equals 1 at alpha=2). There is no closed form in this generator's scale
+# convention, so it is measured once from a large deterministic draw.
+LEVY_LOG_MEAN = float(np.log(np.mean(np.exp(
+    _extremal_levy(FLUX_ALPHA, 8_000_000, np.random.default_rng(0))
+))))
+
+
+def _sparse_levy(nx, ny, nz, factor_x, factor_y, factor_z, alpha, rng):
+    """Sparse extremal-Levy generator field, one draw per turbulon center.
+
+    Zero everywhere except every s grid points (one turbulon center per k
+    spacing at the oversampled resolution); at s=1 every cell is a center.
+    """
+    if factor_x == 1 and factor_y == 1 and factor_z == 1:
+        return _extremal_levy(alpha, nx * ny * nz, rng).reshape(nx, ny, nz).astype(np.float32)
+
+    field = np.zeros((nx, ny, nz), dtype=np.float32)
+    ix = np.arange(0, nx, factor_x)
+    iy = np.arange(0, ny, factor_y)
+    iz = np.arange(0, nz, factor_z)
+    field[np.ix_(ix, iy, iz)] = _extremal_levy(
+        alpha, len(ix) * len(iy) * len(iz), rng
+    ).reshape(len(ix), len(iy), len(iz)).astype(np.float32)
+    return field
+
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -440,7 +503,9 @@ def simulate(
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
+        'flux_alpha': FLUX_ALPHA,
         'n_flux_substeps': N_FLUX_SUBSTEPS,
+        'scalar_noise_sign': SCALAR_NOISE_SIGN,
     }
 
     write_netcdf(
@@ -629,7 +694,7 @@ def cascade_loop(
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
         qt_mean_1d = np.interp(z_k, z_profile, qt_profile).astype(np.float32)
 
-        # Sparse noise — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
+        # Extremal-Levy multiplier — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
         if use_per_class_seeds:
             rng = np.random.default_rng(seeds_or_rng[i])
         else:
@@ -715,30 +780,41 @@ def _advance_flux(
 ):
     """Advance the dimensionless flux cascade by one size class.
 
-    Each substep uses fresh signed Gaussian noise for the flux increment. The
-    scalar turbulon amplitude uses the magnitude of the first draw and the flux
-    entering the size class: S_k = |xi_1| F_{k-1} / sqrt(2/pi).
+    Each substep multiplies the flux by exp(gamma) with gamma an extremal-Levy
+    generator field (see the FLUX CASCADE note), scaled and shifted to unit
+    mean, giving the bounded-below update F += conv(psi, (exp(gamma)-1)*F). The
+    scalar turbulon amplitude carries the SIGNED first-substep multiplier noise
+    and the entering flux, normalized to mean absolute value one:
+    S_k = SCALAR_NOISE_SIGN * (exp(gamma_1)-1) * F_{k-1} / <|exp(gamma_1)-1|>.
     """
     s_x, s_y, s_z = sparsity_factors
-    substep_scale = np.float32(flux_noise_scale / math.sqrt(n_flux_substeps))
+    substep_scale = flux_noise_scale / n_flux_substeps ** (1.0 / FLUX_ALPHA)
+    shift = np.float32(LEVY_LOG_MEAN * substep_scale ** FLUX_ALPHA)
+    substep_scale = np.float32(substep_scale)
     scalar_amplitude = None
     substeps = []
 
     for substep in range(n_flux_substeps):
-        innovation = _sparse_noise(*flux.shape, s_x, s_y, s_z, rng)
+        gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
         if zero_bottom and n_zero > 0:
-            innovation[:, :, :n_zero] = 0
+            gamma[:, :, :n_zero] = 0
         if zero_top and n_zero > 0:
-            innovation[:, :, -n_zero:] = 0
+            gamma[:, :, -n_zero:] = 0
+
+        # Unit-mean multiplier noise exp(gamma)-1 at the turbulon centers, and
+        # exactly 0 off-centers (no turbulon there); bounded below by -1.
+        gamma *= substep_scale
+        noise = np.expm1(gamma - shift)
+        noise[gamma == 0.0] = np.float32(0.0)
 
         if substep == 0:
-            scalar_amplitude = np.abs(innovation)
-            scalar_amplitude *= flux
-            scalar_amplitude /= np.float32(math.sqrt(2.0 / math.pi))
+            mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
+            scalar_amplitude = noise * flux
+            if mean_abs > 0:
+                scalar_amplitude *= np.float32(SCALAR_NOISE_SIGN / mean_abs)
 
-        innovation *= flux
-        innovation *= substep_scale
-        flux += CONVOLVE(innovation, kernel)
+        noise *= flux
+        flux += CONVOLVE(noise, kernel)
 
         n_clipped = int(np.count_nonzero(flux < 0))
         np.maximum(flux, np.float32(0.0), out=flux)
@@ -1162,34 +1238,6 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
         C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
         C_k.append(C_profile)
     return C_k
-
-
-def _sparse_noise(nx, ny, nz, factor_x, factor_y, factor_z, rng):
-    """Generate sparse Gaussian noise at the turbulon centers.
-
-    When s=1 in all dimensions, returns a full grid of random values.
-    When s>1, noise is nonzero every s grid points (one turbulon center
-    per k spacing at the oversampled resolution).
-
-    Parameters
-    ----------
-    nx, ny, nz : int
-        Grid dimensions (at oversampled resolution).
-    factor_x, factor_y, factor_z : int
-        Oversampling factors (must be positive integers).
-    rng : numpy.random.Generator
-    """
-    if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return rng.standard_normal((nx, ny, nz), dtype=np.float32)
-
-    field = np.zeros((nx, ny, nz), dtype=np.float32)
-    ix = np.arange(0, nx, factor_x)
-    iy = np.arange(0, ny, factor_y)
-    iz = np.arange(0, nz, factor_z)
-    field[np.ix_(ix, iy, iz)] = rng.standard_normal(
-        (len(ix), len(iy), len(iz)), dtype=np.float32,
-    )
-    return field
 
 
 def _gradient_magnitude(field_3d, dx, dy, z_coords):
