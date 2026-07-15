@@ -672,18 +672,12 @@ def cascade_loop(
                 xi[:, :, :n_zero] = 0
             if zero_top and n_zero > 0:
                 xi[:, :, -n_zero:] = 0
-            xi *= np.float32(FLUX_SCALE)
-            xi *= flux                       # FLUX_SCALE * xi * F_prev  (sparse)
-            dflux = CONVOLVE(xi, kernel)
-            del xi
-            flux += dflux                    # F = F_prev + dF
-            np.maximum(flux, np.float32(0.0), out=flux)        # positivity
-            mflux = flux.mean(axis=(0, 1), keepdims=True)      # renorm per z-level
-            flux /= np.where(mflux > 0, mflux, np.float32(1.0))
-            del mflux
+            flux_amplitude, dflux, _ = _advance_flux(
+                flux, xi, kernel, FLUX_SCALE,
+            )
             # Flux (or its increment) plays the role of S_k for h and qt below.
             S_k = dflux if FLUX_USE_INCREMENT else flux
-            del dflux
+            del flux_amplitude, dflux
         else:
             S_k = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
             if zero_bottom and n_zero > 0:
@@ -753,6 +747,145 @@ def cascade_loop(
         'z': z_k,
     }
     return h_perturbation, qt_perturbation, flux, final_grid_info
+
+
+def _advance_flux(flux, innovation, kernel, flux_noise_scale):
+    """Advance the dimensionless flux cascade by one size class.
+
+    ``flux`` is the unit-mean field from the previous (larger) class and
+    ``innovation`` is sparse, zero-mean, unit-variance noise at turbulon
+    centers. Both inputs are modified in place. The returned
+    ``flux_amplitude`` is ``innovation * F_prev``; it is retained separately
+    from the convolved field increment because it is the turbulon-center
+    amplitude appearing inside the convolution.
+
+    The update is
+
+        F_k = F_{k-1} + conv(psi_k, c * innovation * F_{k-1}).
+
+    Negative values are clipped to zero, then every horizontal level is
+    normalized back to mean one. The clip count is measured before clipping.
+    """
+    innovation *= flux
+    flux_amplitude = innovation
+    dflux = CONVOLVE(flux_amplitude, kernel)
+    dflux *= np.float32(flux_noise_scale)
+    flux += dflux
+
+    n_clipped = int(np.count_nonzero(flux < 0))
+    np.maximum(flux, np.float32(0.0), out=flux)
+    mean_flux = flux.mean(axis=(0, 1), keepdims=True)
+    flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
+    del mean_flux
+    return flux_amplitude, dflux, n_clipped
+
+
+def simulate_flux_only(
+    grids,
+    sparsity_factors=(1, 1, 1),
+    seed=None,
+    flux_noise_scale=None,
+    min_distance_to_ground=0,
+    turbulon_shape='mexican_hat',
+    zero_bottom=False,
+    zero_top=False,
+):
+    """Run only the unit-mean flux cascade on root-simulation grids.
+
+    This is a cheap calibration/diagnostic path: it performs one convolution
+    per size class and skips the scalar profiles, gradients, and four scalar
+    convolutions. ``grids`` must come from :func:`_compute_all_grids` with a
+    common physical extent at every class (the root-simulation case).
+
+    Returns
+    -------
+    flux : float32 ndarray
+        Final dimensionless flux field, normalized to horizontal mean one at
+        every z level.
+    diagnostics : dict
+        Per-class and aggregate pre-clip counts/fractions.
+    """
+    s_x, s_y, s_z = sparsity_factors
+    for s, name in zip(sparsity_factors, ('s_x', 's_y', 's_z')):
+        if not isinstance(s, int) or s < 1:
+            raise ValueError(f"{name} must be a positive integer, got {s}")
+    if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
+        raise ValueError(
+            "min_distance_to_ground must be a non-negative integer, "
+            f"got {min_distance_to_ground}"
+        )
+
+    extents = (
+        np.asarray(grids['padded_extent_x']),
+        np.asarray(grids['padded_extent_y']),
+        np.asarray(grids['padded_height']),
+    )
+    if any(not np.allclose(values, values[0]) for values in extents):
+        raise ValueError(
+            "simulate_flux_only requires a common physical extent across "
+            "classes (root-simulation grids without refinement padding)"
+        )
+
+    c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
+    if not np.isfinite(c) or c < 0:
+        raise ValueError(f"flux_noise_scale must be finite and non-negative, got {c}")
+
+    n_classes = len(grids['k'])
+    seeds = np.random.SeedSequence(seed).spawn(n_classes)
+    n_zero = int(round(2 * s_z * min_distance_to_ground))
+    kernel = _turbulon_envelope(
+        1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
+        support_factor=SUPPORT_FACTOR, shape=turbulon_shape,
+    )
+
+    flux = None
+    steps = []
+    total_clipped = 0
+    total_points = 0
+    for i, k in enumerate(grids['k']):
+        shape = (
+            int(grids['nx'][i]),
+            int(grids['ny'][i]),
+            int(grids['nz'][i]),
+        )
+        if flux is None:
+            flux = np.ones(shape, dtype=np.float32)
+        elif flux.shape != shape:
+            flux = zoom_trilinear(flux, shape)
+
+        rng = np.random.default_rng(seeds[i])
+        innovation = _sparse_noise(
+            *shape, s_x, s_y, s_z, rng, dist='gaussian',
+        )
+        if zero_bottom and n_zero > 0:
+            innovation[:, :, :n_zero] = 0
+        if zero_top and n_zero > 0:
+            innovation[:, :, -n_zero:] = 0
+
+        flux_amplitude, dflux, n_clipped = _advance_flux(
+            flux, innovation, kernel, c,
+        )
+        del flux_amplitude, dflux
+
+        n_points = int(flux.size)
+        total_clipped += n_clipped
+        total_points += n_points
+        steps.append({
+            'k': float(k),
+            'n_clipped': n_clipped,
+            'n_points': n_points,
+            'clip_fraction': n_clipped / n_points,
+        })
+
+    diagnostics = {
+        'flux_noise_scale': float(c),
+        'steps': steps,
+        'n_clipped': total_clipped,
+        'n_points': total_points,
+        'clip_fraction': total_clipped / total_points,
+        'final_zero_fraction': float(np.count_nonzero(flux == 0) / flux.size),
+    }
+    return flux, diagnostics
 
 
 def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
