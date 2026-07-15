@@ -198,6 +198,7 @@ def simulate(
     turbulon_shape='mexican_hat',
     anisotropy='canonical',
     compress=None,
+    device='cpu',
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -253,6 +254,11 @@ def simulate(
         If True, 3D data variables in the output NetCDF are written with
         zlib compression at complevel=4. None (default) uses the module-level
         ``steam.constants.output_compress`` setting.
+    device : {'cpu', 'cuda'}
+        Where the per-class convolutions run. 'cuda' keeps the finest-grid FFT
+        working set off the host — the host holds only its persistent float32
+        fields. A 'cuda' request with no usable GPU is an error, never a silent
+        CPU fall back.
 
     Returns
     -------
@@ -416,13 +422,19 @@ def simulate(
     unit_turbulon = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                      support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
 
-    # Pre-flight memory estimate so a doomed config fails in milliseconds. This
-    # is approximate; the finest-grid convolution working set (precisely guarded
-    # inside convolve_fft_xy_oa_z) plus the three persistent finest-grid fields
-    # (h, qt, flux). Real fields are float32.
+    # Pre-flight host-memory estimate so a doomed config fails in milliseconds.
+    # This is approximate. On CPU the finest-grid convolution working set
+    # (precisely guarded inside convolve_fft_xy_oa_z) rides on top of the
+    # persistent finest-grid fields (h, qt, flux plus one transient weight/amp
+    # buffer). On CUDA that FFT working set lives on the GPU, so the host floor
+    # is just the coexisting full-domain arrays. Real fields are float32.
     nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
-    peak_bytes = (fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
-                  + 3 * nx_f * ny_f * nz_f * 4)
+    field_bytes = nx_f * ny_f * nz_f * 4
+    if device == 'cuda':
+        peak_bytes = 5 * field_bytes  # h, qt, flux + running-field + amplitude buffers
+    else:
+        peak_bytes = (fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
+                      + 3 * field_bytes)
     available = available_memory_bytes()
     if available is not None and peak_bytes > available - MEMORY_HEADROOM_BYTES:
         raise MemoryError(
@@ -455,6 +467,7 @@ def simulate(
         sparsity_factors,
         child_seeds,
         turbulon_shape=turbulon_shape,
+        device=device,
     )
 
     # Construct final 3D fields
@@ -553,6 +566,7 @@ def cascade_loop(
     turbulon_shape='mexican_hat',
     zero_bottom=True,
     zero_top=True,
+    device='cpu',
 ):
     """Run the multi-scale turbulon cascade over all scale classes.
 
@@ -600,6 +614,8 @@ def cascade_loop(
         where turbulon centers may legitimately exist below/above the
         inset's inner z range (in the z-pad) and contribute via their
         kernel tails.
+    device : {'cpu', 'cuda'}
+        Passed to the per-class convolutions; 'cuda' runs the FFTs on the GPU.
 
     Returns
     -------
@@ -723,6 +739,7 @@ def cascade_loop(
         S_k, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, N_FLUX_SUBSTEPS,
             sparsity_factors, n_zero, zero_bottom, zero_top,
+            device=device,
         )
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
@@ -771,7 +788,7 @@ def cascade_loop(
             G *= S_k            # in-place; G is now A
 
             # Convolve and accumulate (periodic x,y; zero-padded z)
-            perturbation_field += CONVOLVE(G, kernel)
+            perturbation_field += CONVOLVE(G, kernel, device=device)
             del G
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
@@ -797,6 +814,7 @@ def cascade_loop(
 def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_flux_substeps,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
+    device='cpu',
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -834,7 +852,7 @@ def _advance_flux(
                 scalar_amplitude *= np.float32(1.0 / mean_abs)
 
         noise *= flux
-        flux += CONVOLVE(noise, kernel)
+        flux += CONVOLVE(noise, kernel, device=device)
 
         n_clipped = int(np.count_nonzero(flux < 0))
         np.maximum(flux, np.float32(0.0), out=flux)

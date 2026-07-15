@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+import torch
 
 from steam.utils import (
     convolve_fft_xy_oa_z,
@@ -209,6 +210,30 @@ def test_fft_xy_oa_z_matches_ndimage_reference(field_shape, kernel_shape):
     result = convolve_fft_xy_oa_z(field, kernel)
     expected = _reference_folded(field, kernel)
     np.testing.assert_allclose(result, expected, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+@pytest.mark.parametrize("field_shape, kernel_shape", [
+    ((8, 8, 8), (3, 3, 3)),
+    ((10, 12, 40), (5, 3, 7)),
+    ((16, 16, 60), (9, 9, 11)),
+])
+def test_fft_xy_oa_z_cuda_matches_cpu(field_shape, kernel_shape):
+    """Same seed, same field: the GPU path matches the CPU path to float32."""
+    rng = np.random.default_rng(123)
+    field, kernel = _random_field_and_kernel(rng, field_shape, kernel_shape)
+    cpu = convolve_fft_xy_oa_z(field, kernel, device='cpu')
+    gpu = convolve_fft_xy_oa_z(field, kernel, device='cuda')
+    np.testing.assert_allclose(gpu, cpu, rtol=1e-4, atol=1e-4)
+
+
+def test_cuda_request_without_gpu_raises(monkeypatch):
+    """device='cuda' with no usable GPU is an error, never a silent fallback."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    rng = np.random.default_rng(1)
+    field, kernel = _random_field_and_kernel(rng, (8, 8, 8), (3, 3, 3))
+    with pytest.raises(RuntimeError):
+        convolve_fft_xy_oa_z(field, kernel, device='cuda')
 
 
 def test_fold_kernel_to_field_preserves_sum_when_folding():

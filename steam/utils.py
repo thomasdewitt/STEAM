@@ -7,6 +7,7 @@ from scipy import ndimage
 from scipy.signal import oaconvolve
 
 MEMORY_HEADROOM_BYTES = 2 * 1024**3  # keep this much RAM free; OOM swap-thrashes the host
+CUDA_MEMORY_HEADROOM_BYTES = 1 * 1024**3  # keep this much VRAM free for cuFFT plan caches / fragmentation
 
 
 def available_memory_bytes():
@@ -31,6 +32,48 @@ def fft_convolution_bytes(nx, ny, nz, kz, itemsize):
     return nx * ny * ((nz + kz - 1) * itemsize     # accumulator
                       + 2 * half * 2 * itemsize    # kernel + block spectra (complex)
                       + n_fft * itemsize)          # block output
+
+
+def cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize):
+    """Peak VRAM of the GPU :func:`convolve_fft_xy_oa_z` at FFT length n_fft.
+
+    Resident on the device: the field, the real accumulator (nz+kz-1), and the
+    kernel spectrum; in flight for one block, a block spectrum and its real
+    output. cuFFT scratch is budgeted at one more spectral array.
+    """
+    plane = nx * ny
+    spectrum = plane * (n_fft // 2 + 1) * 2 * itemsize   # complex
+    return (plane * nz * itemsize                         # field on device
+            + plane * (nz + kz - 1) * itemsize            # accumulator
+            + spectrum                                    # kernel spectrum
+            + spectrum                                    # block spectrum in flight
+            + plane * n_fft * itemsize                    # block real output
+            + spectrum)                                   # cuFFT workspace
+
+
+def cuda_block_fft_size(nx, ny, nz, kz, itemsize):
+    """Largest power-of-two overlap-add FFT length along z that fits free VRAM.
+
+    A single block covers the whole padded array when that fits; otherwise the
+    length shrinks toward the kernel length (block_len = n_fft - kz + 1 >= 1).
+    Raises MemoryError if even the minimal block will not fit, mirroring the
+    host guard in :func:`convolve_fft_xy_oa_z`.
+    """
+    free, _ = torch.cuda.mem_get_info()
+    budget = free - CUDA_MEMORY_HEADROOM_BYTES
+    n_fft = 1 << (nz + kz - 2).bit_length()   # whole padded array in one block
+    n_fft_min = 1 << (kz - 1).bit_length()    # smallest power of two >= kz
+    while n_fft >= n_fft_min:
+        if cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize) <= budget:
+            return n_fft
+        n_fft >>= 1
+    requested = cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft_min, itemsize)
+    raise MemoryError(
+        f"convolve_fft_xy_oa_z (cuda) needs {requested / 1024**3:.1f} GiB VRAM "
+        f"for the minimal block of field shape {(nx, ny, nz)} (kernel kz={kz}) "
+        f"but only {free / 1024**3:.1f} GiB is free; refusing to risk OOM. "
+        f"Reduce resolution, domain size, or vertical levels."
+    )
 
 
 @njit(parallel=True, cache=True)
@@ -161,7 +204,7 @@ def convolve_periodic_xy_zeropad_z_ndimage(field, kernel):
     return result.astype(np.float32)
 
 
-def convolve_fft_xy_oa_z(field, kernel):
+def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
     """Real-FFT overlap-add convolution: circular x/y, linear zero-padded z.
 
     Each real z block is transformed in all three dimensions with
@@ -169,35 +212,51 @@ def convolve_fft_xy_oa_z(field, kernel):
     persistent complex horizontal transform and complex overlap accumulator
     required by the former ``rfft2`` + complex-z-FFT implementation. It matches
     the ndimage reference to float32 precision (typically <3e-7 relative error).
+
+    ``device`` selects where the transforms run. 'cuda' moves the field to the
+    GPU once and the result back once — there is no per-block host<->device
+    streaming. A 'cuda' request on a machine without a usable GPU is an error,
+    never a silent fall back to the CPU.
     """
     kernel = fold_kernel_to_field(kernel, field.shape)
-    field_t = torch.from_numpy(field)
-    kernel_t = torch.from_numpy(kernel)
-    nx, ny, nz = field_t.shape
-    kx, ky, kz = kernel_t.shape
+    nx, ny, nz = field.shape
+    kx, ky, kz = kernel.shape
     cx = (kx - 1) // 2
     cy = (ky - 1) // 2
     cz = (kz - 1) // 2
+    nz_lin = nz + kz - 1
 
-    # Overlap-add along z: N_fft is large enough for a linear block/kernel
-    # convolution, while x/y retain their exact periods.
-    n_fft = 1 << max(4, (2 * kz - 1).bit_length())
+    # Overlap-add along z: block_len = n_fft - kz + 1 samples advance per block
+    # (n_fft a power of two), while x/y keep their exact periods. On CPU n_fft
+    # is the smallest length admitting a linear kz-tap block, and the host guard
+    # refuses an oversized spectral set (an OOM here swap-thrashes the host). On
+    # CUDA n_fft is sized up to the largest that fits free VRAM — a single block
+    # when the whole padded array fits — carrying its own VRAM guard.
+    if device == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "convolve_fft_xy_oa_z: device='cuda' requested but torch.cuda "
+                "is unavailable"
+            )
+        n_fft = cuda_block_fft_size(nx, ny, nz, kz, field.itemsize)
+    else:
+        n_fft = 1 << max(4, (2 * kz - 1).bit_length())
+        requested = fft_convolution_bytes(nx, ny, nz, kz, field.itemsize)
+        available = available_memory_bytes()
+        if available is not None and requested > available - MEMORY_HEADROOM_BYTES:
+            raise MemoryError(
+                f"convolve_fft_xy_oa_z needs {requested / 1024**3:.1f} GiB for field "
+                f"shape {(nx, ny, nz)} (kernel {(kx, ky, kz)}) but only "
+                f"{available / 1024**3:.1f} GiB is available; refusing to risk OOM. "
+                f"Reduce resolution, domain size, or vertical levels."
+            )
+
     block_len = n_fft - kz + 1
     transform_shape = (nx, ny, n_fft)
+    field_t = torch.from_numpy(field).to(device)
+    kernel_t = torch.from_numpy(kernel).to(device)
 
-    # Refuse to allocate the spectral working set if it would not fit with
-    # headroom: an OOM here swap-thrashes and bricks the whole host.
-    requested = fft_convolution_bytes(nx, ny, nz, kz, field_t.element_size())
-    available = available_memory_bytes()
-    if available is not None and requested > available - MEMORY_HEADROOM_BYTES:
-        raise MemoryError(
-            f"convolve_fft_xy_oa_z needs {requested / 1024**3:.1f} GiB for field "
-            f"shape {(nx, ny, nz)} (kernel {(kx, ky, kz)}) but only "
-            f"{available / 1024**3:.1f} GiB is available; refusing to risk OOM. "
-            f"Reduce resolution, domain size, or vertical levels."
-        )
-
-    kernel_padded = torch.zeros((nx, ny, kz), dtype=kernel_t.dtype)
+    kernel_padded = torch.zeros((nx, ny, kz), dtype=kernel_t.dtype, device=device)
     kernel_padded[:kx, :ky, :] = kernel_t
     kernel_padded = torch.roll(kernel_padded, shifts=(-cx, -cy), dims=(0, 1))
     kernel_spectrum = torch.fft.rfftn(
@@ -205,8 +264,7 @@ def convolve_fft_xy_oa_z(field, kernel):
     )
     del kernel_t, kernel_padded
 
-    nz_lin = nz + kz - 1
-    accum = torch.zeros((nx, ny, nz_lin), dtype=field_t.dtype)
+    accum = torch.zeros((nx, ny, nz_lin), dtype=field_t.dtype, device=device)
     for start in range(0, nz, block_len):
         end = min(start + block_len, nz)
         block_spectrum = torch.fft.rfftn(
@@ -224,7 +282,7 @@ def convolve_fft_xy_oa_z(field, kernel):
 
     trimmed = accum[..., cz:cz + nz].contiguous()
     del accum
-    return trimmed.numpy()
+    return trimmed.cpu().numpy()
 
 
 def zoom_trilinear(field, target_shape):

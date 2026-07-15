@@ -47,7 +47,7 @@ def test_flux_only_rejects_non_dyadic_classes():
 
 
 def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
-    monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
+    monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel, device="cpu": field.copy())
     gamma0 = np.array([-2.0, 0.0, 1.0, 0.5], dtype=np.float32).reshape(2, 2, 1)
     monkeypatch.setattr(sm, "_sparse_levy", lambda *args: gamma0.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
@@ -82,7 +82,7 @@ def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
         np.full((2, 2, 1), 0.25, dtype=np.float32),
     ])
     monkeypatch.setattr(sm, "_sparse_levy", lambda *args: next(draws))
-    monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
+    monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel, device="cpu": field.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
     c, n = 0.4, 2
@@ -132,10 +132,11 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
     convolved_fields = []
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_flux_substeps,
-                     sparsity_factors, n_zero, zero_bottom, zero_top):
+                     sparsity_factors, n_zero, zero_bottom, zero_top,
+                     device="cpu"):
         return np.ones_like(flux), {"n_clipped": 0}
 
-    def record_convolution(field, kernel):
+    def record_convolution(field, kernel, device="cpu"):
         convolved_fields.append(field.copy())
         return np.zeros_like(field)
 
