@@ -238,6 +238,11 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
                 "convolve_fft_xy_oa_z: device='cuda' requested but torch.cuda "
                 "is unavailable"
             )
+        # Return the caching allocator's reserved-but-idle blocks to the driver
+        # so mem_get_info reflects the true free VRAM. Without this, each call in
+        # a sequence sees only what the previous call left uncached and sizes the
+        # block ever smaller until even the minimal block cannot fit.
+        torch.cuda.empty_cache()
         n_fft = cuda_block_fft_size(nx, ny, nz, kz, field.itemsize)
     else:
         n_fft = 1 << max(4, (2 * kz - 1).bit_length())
