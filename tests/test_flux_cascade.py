@@ -25,6 +25,7 @@ def _root_grids():
 
 def test_flux_cascade_default_scale():
     assert sm.FLUX_SCALE == 0.5
+    assert sm.N_FLUX_SUBSTEPS == 1
 
 
 def test_flux_only_rejects_non_dyadic_classes():
@@ -35,18 +36,47 @@ def test_flux_only_rejects_non_dyadic_classes():
         sm.simulate_flux_only(grids, seed=1)
 
 
-def test_advance_flux_applies_local_multiplicative_update_and_clips(monkeypatch):
+def test_advance_flux_uses_signed_noise_but_returns_positive_scalars(monkeypatch):
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
+    monkeypatch.setattr(
+        sm, "_sparse_noise",
+        lambda *args: np.array(
+            [-2.0, 0.0, 1.0, 1.0], dtype=np.float32,
+        ).reshape(2, 2, 1),
+    )
     flux = np.ones((2, 2, 1), dtype=np.float32)
-    innovation = np.array([-2.0, 0.0, 1.0, 1.0], dtype=np.float32).reshape(2, 2, 1)
 
-    amplitude, n_clipped = sm._advance_flux(
-        flux, innovation, np.ones((1, 1, 1), dtype=np.float32), 1.0,
+    amplitude, diagnostics = sm._advance_flux(
+        flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
+        1.0, 1, (1, 1, 1),
     )
 
-    np.testing.assert_array_equal(amplitude.ravel(), [-2.0, 0.0, 1.0, 1.0])
+    expected = np.array([2.0, 0.0, 1.0, 1.0]) / np.sqrt(2.0 / np.pi)
+    np.testing.assert_allclose(amplitude.ravel(), expected)
     np.testing.assert_allclose(flux.ravel(), [0.0, 0.8, 1.6, 1.6])
-    assert n_clipped == 1
+    assert diagnostics["n_clipped"] == 1
+    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
+
+
+def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
+    draws = iter([
+        np.full((2, 2, 1), -0.25, dtype=np.float32),
+        np.full((2, 2, 1), 0.25, dtype=np.float32),
+    ])
+    monkeypatch.setattr(sm, "_sparse_noise", lambda *args: next(draws))
+    monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel: field.copy())
+    flux = np.ones((2, 2, 1), dtype=np.float32)
+
+    amplitude, diagnostics = sm._advance_flux(
+        flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
+        0.4, 2, (1, 1, 1),
+    )
+
+    np.testing.assert_allclose(
+        amplitude, 0.25 / np.sqrt(2.0 / np.pi),
+    )
+    assert diagnostics["n_points"] == 8
+    assert len(diagnostics["substeps"]) == 2
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
 
 
@@ -72,17 +102,16 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=5e-7)
 
 
-def test_scalar_convolutions_receive_signed_flux_center_amplitudes(monkeypatch):
+def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch):
     grids = _root_grids()
     z_profile = np.arange(17, dtype=np.float32)
     h_profile = 330_000.0 + 100.0 * z_profile
     qt_profile = 0.005 + 0.0001 * z_profile
     convolved_fields = []
 
-    def fake_advance(flux, innovation, kernel, flux_noise_scale):
-        amplitude = np.ones_like(innovation)
-        amplitude[::2, :, :] = -1.0
-        return amplitude, 0
+    def fake_advance(flux, rng, kernel, flux_noise_scale, n_flux_substeps,
+                     sparsity_factors, n_zero, zero_bottom, zero_top):
+        return np.ones_like(flux), {"n_clipped": 0}
 
     def record_convolution(field, kernel):
         convolved_fields.append(field.copy())
@@ -102,4 +131,4 @@ def test_scalar_convolutions_receive_signed_flux_center_amplitudes(monkeypatch):
     assert len(convolved_fields) == 2 * len(grids["k"])
     for amplitude in convolved_fields:
         assert np.any(amplitude > 0)
-        assert np.any(amplitude < 0)
+        assert not np.any(amplitude < 0)

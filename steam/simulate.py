@@ -63,16 +63,16 @@ WEIGHTING = 'gradient'
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. One octave is taken per dyadic size
-# class. At each class k:
-#     dF = CONVOLVE(FLUX_SCALE * xi * F_prev, psi_k);   F = F_prev + dF
-# with xi ~ N(0,1) sparse at turbulon centers. F is clipped >= 0 and normalized
-# to per-z-level mean 1 after every step.
+# class. Independent substeps divide the octave's variance while making negative
+# flux updates rare. Scalar turbulons use |xi| from the first substep so their
+# mean absolute amplitude remains C_Phi,k.
 #
 # For a lognormal cascade, the realized intermittency is approximately
 #     C1 ~= kappa * FLUX_SCALE**2 / (2 ln 2),
 # where kappa is an envelope-overlap (packing) factor near 0.6 for the default
 # Mexican-hat/spacing configuration, calibrated empirically.
 FLUX_SCALE = 0.5
+N_FLUX_SUBSTEPS = 1
 
 VALID_ANISOTROPY = ('canonical', 'piecewise_isotropic_below_spheroscale')
 
@@ -440,6 +440,7 @@ def simulate(
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
+        'n_flux_substeps': N_FLUX_SUBSTEPS,
     }
 
     write_netcdf(
@@ -528,6 +529,10 @@ def cascade_loop(
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(grids['k'])
     n_zero = int(round(2 * s_z * min_distance_to_ground))
+    if not isinstance(N_FLUX_SUBSTEPS, int) or N_FLUX_SUBSTEPS < 1:
+        raise ValueError(
+            f"N_FLUX_SUBSTEPS must be a positive integer, got {N_FLUX_SUBSTEPS}"
+        )
 
     if n_classes > 1:
         class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
@@ -630,12 +635,10 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
-        xi = _sparse_noise(nx_k, ny_k, nz_k, s_x, s_y, s_z, rng)
-        if zero_bottom and n_zero > 0:
-            xi[:, :, :n_zero] = 0
-        if zero_top and n_zero > 0:
-            xi[:, :, -n_zero:] = 0
-        S_k, _ = _advance_flux(flux, xi, kernel, FLUX_SCALE)
+        S_k, _ = _advance_flux(
+            flux, rng, kernel, FLUX_SCALE, N_FLUX_SUBSTEPS,
+            sparsity_factors, n_zero, zero_bottom, zero_top,
+        )
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -706,40 +709,62 @@ def cascade_loop(
     return h_perturbation, qt_perturbation, flux, final_grid_info
 
 
-def _advance_flux(flux, innovation, kernel, flux_noise_scale):
+def _advance_flux(
+    flux, rng, kernel, flux_noise_scale, n_flux_substeps,
+    sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
+):
     """Advance the dimensionless flux cascade by one size class.
 
-    ``flux`` is the unit-mean field from the previous (larger) class and
-    ``innovation`` is sparse, zero-mean, unit-variance noise at turbulon
-    centers. Both inputs are modified in place. The returned
-    ``flux_amplitude`` is ``innovation * F_prev``; it is retained separately
-    from the convolved field increment because it is the turbulon-center
-    amplitude appearing inside the convolution.
-
-    The update is
-
-        F_k = F_{k-1} + conv(psi_k, c * innovation * F_{k-1}).
-
-    Negative values are clipped to zero, then every horizontal level is
-    normalized back to mean one. The clip count is measured before clipping.
+    Each substep uses fresh signed Gaussian noise for the flux increment. The
+    scalar turbulon amplitude uses the magnitude of the first draw and the flux
+    entering the size class: S_k = |xi_1| F_{k-1} / sqrt(2/pi).
     """
-    innovation *= flux
-    flux_amplitude = innovation
-    flux_increment = CONVOLVE(flux_amplitude, kernel)
-    flux_increment *= np.float32(flux_noise_scale)
-    flux += flux_increment
-    del flux_increment
+    s_x, s_y, s_z = sparsity_factors
+    substep_scale = np.float32(flux_noise_scale / math.sqrt(n_flux_substeps))
+    scalar_amplitude = None
+    substeps = []
 
-    n_clipped = int(np.count_nonzero(flux < 0))
-    np.maximum(flux, np.float32(0.0), out=flux)
-    mean_flux = flux.mean(axis=(0, 1), keepdims=True)
-    empty_levels = (mean_flux <= 0).reshape(-1)
-    if np.any(empty_levels):
-        flux[:, :, empty_levels] = np.float32(1.0)
-        mean_flux[:, :, empty_levels] = np.float32(1.0)
-    flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
-    del empty_levels, mean_flux
-    return flux_amplitude, n_clipped
+    for substep in range(n_flux_substeps):
+        innovation = _sparse_noise(*flux.shape, s_x, s_y, s_z, rng)
+        if zero_bottom and n_zero > 0:
+            innovation[:, :, :n_zero] = 0
+        if zero_top and n_zero > 0:
+            innovation[:, :, -n_zero:] = 0
+
+        if substep == 0:
+            scalar_amplitude = np.abs(innovation)
+            scalar_amplitude *= flux
+            scalar_amplitude /= np.float32(math.sqrt(2.0 / math.pi))
+
+        innovation *= flux
+        innovation *= substep_scale
+        flux += CONVOLVE(innovation, kernel)
+
+        n_clipped = int(np.count_nonzero(flux < 0))
+        np.maximum(flux, np.float32(0.0), out=flux)
+        mean_flux = flux.mean(axis=(0, 1), keepdims=True)
+        empty_levels = (mean_flux <= 0).reshape(-1)
+        if np.any(empty_levels):
+            flux[:, :, empty_levels] = np.float32(1.0)
+            mean_flux[:, :, empty_levels] = np.float32(1.0)
+        flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
+
+        substeps.append({
+            'substep': substep + 1,
+            'n_clipped': n_clipped,
+            'n_points': int(flux.size),
+            'clip_fraction': n_clipped / flux.size,
+        })
+
+    total_clipped = sum(step['n_clipped'] for step in substeps)
+    total_points = int(flux.size) * n_flux_substeps
+    diagnostics = {
+        'n_clipped': total_clipped,
+        'n_points': total_points,
+        'clip_fraction': total_clipped / total_points,
+        'substeps': substeps,
+    }
+    return scalar_amplitude, diagnostics
 
 
 def simulate_flux_only(
@@ -747,6 +772,7 @@ def simulate_flux_only(
     sparsity_factors=(1, 1, 1),
     seed=None,
     flux_noise_scale=None,
+    n_flux_substeps=None,
     min_distance_to_ground=0,
     turbulon_shape='mexican_hat',
     zero_bottom=False,
@@ -755,7 +781,7 @@ def simulate_flux_only(
     """Run only the unit-mean flux cascade on root-simulation grids.
 
     This is a cheap calibration/diagnostic path: it performs one convolution
-    per size class and skips the scalar profiles, gradients, and four scalar
+    or more convolutions per size class and skips the scalar profiles, gradients, and scalar
     convolutions. ``grids`` must come from :func:`_compute_all_grids` with a
     common physical extent at every class (the root-simulation case).
 
@@ -791,6 +817,11 @@ def simulate_flux_only(
     c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
     if not np.isfinite(c) or c < 0:
         raise ValueError(f"flux_noise_scale must be finite and non-negative, got {c}")
+    n_substeps = N_FLUX_SUBSTEPS if n_flux_substeps is None else n_flux_substeps
+    if not isinstance(n_substeps, int) or n_substeps < 1:
+        raise ValueError(
+            f"n_flux_substeps must be a positive integer, got {n_substeps}"
+        )
 
     n_classes = len(grids['k'])
     if n_classes > 1:
@@ -823,29 +854,22 @@ def simulate_flux_only(
             flux = zoom_trilinear(flux, shape)
 
         rng = np.random.default_rng(seeds[i])
-        innovation = _sparse_noise(*shape, s_x, s_y, s_z, rng)
-        if zero_bottom and n_zero > 0:
-            innovation[:, :, :n_zero] = 0
-        if zero_top and n_zero > 0:
-            innovation[:, :, -n_zero:] = 0
-
-        flux_amplitude, n_clipped = _advance_flux(
-            flux, innovation, kernel, c,
+        scalar_amplitude, advance = _advance_flux(
+            flux, rng, kernel, c, n_substeps, sparsity_factors,
+            n_zero, zero_bottom, zero_top,
         )
-        del flux_amplitude
+        del scalar_amplitude
 
-        n_points = int(flux.size)
-        total_clipped += n_clipped
-        total_points += n_points
+        total_clipped += advance['n_clipped']
+        total_points += advance['n_points']
         steps.append({
             'k': float(k),
-            'n_clipped': n_clipped,
-            'n_points': n_points,
-            'clip_fraction': n_clipped / n_points,
+            **advance,
         })
 
     diagnostics = {
         'flux_noise_scale': float(c),
+        'n_flux_substeps': n_substeps,
         'steps': steps,
         'n_clipped': total_clipped,
         'n_points': total_points,
@@ -1025,7 +1049,9 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
     Z = z[None, None, :]
 
     r_norm_sq = X**2 + Y**2 + Z**2
-    return shape_fn(r_norm_sq, k).astype(np.float32)
+    envelope = shape_fn(r_norm_sq, k).astype(np.float32)
+    envelope -= envelope.mean()
+    return envelope
 
 
 def spectral_width_normalization(shape, size_class_gap_factor):
