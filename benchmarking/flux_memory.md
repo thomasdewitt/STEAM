@@ -48,5 +48,46 @@ test suite passed.
 
 The old two-point projection of 49.8 GiB for a 4096 x 4096 x 84 grid applies
 to the one-substep model. It was not recomputed from this single canonical
-re-check. The measured 3.3% increase suggests less headroom with four substeps,
-so a 4096 run remains borderline on a 60-GiB workstation and should be monitored.
+re-check. (Framing correction, 2026-07-15: the GIGALES target is 2048 x 2048
+horizontal, not 4096 x 4096. At 2048 x 2048 the horizontal plane is not the
+problem — the vertical level count is; see the GPU section below.)
+
+## GPU path and the host floor (2026-07-15, revision `46552d6`)
+
+`convolve_fft_xy_oa_z(..., device='cuda')` moves the FFT working set to the
+RTX 5080 (16 GiB). The overlap-add z-block is sized adaptively from free VRAM:
+single block when the padded array fits, blocking only when the shape demands
+it. Measured per convolution (float32, 21^3 kernel, fixed seed, GPU-vs-CPU
+max relative error ~1e-6):
+
+| Field shape | CPU | GPU | Speedup | GPU blocks | Peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| 512 x 512 x 168 | 0.17 s | 0.07 s | 2.5x | 1 (n_fft=256) | small |
+| 1024 x 1024 x 247 | 1.02 s | 0.36 s | 2.9x | 1 (n_fft=512) | ~8 GiB |
+| 2048 x 1024 x 342 | 3.00 s | 0.87 s | 3.5x | 2 (n_fft=256) | 13.55 GiB |
+| 2048 x 2048 x 363 | — | 1.97 s | — | 31 (n_fft=32) | 13.75 GiB |
+
+Full TWPICE-profile cascade at 2048 x 1024 x 342 (10 dyadic classes, four flux
+substeps plus two scalar convolutions per class, seed 20260714, compressed
+output): simulate 145 s, thermodynamic diagnostics 112 s, 4:20 wall including
+startup. Peak host RSS 27.3 GiB, peak VRAM ~13.8 GiB.
+
+**The binding constraint is host RAM, not VRAM, and it scales with vertical
+levels.** The GPU removes only the FFT spectral working set. What it cannot
+remove is the host floor: up to eight concurrent field-sized float32 arrays
+at the finest grid (persistent h/qt/flux plus the flux-advance or
+gradient-weighting transients — see the preflight guard in simulate.py),
+measured at ~10 field-equivalents of RSS once the CUDA host context and
+compressed-NetCDF buffering are included (27.3 GiB / 2.67 GiB per field).
+
+Max vertical levels on this 60-GiB host (~50 GiB available, 2 GiB headroom,
+~10 field-equivalents at 2048 x 2048 -> 160 MiB per level): **~300 levels at
+2048 x 2048**, ~600 at 2048 x 1024. VRAM would cap at ~370 and ~780 levels
+respectively (minimal 32-tap blocks), so the host binds first in both cases.
+Under the current spheroscale spec (log-linear 1000 m -> 10 m over 20 km,
+isotropic below the spheroscale) a 20-km column demands 342 levels — over
+the 2048 x 2048 budget, which is why the production first-look run is
+2048 x 1024 (outer scale 102.4 km). Big runs go under
+`systemd-run --user --scope -p MemoryMax=...` so the kernel can only ever
+kill the run, never the session; the 2026-07-15 session was lost to exactly
+this failure mode before the scoping was adopted.
