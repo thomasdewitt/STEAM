@@ -215,8 +215,13 @@ def simulate(
     outer_scale : float
         Outer (largest) turbulon scale L [m]. Must satisfy:
           - outer_scale must be >= dx.
-          - domain_x = nx*dx and domain_y = ny*dy are integer multiples
-            of outer_scale.
+          - each horizontal extent (domain_x = nx*dx, domain_y = ny*dy) is
+            either an integer multiple of outer_scale, or smaller than it
+            (a narrow strip). For a strip axis, turbulon kernels wider than
+            the extent are periodized onto it (fold_kernel_to_field), the
+            physically correct limit: an eddy much larger than the strip is
+            near-uniform across it. Statistics along a strip axis are not
+            meaningful at separations approaching the strip width.
     spheroscale : float or ndarray, shape (n_profile,)
         Scale at which horizontal and vertical turbulon sizes are equal [m].
         If a 1D array, it is interpreted as a height-dependent profile at
@@ -343,10 +348,15 @@ def simulate(
         )
     for domain_size, axis in ((domain_x, 'x'), (domain_y, 'y')):
         n_tiles = domain_size / outer_scale
+        if n_tiles < 1:
+            # Narrow strip: kernels wider than the extent are periodized onto
+            # it by fold_kernel_to_field. No divisibility requirement.
+            continue
         if abs(n_tiles - round(n_tiles)) > 1e-9:
             raise ValueError(
                 f"domain_{axis} ({domain_size}) must be an integer multiple of "
-                f"outer_scale ({outer_scale}), got ratio={n_tiles}"
+                f"outer_scale ({outer_scale}) or smaller than it, "
+                f"got ratio={n_tiles}"
             )
 
     # Spheroscale: always promote to 1D profile
@@ -1091,8 +1101,10 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
 
         target_dx_k = k / (2 * s_x)
         target_dy_k = k / (2 * s_y)
-        nx_arr[i] = int(round(padded_extent_x / target_dx_k))
-        ny_arr[i] = int(round(padded_extent_y / target_dy_k))
+        # max(1, ...): a class whose turbulons are wider than a strip axis
+        # still gets one cell there (the periodized kernel spreads it).
+        nx_arr[i] = max(1, int(round(padded_extent_x / target_dx_k)))
+        ny_arr[i] = max(1, int(round(padded_extent_y / target_dy_k)))
         dx_arr[i] = padded_extent_x / nx_arr[i]
         dy_arr[i] = padded_extent_y / ny_arr[i]
 
