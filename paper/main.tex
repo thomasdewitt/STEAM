@@ -1,0 +1,1032 @@
+%% Copernicus Publications Manuscript Preparation Template for LaTeX Submissions
+%% ---------------------------------
+%% This template should be used for copernicus.cls
+%% The class file and some style files are bundled in the Copernicus Latex Package, which can be downloaded from the different journal webpages.
+%% For further assistance please contact Copernicus Publications at: production@copernicus.org
+%% https://publications.copernicus.org/for_authors/manuscript_preparation.html
+
+
+%% Please use the following documentclass and journal abbreviations for preprints and final revised papers.
+
+%% 2-column papers and preprints
+\documentclass[acp, manuscript]{copernicus}
+
+\begin{document}
+
+\title{cloud model}
+
+
+% \Author[affil]{given_name}{surname}
+
+\Author[1]{DeWitt}{Thomas}
+\Author[]{}{}
+\Author[]{}{}
+
+\affil[]{University of Utah}
+\affil[]{ADDRESS}
+
+%% The [] brackets identify the author with the corresponding affiliation. 1, 2, 3, etc. should be inserted.
+
+%% If an author is deceased, please mark the respective author name(s) with a dagger, e.g. "\Author[2,$\dag$]{Anton}{Smith}", and add a further "\affil[$\dag$]{deceased, 1 July 2019}".
+
+%% If authors contributed equally, please mark the respective author names with an asterisk, e.g. "\Author[2,*]{Anton}{Smith}" and "\Author[3,*]{Bradley}{Miller}" and add a further affiliation: "\affil[*]{These authors contributed equally to this work.}".
+
+
+\correspondence{NAME (EMAIL)}
+
+\runningtitle{t}
+
+\runningauthor{TEXT}
+
+
+
+
+
+\received{}
+\pubdiscuss{} %% only important for two-stage journals
+\revised{}
+\accepted{}
+\published{}
+
+%% These dates will be inserted by Copernicus Publications during the typesetting process.
+
+
+\firstpage{1}
+
+\maketitle
+
+
+
+\begin{abstract}
+TEXT
+\end{abstract}
+
+
+\copyrightstatement{TEXT} %% This section is optional and can be used for copyright transfers.
+
+
+\introduction  %% \introduction[modified heading if necessary]
+
+The cloud feedback remains the most uncertain component of Earth's climate sensitivity, partly due to the fact that important physical processes span a very wide range of spatial scales. The default assumption is that increasing model resolution will reduce uncertainty \citep{shukla2009, slingo2022}, although ever-larger simulations built over the past 40 years have yet to reduce model spread in estimates of either the cloud radiative feedback \citep{ipcc6,ceppi2017} or the overall climate sensitivity (cite). % https://www.science.org/doi/10.1126/sciadv.aba1981 
+
+It is argued that the next generation of kilometer-scale models will break the trend because they can resolve individual clouds \citep{slingo2022}. The implicit assumption is that clouds are typically kilometer-scale such that they may be resolved by kilometer-scale grid sizes. The ubiquity of this assumption is exemplified by the equivalent terminology ``Global Cloud-Resolving Models'' (GCRMs). However, the assumption that cloud dynamics are kilometer scale appears contradicted by the property of scale invariance in cloud shapes and sizes, which has been observed to apply globally from subkilometer scales up to thousands of kilometers (cites). Scale invariance implies that kilometer scales are no more fundamental than any other scale within the invariant regime: kilometer-scale phenomena are simply a rescaled version of 100-kilometer-scale phenomena without being qualitatively different. The implication would be that a physically accurate cloud parameterization would work equally well in a 100-kilometer simulation as a 1-kilometer simulation. Thus, the reason the cloud feedback is uncertain is not that the models have insufficient resolution but rather that our parameterizations for clouds are insufficient. 
+
+
+On a fundamental level, any parameterization is equivalent to a theory for cloud dynamics, as both attempt to represent a more complex phenomenon through simpler means \citep{arakawa2004}. At the root of the problem of the cloud radiative effect, then, is a theoretical problem: how can the extreme complexity of a cloud field be represented in some simplified state space? How can the dynamics at one scale, such as those resolved in a GCM, be related to the dynamics at other scales, such as those being parameterized? Although these questions may be quite difficult to answer in any sufficiently general way, we have no choice but to attempt an answer. Parameterizations must be used whether or not they accurately represent the physics. % I'm really trying to get at the critique of "your model may be good for meteorology X but you should not necessarily attempt to model meteorology Y with it or claim any generality.
+
+Although there is no widely accepted theory of cloud dynamics at present, there is a long history of analytical forumlations of clouds and cloud fields in terms of their constituent elements, even if what serves as the basic element is not yet agreed upon. An early example is \cite{arakawa1974}, who derived a convective parameterization by modeling individual clouds as convective "plumes" using similarity theory. However, given that plumes require a constant source of buoyancy, their applicability to moist convection has been called into question. Instead, thermals or ``bubbles'' have been proposed as a way to use similarity theory for cloud modeling (yano), suggesting cloud fields may be thought of as a large number of superimposed thermals.
+
+Other work has attempted to take clouds themselves as the basic constituent element in order to derive overall statisics of fields containing large numbers of clouds \citep{craig2006, cohen2006, garrett2018}. Unforuntately, even individual clouds are highly complex structures, and cloud theories therefore tend to make major simplifications such as ignoring interactions between clouds \citep{craig2006} or making clouds binary objects \citep{garrett2018}. 
+
+Although it is less commonly applied to clouds, a much older tradition exists of conceptualizing fluid flows as being made up of constituent parts: a turbulent cascade. As first articulated by (Richardson), a turbulent flow is envisioned to be made up of large numbers of ``eddies'' that recursively break up into smaller and smaller eddies through a ``cascade'' while conserving some relevant physical quanitity such as the kinetic energy dissipation rate. 
+
+Despite being widespread in turbulence theory, the cascade is typically only invoked as a conceptual argument used to motivate scaling arguments such as the Kolmogorov -5/3 energy spectrum, where kinetic energy $E$ is related to wavenumber through $E\propto k^{-5/3}$. It is rarely taken as a literal description of the dynamics that could be used to make simulations.\footnote{Multiplicative cascades are perhaps the best developed explicit cascade model, but are only loosely inspired by Richardson's cascade and typically trade realism of the output for physical interpretability. For example, multiplicative cascades typically either model ``eddies'' explicitely and produce highly artifical outputs, as in discrete multiplicative models, or use physically opaque mathematical methods to generate more realistic outputs, as in the Fractionally Integrated Flux model.}
+
+Conceptually, eddies and bubbles bear some resemblance insofar as both form the consituent elements from which the overall field is built. However, turbulence and the dynamics shaping clouds are typically thought to be distinct physical processes operating at different spatial scales, primarily because buoyancy is central to cloud dynamics but is omitted from Kolmogorov's theory of turbulence. It is therefore understandable that bubbles and eddies have thus far been considered separately. However, what is less widely recognized is that buoyancy may be incorporated into the theory of turbulence itself, in which case the concepts of eddies and bubbles might be unified to construct a theory of cloud dynamics. 
+
+As shown by \citet{schertzer1985}, when buoyancy is present in a turbulent flow, it is not kinetic energy flux that is conserved through the cascade, but a different flux related to buoyancy. The reason is that kinetic energy may be converted into potential energy in a gravitational field and is therefore not conserved. The main empirical consequence of ``Lovejoy-Schertzer'' turbulence is that Kolmogorov's -5/3 energy cascade only applies when the power spectrum is computed along the horizontal direction: $E\propto k_x^{-5/3}$. When computed along the vertical, a different relationship was proposed, namely $E\propto k_z^{-11/5}$. This directional dependence of the kinetic energy spectrum was recently found to be closely consistent with sonde observations and LES output from scales of 200 m to 2000 km. These scales include nearly the full range of motions that are typically associated with cloud dynamics, suggesting that ``bubbles'' may indeed be equivalent to ``eddies'' -- so long as the theory of turbulence considered is that proposed by Lovejoy and Schertzer, not Kolmogorov.
+
+Here, we propose a model for clouds by formalizing the conceptual model of a Lovejoy-Schertzer turbulent cascade in a physically realistic manner. The model is based on the idea that a cloudy turbulent flow can be thought of as being composed of a large number of discrete constituents, which we refer to as ``turbulons''. A turbulon is like an ``eddy'' or ``bubble'' but has a specific mathematical form and applies to an arbitrary vector or scalar field. We propose an algorithm that may be used to simulate three-dimensional volumes of water vapor and condensate, temperature, and moist static energy using turbulons, called the Superimposed Turbulon and Eddy Atmospheric Model (STEAM). Renderings of the generated cloud fields using a Monte Carlo ray-tracing algorithm display striking realism (Fig. ), and we show quantitatively that the generated fields reproduce observed cloud statistics at least as well, and in some cases better than, large-eddy simulations, and at vast computational savings.
+
+\section{Theoretical basis for the blob cascade model}
+
+In this section, we provide a high-level overview of the theoretical considerations used to formulate the Superposition of Turbulon and Eddy Atmospheric Model (STEAM). A complete description of the STEAM algorithm is provided in Appendix \ref{sect:steam algorithm details}.
+
+The basic idea of a turbulent cascade is to consider the fluid volume as being made up of a discrete set of constituent elements called ``eddies'', i.e. circulations in the wind field. In order to formalize this idea, we must first specify exactly what we mean by a turbulent eddy and extend the concept to fields other than the wind field. In place of the term ``eddy'', we introduce the term ``turbulon'' to refer to an individual constituent element of a turbulent field. A turbulon $\mathfrak{t}$ is defined as a set of localized perturbations in all fields that make up a turbulent flow. Perturbations in each field have an identical shape but varying amplitude. For example, a given turbulon might be associated with a strong temperature perturbation but a weak pressure perturbation. The turbulon shape is defined by some ``envelope'' function $\mathfrak{T} (k, \mathbf{r})$ with size parameter $k$. Any individual turbulon is made up of components that are a scaled and translated version of the envelope function with a specified size parameter $\mathfrak{t}_i = a(\mathbf{r}, k)\mathfrak{T}(k, \mathbf{r} - \mathbf{r}')$, where $a$ is the perturbation amplitude. Conceptually, turbulons are broader than the concept of ``eddies'' and more precise. Eddies are rarely defined mathematically, but if they were, an eddy would only represent the component of a turbulon that is associated with a perturbation in the wind field.
+
+The overall field $F$ defining a component of the atmospheric state, perhaps representing temperature or moist static energy, is represented as a superposition of a large number of turbulon components:
+\begin{align}
+  F(\mathbf{r}) = \sum_{k, \mathbf{r}'}^{} a(\mathbf{r}, k)\mathfrak{T}(k, \mathbf{r} - \mathbf{r}'). \label{eq:basic field construction with turbulons}
+\end{align}
+
+
+Mathematically, the approach is equivalent to a wavelet transform, a method already common in turbulence theory and discussed further below. However, almost exclusively wavelets are used as an analysis tool to determine how much variance a given signal has as a function of location and frequency. We are proposing to invert this interpretation: given sufficient theoretical constraints on the statistics of the turbulons, the wavelet formalism may not only be used to analyze atmospheric volumes but also to simulate them. More fundamentally, we also propose an ontological re-evaluation of wavelets as more than just a mathematical tool used to evalute frequency content. In this conception, a cloud is made up of constituent elements called turbulons, in the same way that an ideal gas is made up of particles. This conceptual shift can provide a new and complimentary perspective on atmospheric turbulence and cloud dynamics.
+
+The wavelet equivalence implies that any possible field $F$ may be simulated given the correct turbulon statistics using Eqn. \ref{eq:basic field construction with turbulons}. Therefore, any given question of atmospheric statistics or dynamics posed in real space has an equivalent formulation in the ``turbulon space'' represented by the turbulon amplitudes and locations $a_i(\mathbf{r},k)$. As clouds and turbulence are inherently multi-scale phenomena, turbulon space has the benefit of explicit separation as a function of the scale parameter $k$. And as we will now show, turbulence theory provides several important constraints on the statistics of the turbulons as a function of the size parameter $k$.
+
+Most commonly, theories of turbulence provide a constraint on the kinetic energy spectrum of some component of the wind field $v$. This constraint on the frequency content may be represented in either wavenumber space, using the spectrum, or real space, using wavelets or, more commonly, structure functions. The structure function is defined as 
+\begin{align}
+  \Delta v (r)\equiv \big|v(\mathbf{x})-v(\mathbf{x}+\mathbf{r})\big|; \qquad r \equiv |\mathbf{r}|,
+\end{align}
+
+% Note that there are multiple choices for the allowed directions of the separation vector $\mathbf{r}$. For Kolmogorov turbulence, isotropy implies that all directions have identical statistics.
+Turbulence theories typically constrain how the mean amplitude of the structure function scale with the separation vector $r$ by raising $\Delta v$ to some power $q$ and then ensemble averaging over many spatial locations $\mathbf{x}$ to obtain $\langle \Delta v (r)^q\rangle$.
+If the kinetic energy spectrum follows a power law $E\propto k^{-\beta}$, the second-order structure function with $q=2$ scales as \begin{align}
+  \langle\Delta v^2 (r)\rangle\propto r^{\xi(2)}\qquad \xi(2) = \beta - 1. \label{eq:isotropic KE structure function}
+\end{align}
+For the homogenous isotropic turbulence considered by Kolmogorov, $\beta =5/3$.
+One advantage of the structure function is that, unlike the spectrum, structure functions may be defined for arbitrary orders $q$. This propoerty becomes useful when the flow becomes ``intermittent'' and the strongest fluid gradients become clustered spatially rather than evenly distributed. The strength and character of turbulent intermittency can be quantified via the function $\xi(q)$ as we show in Sect. (). 
+
+Atmospheric turbulence does not in general follow the isotropic law (Eqn. \ref{eq:isotropic KE structure function}) due to the effects of buoyancy. A more accurate description of atmospheric flow is ``Lovejoy-Schertzer'' turbulence, where structure functions for horizontal wind components are a function of separation direction as well as distance. The reason for the directional separation is that only vertical motions are affected by gravity, and so the quantity controlling the turbulent cascade along the vertical direction is related to buoyancy. In contrast, the horizontal component of the cascade is not affected by buoyancy and therefore structure functions follow the Kolmogorov law when calculated along a purely horizontal direction. Ignoring intermittency corrections, \citet{lovejoy1985} proposed that kinetic energy structure functions should follow
+\begin{align}
+  \begin{cases}
+    \langle\Delta v (\Delta x)\rangle = \varepsilon^{1/3} r^{H_h}; \qquad H_h=1/3; \qquad \Delta x \equiv |\mathbf{r}(\Delta x, \Delta z=0)|\\
+      \langle\Delta v (\Delta z)\rangle = \phi^{1/5} r^{H_v}; \qquad H_v=3/5;\qquad \Delta z \equiv |\mathbf{r}(\Delta x=0, \Delta z)| 
+\end{cases}\label{eq:LS directional structure functions}
+\end{align} 
+where $H_h$ and $H_v$ are called Hurst exponents for horizontal and vertical separations, respectively. The proportionality constant $\varepsilon$ represents Kolmogorov's ``kinetic energy flux'', i.e. the rate of kinetic energy transfer from large to small scales $\partial v^2/\partial t$. The quantity $\phi=\partial f^2/\partial t$, called ``buoyancy variance flux'', is also a down-cascade variance flux analogous to kinetic energy but for buoyancy $f$. Equation \ref{eq:LS directional structure functions} was proposed as a conjecture that combined two isotropic theories, namely by Kolmogorov and Bolgiano-Obukhov into the anisotropic form represented by Eqn. \ref{eq:LS directional structure functions}. Whether or not the fluxes $\varepsilon$ and $\phi$ may be interpreted the same way in the isotropic and anisotropic forms is an open question \citep{dewitt2025bpreprint}. 
+
+Regardless of the exact physical interpretation, the predicted Hurst exponent values in Eqns. \ref{eq:LS directional structure functions} have recently been shown to agree closely with global dropsonde and datasets and LES simulations \citep{dewitt2025bpreprint}. For horizontal wind components, $H_v\approx 0.7$ when computed along the vertical direction for separations between $200\,\unit{m}$ and $7\,\unit{km}$, whereas $H_h\approx 0.4$ for structure functions computed along the horizontal direction for separations between $200\,\unit{m}$ and $2000\,\unit{km}$. Both values are nearly consistent with Lovejoy-Schertzer turbulence while also ruling out the alternatives such as isotropic Kolmogorv turbulence or quasi-geostrophic turbulence over the observed range. Thus, although turbulence is often thought to be a small-scale phenomenon, if it is considered using Lovejoy-Schertzer theory rather than Kolmogorov theory, a very wide range of scales can be said to be turbulent including almost all scales relevant to cloud dynamics.
+
+Given that the wind field transports numerous other quantities, the value of the Hurst exponent for wind affects the Hurst exponents for other variables, including any conserved advected scalar $\Phi$ following
+\begin{align}
+  \frac{D\Phi}{Dt} = 0.\label{eq:advection conservation}
+\end{align} 
+For simulations, below we will take $\Phi$ to be equal to moist static energy and total water content, but other conserved scalars could be simulated as well. 
+In general, Hurst exponents for $\Phi$ are thought to be equal to the Hurst exponents for the wind field \citep{lovejoy2013}. In classical isotropic turbulence theory, the Hurst exponent is $1/3$, a result known as the Corrsin-Obukhov law of scalar advection. For Lovejoy-Schertzer turbulence, the analogous law is 
+\begin{align}
+  \begin{cases}
+  \langle\Delta \Phi (x)\rangle\propto \langle |x|^{H_x}\rangle; \qquad H_x=1/3, \\
+  \langle\Delta \Phi (z)\rangle \propto \langle |z|^{H_v}\rangle; \qquad H_v=3/5,
+  \end{cases}\label{eq:LS scalar directional structure functions}
+\end{align}
+where $H_x$ and $H_z$ are equal to their values for the horizontal component of the wind field (Eqn. \ref{eq:LS directional structure functions}). Observationally, \citet{lilley2004} found Hurst exponents for the aerosol backscatter ratio of $H_h=0.33\pm0.03$ and $H_v=0.60\pm0.04$, in excellent agreement with Eqn \ref{eq:LS scalar directional structure functions}. 
+
+Hurst exponents for quantities that are not pure advected scalars might not follow Eqns. \ref{eq:LS scalar directional structure functions}, but could still be expected to display the aspect ratio scaling prescribed by Eqn. \ref{eq:turbulon aspect ratio scaling}. As an example, if the wind field contains a perturbation in a given location, other fields such as temperature or cloud condensate might be expected to also show perturbations with varying amplitudes but identical geometry. Indeed, \citet{guillaume2018} found that the aspect ratio of cloud cross-sections, as observed by the satellite-based radar CALYPSO, show the   predicted aspect ratio scaling, although their reported results require some algebraic manipulation as we show in Appendix ().
+
+
+\subsection{Distribution of turbulon amplitudes across scale}
+
+Both structure functions and wavenumber spectra represent a scale decomposition of a signal, where scale is measured using either field differences or wavenumber. Both may be recast as a special case of a generalized scale decomposition framework using wavelet transforms. Here, this framework is useful because it shows that the differences in Eqn. \ref{eq:LS directional structure functions} may be replaced by a turbulon envelope function $\mathfrak{T}$ without any change to the power-law dependence in $\Delta x$ or $\Delta z$. Thus, Eqn. \ref{eq:LS directional structure functions} may be interpreted as a constraint on the mean amplitude of the turbulons as a function of their scale parameter $k$. Specifically, if the turbulon envelope function is defined through
+
+(eqn, deltas, etc)
+
+then the structure function may be equivalently defined through a convolution 
+\begin{align}
+\langle \Delta f^q\rangle(k) = \langle\mathfrak{T}(k) * f^q\rangle_r. \label{eq:wavelet transform}
+\end{align}
+Equation \ref{eq:wavelet transform} represents a wavelet transform that is averaged over all spatial locations $r$, indicated by the operator $\langle\rangle_r$. If, for each $q$, the structure function Eqn. \ref{eq:wavelet transform} follows a power law in $k$, there are other choices of the turbulon envelope function $\mathfrak{T}$ that result in an identical power-law exponent, at least over the range where discretization effects can be neglected. Where discretization effects dominate, different choices of $\mathfrak{T}$ do affect $\langle \Delta f^q\rangle$. For example, Figure () shows the mean wavelet transform ($q=1$) for a random walk, for three common choices of $\mathfrak{T}$ defined through a structure function, a Mexican hat, and a Haar wavelet. For each function, a local power law exponent is computed as $d\log \langle \Delta f^q\rangle/d\log \langle\mathfrak{T}(k) * f^q\rangle_r$ and shown in Panel (). This local power-law exponent represents the Hurst exponent at each scale $k$, and it attains its theoretical value of 0.5 only above $k\gtrsim ?$. The consequence is that the choice of the turbulon envelope function does not affect the resulting two-point statistics, but only at scales much larger than the grid scale, and that such discretization effects are not a specific limitation of the model but a general feature of discretization. The only limitation on the shape of $\mathfrak{T}$ is the admissability criterion for discretized wavelets: namely, that they have zero mean.
+
+The anisotropy implied by Eqn \ref{eq:LS directional structure functions} -- where the Hurst exponent is a function of direction -- is also straightforward to model, simply by allowing the turbulon aspect ratio to vary as a function of the turbulon size. Specifically, to be consistent with Eqn. \ref{eq:LS directional structure functions}, a simulation must set the mean absolute turbulon amplitude such that 
+\begin{align}
+  \langle |\mathfrak{t}|\rangle \propto k_h^{H_h} \label{eq:turbulon amplitude vs scale}
+\end{align} 
+where $k_h$ is the horizontal size parameter of the turbulons. If $k_h$ is related to the vertical size parameter $k_v$ through
+$  k_h^{H_z}\propto k_v, $
+then $\langle |\mathfrak{t}|\rangle \propto \left(k_v^{1/H_z}\right)^{H_h}=k_v^{H_h/H_z}$. If $H_z=5/9$, we obtain the vertical dependence specified by Eqn. \ref{eq:LS directional structure functions}.
+Using $H_z=5/9$, the turbulon aspect ratio therefore follows
+\begin{align}
+  \frac{k_h}{k_v} = l_s^{-4/9} k_h^{4/9}(fix). \label{eq:turbulon aspect ratio scaling}
+\end{align}
+The proportionality constant $l_s$ is termed the ``spheroscale'' and defines the scale at which the aspect ratio becomes 1, i.e. where $k_h=k_v=l_s$. Scales smaller than the spheroscale have yet to be observationally evaluated within the LS framework. Based on visualizations of STEAM simulations discussed in Sect. (), we conjecture that isotropic Kolmogorov turbulence is recovered below the spheroscale, but it could also be possible that the anisotropy specified by \ref{eq:turbulon aspect ratio scaling} persists, implying that turbulons become vertically elongated and pill-shaped at small scales. Regardless, $l_s$ tends to be of order 1 to 10$\,\unit{m}$, and so isotropic turbulence only exists at very small scales if at all.
+
+For simulations, both the shape and relative amplitude at each scale of the turbulons is set by the horizontal hurst exponent $H_h$, the anisotropy exponent $H_v$, and the spheroscale. The canonical values for Lovejoy-Schertzer turbulence are $H_h=1/3$ and $H_z=5/9$ (Eqn. ()), while the spheroscale must be determined empirically. Different values of $H_h$ and $H_z$ can also be used to simulate different turbulent flows, for example isotropic turbulence where $H_h=1/3, H_z=1$.
+
+One remaining ingredient that is needed for simulations is to determine the constant of proportionality in Eqn. \ref{eq:turbulon amplitude vs scale}. This will set the global mean turbulon amplitude at each scale, and then the final piece will be to specify exactly how amplitudes are distributed spatially, which we consider below. 
+
+At its core, the basic action of a turbulent cascade is to transfer variability from large scales to small scales. In such a downscale cascade, the overall magnitude of the fluctuations at each scale are determined by the amplitude of the fluctuations at the largest scales. For STEAM, this idea is operationalized by computing the large-scale fluctuation magnitudes using the ensemble mean profile. For simplicity, we consider a horizontally uniform domain mean, and so the large-scale flucutation magnitude is computed using a  one-dimensional vertical convolution between the largest simulated turbulon and the ensemble mean profile for each simulated scalar field, as described in Appendix (). The resulting amplitudes at each height are interpreted as the mean amplitude of the turbulon components at the outer scale. Using Eqn. \ref{eq:turbulon amplitude vs scale}, outer-scale amplitudes are used to set the proportionality constants for the mean turbulon amplitudes at every other scale. Because the gradient of the mean profile typically varies with height, the proportionality constants will also vary with height. This has two consequences. First, fields which have horizontally and vertically uniform mean profiles will not produce any variability in the simulated scalars, as should be expected. As an example, convective activity should not be expected to modify local concentrations of an already well-mixed gas like argon. Second, any level within the domain that has a stronger mean gradient will produce more small-scale variance, as might also be expected intuitively. Stratocumulus fields near a strong inversion, for example, display much greater moisture variance within in the cloud layer than in the mixed layer below because the proximity to the strong inversion allows for very dry pockets of air to intrude from the free troposphere above. 
+ 
+\subsection{Distribution of turbulon amplitudes in space}
+
+Although Eqn. \ref{eq:LS scalar directional structure functions} constrains the mean absolute turbulon amplitude as a function of scale $k$ globally, at any given location a turbulon amplitude should also depend on the local structure of the field. There are two particular aspects to consider: the amount of structure in the scalar field that is available to be advected, and the strength of the eddies that cause such advection to occur. Because advection represents a rearrangement of the field, there must be some nonzero gradient spanning the region in which a given eddy operates if that eddy is to introduce any perturbation in a scalar field. If the scalar field was initially uniform, an eddy might transport molecules from one location to another, but the scalar concentration would not change. If the scalar field does have a nonzero gradient, then it might be expected that the size of the perturbation caused by the eddy would be proportional to the magnitude of the gradient. To represent this effect in STEAM, the magnitude of each simulated turbulon component at scale $\ell$, $h_\ell$ and $q_{t_\ell}$, is proportiontal to the gradient of the field composed of turbulons that are larger than $\ell$ for $\nabla h_{L>\ell}$ and $\nabla q_{t_{L>\ell}}$. 
+
+The second aspect of local field structure to consider is the strength of the eddy that causes a perturbation. In a turbulent cascade, eddy strength is determined by the down-cascade turbulent flux, i.e. the dynamically-relevant quantity that is conserved as it is passed from large scales to small. In isotropic Kolmogorov turbulence this quantity is the kinetic energy dissipation rate $\varepsilon$. In Lovejoy-Schertzer turbulence, there are two such fluxes $\varepsilon_h$ and $\phi$ (Eqn. ()), with the relevant flux dependent on the direction of the flow. To model eddy strength, STEAM simulations include the horizontal kinetic energy dissipation rate as a prognostic variable alongside $h$ and $q_t$. The main difference between the turbulent flux and the scalar fields is that the turbulent flux is conserved at each scale through the cascade, implying that the amplitude of the flux component of the turbulons does not depend on scale, at least on average. Instead, at each scale $\ell$ the mean perturbation $\langle \varepsilon_\ell \rangle$ is equal to a constant that is independent of $\ell$ and must be specified as a boundary condition.
+
+The flux $\varepsilon$ is not spatially uniform. Local regions within a convective cell will have higher eddy dissipation rates than adjacent clear air, for example. Specifically, we hypothesize that turbulons of scale $\ell$ form with a mean amplitude that is proportional to the local value of $\varepsilon_{L>\ell}$, that is, the flux field associated with turbulons larger than scale $\ell$. As show in Appendix (), this hypothesis naturally creates multiplicative intermittency in the flux field $\varepsilon$, and the strength of the intermittency is larger for flows with higher mean dissipation rates. Notably, the intermittency of $\varepsilon$ can be quantified using a more common multiplicative cascade framework but has the advantage of tying the strength of the intermittency to the mean dissipation rate.
+
+The above global and local constraints on turbulon amplitudes are implemented in STEAM as follows, described in further detail in Appendix (). The simulation proceeds from large scales to small. At each scale, the first step is to compute perturbations in $\varepsilon_\ell$ that are associated with each turbulon of size $\ell$. This is done by drawing a random variable with unit mean and unit amplitude from the distribution described in Appendix (), and then scaling the perturbation by the local field $\varepsilon_{L>\ell}$ while enforcing that $\langle \varepsilon_\ell \rangle$ is equal to the specified ensemble mean value. Perturbations in $h_\ell$ and $q_{t_\ell}$ are then computed such that the local value is proportional to both the gradient $\nabla h_{L>\ell}$ or  $\nabla q_t{_{L>\ell}}$ and the turbulent flux $\varepsilon_{L\ge \ell}$, while enforcing that the ensemble mean $\langle h_\ell\rangle$ or $\langle q_{t_\ell}\rangle$ follows Eqn. \ref{eq:turbulon amplitude vs scale}. Finally, for all three fields, a perturbation with shape defined by the turbulon envelope function and amplitude scaled as described above are added to the parent fields, and the simulation proceeds to the next smaller scale.
+
+\subsection{Diagnostic variables}
+
+Once the cascade simulation has proceeded to the smallest resolvable scale for the three prognostic variables $h$, $q_t$, and $\varepsilon$, we then diagnose additional cloud-relevant variables as described in Appendix (). In short, we use a saturation adjustment scheme where any saturated grid cell is assigned a relative humidity of exactly 100\%, and the remaining water is converted to condensate. Temperatures and pressures that are required for saturation calculations are solved iteratively from the definition of moist static energy, a saturation vapor pressure parameterization (cite bolton1980), and an assumed surface pressure. Condensate is then partioned into liquid and ice according to a simplistic linear partitioning based on the temperature, ramping from purely liquid at 0°C to purely ice at -38°C, matching the partitioning used in the GATE SAM simulation described below. Overall, the diagnostics we use are simplistic and are intended only as a first proof-of-concept that the cascade simulation method can produce plausible simulated atmospheric volumes. A particularly important simplification is that condensate does not convert to precipitation, which leads to unphysically high condensate values in dense convective cores. In the future, precipitation could be added through an autoconversion process analogous to LES, where larger, saturated turbulons produce precipitation over their lifetime. Additional microphysical processes, perhaps including aerosol-limited condensation that produces positive supersaturation, should also be added.
+
+
+
+\section{Comparison to large-eddy simulations}
+
+As a point of comparison, we consider two large eddy simulations of tropical convection, performed using the System for Atmospheric Modeling (SAM). SAM is a non-hydrostatic large eddy simulation that numerically integrates the hydrodynamic equations. (further description of simulations, GATE and TWPICE)
+
+Both simulation configurations are very similar, with similar large-scale forcing, identical domain geometry, and the same underlying model. However, the resulting turbulence statistics are remarkably different. Structure functions for $u$ and $v$ in the TWPICE case are relatively close to the theoretical predictions of Lovejoy-Schertzer turbulence, 
+
+\subsection{Initialization and analysis of STEAM simulations}
+
+As inputs, STEAM requires the following parameters to be specified, which are computed individually for the two LES simulation cases. The first are the mean vertical profiles of $q_t$, $h$, and $\varepsilon$. (AND WHATEVER ELSE)
+
+To perform a statistical comparison of STEAM fields, we focus on two categories of comparison, namely the statistics of the underlying fields and the statistics of cloud objects as defined by thresholding the continuous field.
+
+
+The second is the statistics of cloud objects that are defined by thresholding a continuous field. Specifically, we consider clouds defined two ways: first, defined within the volume as any grid point with cloud condensate (water + ice) higher than 0.01$\,\unit{g/kg}$ (CITATION), and second, defined via a vertically-summed optical depth threshold of $\tau=1$, replicating a view that might be seen from a satellite \citep{dewitt2024}. For the two cases, cloud fraction profiles are shown in Fig. (). 
+
+
+
+\section{Results}
+
+
+\clearpage
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+% \conclusions  %% \conclusions[modified heading if necessary]
+
+
+%% The following commands are for the statements about the availability of data sets and/or software code corresponding to the manuscript.
+%% It is strongly recommended to make use of these sections in case data sets and/or software code have been part of your research the article is based on.
+
+% \codeavailability{TEXT} %% use this section when having only software code available
+
+
+% \dataavailability{TEXT} %% use this section when having only data sets available
+
+
+% \codedataavailability{TEXT} %% use this section when having data sets and software code available
+
+
+% \sampleavailability{TEXT} %% use this section when having geoscientific samples available
+
+
+% \videosupplement{TEXT} %% use this section when having video supplements available
+
+
+\appendix
+
+% \section{math details}
+
+
+% \subsection{Turbulon envelope shape}
+
+% Although Eq. () ensures that any admissible envelope function may be used to construct simulations of a turbulent field, not all envelope functions are physically realistic.
+
+% If $\mathfrak{T}$ is chosen so as to have zero mean, the mathematical formalism of wavelet transforms guarantees that it is possible to construct any possible field $F$ using this setup. In fact, wavelet theory supplies a universal method to convert any state of the system between a real-space field description $F(\mathbf{r})$ and a "turbulon space" description, i.e. a description of the system in terms of a list of turbulon amplitudes as a function of location and $k$:
+% \begin{align}
+%   a(\mathbf{r}, k) &= \int F(\mathbf{r}') \mathfrak{T}^*_k(\mathbf{r} - \mathbf{r}') d^3\mathbf{r}'.
+% \end{align}
+% As a note, our approach in Eqns. () and () differs slightly from a continuous wavelet transform. When constructing simulations, for computational reasons we only consider a sparse subset of possible turbulon locations where the spacing between allowable locations is proportional to $k$. This affects the wavelet normalization factor and is discussed in detail in Appendix ().
+% As for the shape of $\mathfrak{T}$, there are few constraints beyond the requirement of zero mean. As a starting point, we will use the Mexican hat, defined as 
+% \begin{align}
+%   whatever.
+% \end{align}
+% The Mexican hat is a common choice in wavelet analysis, and in Sect. () we will explore several alternatives. As a final note, for constructing simulations it is convenient for $\mathfrak{T}$ to also have finite gradient as discussed in Sect. (), but for analysis a finite gradient is not required.
+
+
+% For our purposes, the structure function is advantageous compared to the kinetic energy spectrum because it does not need to be defined with respect to variance $\Delta v^2$. Structure functions may be defined for any order $q$:
+% \begin{align}
+%   \langle\Delta v^q (r)\rangle\equiv \langle |v(\mathbf{x})-v(\mathbf{x}+\mathbf{r})|^q\rangle.
+% \end{align}
+% This generalized definition is useful because if we set $q=1$, the structure function may be recast as a wavelet or a turbulon envelope function:
+% \begin{align}
+%   \langle\Delta v^2 (r)\rangle = v * \mathfrak{T}; \qquad
+%   \mathfrak{T} = -\delta(-\mathbf{r}/2)+\delta(\mathbf{r}/2)
+% \end{align}
+% where $\delta$ is the Dirac delta function. This implies that we may interpret velocity differences $\Delta v$ as turbulons, and therefore their mean amplitude as a function of scale $k=r$ is constrained via the Hurst exponent in Eqn. \ref{eq:LS directional structure functions}. This illustrates a more general feature of the turbulon representation of a turbulent flow: even if we do not use differences to represent turbulons, their mean amplitude remains constrained by Eqn. \ref{eq:LS directional structure functions}.
+
+
+\section{STEAM algorithm} \label{sect:steam algorithm details}
+
+Here we provide an explicit description of the STEAM algorithm for modeling moist static energy $h$, total water mixing ratio $q$, and the conserved turbulent flux $\varepsilon_h$.
+As a point of notation, there are three distinct types of averages requiring disambiguation. Consider a large ensemble of statistically independent turbulent flows. Any variable may be averaged along the spatial directions, which we denote $\langle \rangle_\mathbf{x}$. The result may in principle still have time dependence and differ between ensemble members. Alternatively, if we average only along the time direction, denoted by $\langle \rangle_t$, in principle the result may differ spatially and among ensemble members. Finally, we might average across ensemble members, which we denote $\langle \rangle_i$, which in principle could result in an ensemble mean that still varies in time and space. Unit vectors are denoted as $\hat{x}, \hat{y}, \hat{z}$, and we denote the gradient of some arbitrary field $f$
+\begin{align}
+  \nabla f = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2 + \left(\frac{\partial f}{\partial z}\right)^2}.
+\end{align}
+
+We assume the ensemble means $\langle h \rangle_t$ and $\langle q_t \rangle_t$ are known and horizontally uniform, in which case they may be simply represented by a 1D profile along the vertical direction. We also assume the outer scale $L$ and the spheroscale $l_s$ are known, and we consider logarithmically-spaced size classes for the turbulons $L, L/2, L/4, \dots, dx$, implying the outer scale must be a power of two factor of the horizontal grid resolution. 
+
+First, define the three-dimensional turbulon envelope shape $\mathfrak{T}_k$ as a function of size class $k$. For simplicity we will use a Mexican hat, defined as
+\begin{align}
+  \mathfrak{T}_k||r|| = \left(1-\frac{||r||^2}{k^2}\right)\exp \left(-\frac{||r||^2}{2k^2}\right) \label{apxeq:turbulon shape}
+\end{align}
+where $||r||$ is a vertically-stretched distance metric defined by
+\begin{align}
+  ||r|| = \left(x^{2} +y^{2} + \left(z\frac{k}{k_z}\right)^{2}\right)^{1/2}. \label{apxeq:stretched distance}
+\end{align}
+The turbulon aspect ratio $k_h/k_z$ is defined by Eqn. \ref{eq:turbulon aspect ratio scaling} such that 
+\begin{align}
+  k_z = l_s \left(\frac{k}{l_s}\right)^{H_z}. \label{apxeq:vertical turbulon size class}
+\end{align}
+Note that the value for the smallest turbulon size class should be chosen such that the smallest turbulons are reasonably well resolved; for the Mexican Hat envelope function, $k_\text{min}=dx$ is a reasonable choice but other shape functions for $\mathfrak{T}$ may require a different $k_\text{min}$.
+
+
+On a basic level, the three scalar fields $\varepsilon$, $h$ and $q$ are simulated by constructing a hierarchy of 3D arrays for each turbulon size class $k$, called $\widetilde{\varepsilon}_k$, $\widetilde{h}_k$ and $\widetilde{q}_k$, each representing the contribution of turbulons of a given size to the resulting scalar fields $\varepsilon$, $h$ and $q$. The simulation proceeds in a sequential manner, beginning with $k=L$ and progressively stepping down until the smallest $k=dx$ is reached. The final fields are the sum of the ensemble mean field and the perturbation due to each turbulon size class:
+\begin{align}
+  h = \langle h \rangle_t + \sum_k \widetilde{h_k}, \\
+  q = \langle q \rangle_t + \sum_k \widetilde{q_k}, \\
+  \varepsilon = \langle \varepsilon \rangle_t + \sum_k \widetilde{\varepsilon_k}.
+\end{align} 
+Note that $\widetilde{\varepsilon_k}$, $\widetilde{h}_k$, and $\widetilde{q}_k$ only represent transient fluctuations, i.e. $\langle\widetilde{\varepsilon}_k\rangle_t = 0$, $\langle\widetilde{h}_k\rangle_t = 0$, and $\langle\widetilde{q}_k\rangle_t = 0$.
+
+At each size class, a computationally efficient means of superimposing turbulons is use a convolution with the turbulon envelope function
+\begin{align}
+  \widetilde{h}_k &=  \mathfrak{T}_k * A_h, \\
+\widetilde{q}_k &=  \mathfrak{T}_k * A_q, \\
+\widetilde{\varepsilon}_k &=  \mathfrak{T}_k * A_\varepsilon
+\end{align}
+where $A_\Phi$ represents turbulon amplitudes as a function of $\mathbf{x}$ and $k$.
+For a given location $\mathbf{x}$ and size class $k_i$, the turbulon amplitude fields are defined in a similar way for the advected scalar fields $h$ and $q_t$, but differently for the turbulent flux $\varepsilon$ due to their different physical roles. Due to scale-by-scale flux conservation, the mean amplitude of perturbations in the flux field are independent of scale. But for a given location within a given realization, the amplitude of the flux perturbations varies widely, with the perturbation amplitude scaling with large-scale flux values. Specifically, amplitudes are computed as
+\begin{align}
+  A_\varepsilon &= \gamma_i \left(\langle \varepsilon\rangle_t + \sum_{k_i>k}\widetilde{\varepsilon_{k_i}}\right) \label{eq:flux at scale}
+\end{align}
+where $ \gamma_i$ are a unit, independent, independent, and identically distributed random variable with mean 1. The parenthetical factor in Eqn. \ref{eq:flux at scale} represents the large-scale flux at a given location. It is not clear exactly which distribution should be used for $\gamma_i$, but for simplicity we choose a lognormal and consider the effects of other choices in Appendix (). Once $A_k$ are computed at each step, the other amplitude factors are computed as
+\begin{align}
+A_h &= A_\varepsilon G_{h, k} C_{h, k}, \\
+A_q &= A_\varepsilon G_{q, k} C_{q, k},
+  \label{apxeq:amplitude propto gradient normalized} 
+\end{align}
+where $G_k$ and $C_k$ represent two distinct physical phenomena.
+
+The first factor $G_k$ represents the amount of structure in the scalar field that is available for mixing from Eqn. \ref{eq:variance redistribution rate}. For a given size class, $G$ is computed from the component of the field containing larger turbulons $\sum_{k>k_i} \widetilde{h}_k$ or $\sum_{k>k_i} \widetilde{q}_k$, respectively. It is defined as
+\begin{align}
+  G_{\Phi, k} =  g_{\Phi, k}/\langle g_{\Phi, k}\rangle_\mathbf{x};\qquad g_{\Phi, k} = \left( f-\Phi_\text{min}\right)\left(\Phi_\text{max} - f \right)| \nabla f|;\qquad
+  \begin{cases}
+      f= \langle \Phi\rangle_t + \sum_{k_i>k}\widetilde{\Phi_{k_i}};\qquad &k<L \\
+     f= \nabla \langle \Phi \rangle_t  \qquad &k=L.
+  \end{cases}
+\end{align}
+
+
+The second factor $C_k$ is a normalization factor representing the total domain-integrated variance that is to be distributed across scales. 
+The factors $C_k$ are constrained by the Lovejoy-Schertzer law of scalar advection (Eqn. \ref{eq:LS scalar directional structure functions}) such that
+\begin{align}
+    C_{\Phi, k} = C_{\Phi, L}\left(\frac{k}{L}\right)^{H_h}, \qquad H_h=1/3.\label{apxeq:mean turbulon amplitude}
+\end{align} 
+The overall normalization factor $C_L$
+represents the mean amplitude of the largest size class of turbulons. Physically, this represents the large-scale field variance that is available to cascade to smaller scales. This large-scale variance is computed using a convolution of the largest turbulon $\mathfrak{T}_L$ with the ensemble mean array $\langle\Phi\rangle_t$ using edge-padded boundaries (i.e., the profile is extended by repeating its boundary values). Specifically, assuming horizontal mean profiles $\langle \Phi\rangle_t(\mathbf{x}) = \langle \Phi\rangle_t(z)$,
+\begin{align}
+  C_{\Phi, L} = \frac{N_L}{N_p}\left| \mathfrak{T}_L(x=y=0) * \langle \Phi \rangle_t\right| \label{apxeq:norm factor computation} (FIX)
+\end{align}
+where $N_L = \lfloor L_z / k_{z,L} \rfloor$ is the number of outer-scale turbulons that fit vertically within the domain and $N_p$ is the number of profile samples. The factor $N_L / N_p$ converts the per-sample mean absolute response into a per-turbulon average, ensuring that $C_{\Phi,L}$ is independent of the profile sampling resolution. The normalization factors are, in general, height-dependent. The convolution in Eqn. \ref{apxeq:norm factor computation} is done using an algorithm that pads the edges below and above the domain with the lowest and highest profile value, respectively, and the resulting profile for $C_{\Phi, L}$ is interpolated during the simulation to each individual height level such that $C_{\Phi, k}$ also vary with height.
+
+
+For computational efficiency, the finest output grid is not used for all cascade steps. Because the field components $\widetilde{\varepsilon_k}$, $\widetilde{h}_k$, and $\widetilde{q}_k$ do not contain variance at scales smaller than $k$, they may be computed on a coarsened grid without significant loss of accuracy. This grid is specified by defining positive integer ``sparsity factors'' $s_x, s_y, s_z$ such that the working resolution for size class $k$ is $\Delta x_k = k/s_x$, $\Delta y_k = k/s_y$, $\Delta z_k = k_z/s_z$. When $s=1$, the grid spacing equals the turbulon size, which is the most aggressive coarsening that can be achieved. When $s > 1$, each turbulon spans $s$ grid cells along each dimension, providing better resolution of the turbulon shape at greater computational cost. On this coarsened grid, turbulon centers are placed every $s$ grid points:
+\begin{align}
+  \begin{cases}
+    S_k  = \mathcal{N}(0,1) \qquad &\text{at grid indices } (i,j,l) \text{ where } s_x | i,\; s_y | j,\; s_z | l \\
+    S_k = 0 \qquad &\text{otherwise}
+  \end{cases}
+\end{align}
+where $s | i$ denotes that $i$ is a multiple of $s$. For the simulations here, we use the most aggressive sparsity factors $s_x=s_y=s_z=1$ and fine that larger factors affect simulation output relatively little (not shown).
+
+We use horizontally periodic boundary conditions, and along the vertical direction we use edge-padded convolutions (i.e., the field is extended by repeating its boundary values). Physically, this means that turbulons near the Earth's surface may be ``cut off'' by the boundary but are otherwise unaffected. However, the statistics of $h$ and $q$ near the surface remain affected in a non-obvious way. Without a domain boundary at the surface, there would be turbulons centered at negative values of $z$ that affect $h$ and $q$ at positive $z$ given that some portion of such turbulons might extend to positive $z$. Imposing a boundary at the surface removes the influence of such turbulons and therefore the overall fields $h$ and $q$ are affected. It remains to be determined whether such an effect is physically realistic.
+
+
+\subsection{Recovering diagnostic variables from prognostic variables}
+
+Once three-dimensional fields of $h(\mathbf{r})$ and $q_t(\mathbf{r})$ are obtained, we recover temperature and water phase at each grid point. We assume the surface pressure $p_s$ is known and use the hyposmetric equation to diagnose the pressure at each level. The simulations described in the main text assume a constant value for the pressure at $z=z_{\min}$ of $1013\,\unit{hPa}$.
+
+For each column $(x, y)$, we proceed upward from $z = z_{\min}$. At each level, we first test for saturation by assuming all water is in vapor phase, giving a tentative temperature
+%
+\begin{equation}
+    T_{\mathrm{dry}} = \frac{h - L_v q_t - gz}{c_p}. \label{eq:Tdry}
+\end{equation}
+%
+We then compute the saturation mixing ratio $q_{v,\mathrm{sat}}(T_{\mathrm{dry}}, p)$ using Bolton's (1980) formula for the saturation vapor pressure over liquid water,
+%
+\begin{equation}
+    e_s(T) = 611.2 \exp\!\left(\frac{17.67\,(T - 273.15)}{T - 29.65}\right), \label{eq:bolton}
+\end{equation}
+%
+and
+%
+\begin{equation}
+    q_{v,\mathrm{sat}} = \frac{0.622\, e_s}{p - e_s}. \label{eq:qvsat}
+\end{equation}
+If $q_t \leq q_{v,\mathrm{sat}}(T_{\mathrm{dry}}, p)$, the grid cell is unsaturated: $T = T_{\mathrm{dry}}$, $q_v = q_t$, and $q_c = q_i = 0$.
+If $q_t > q_{v,\mathrm{sat}}(T_{\mathrm{dry}}, p)$, condensation has occurred and the temperature must account for latent heat release. We solve
+%
+\begin{equation}
+    h = c_p T + gz + L_v\, q_{v,\mathrm{sat}}(T, p) \label{eq:h_saturated}
+\end{equation}
+%
+for $T$ using Newton's method. Defining $f(T) = c_p T + L_v\, q_{v,\mathrm{sat}}(T, p) + gz - h$, the derivative is
+%
+\begin{equation}
+    f'(T) = c_p + L_v \frac{dq_{v,\mathrm{sat}}}{dT}. \label{eq:fprime}
+\end{equation}
+%
+Differentiating Eqns.~\ref{eq:bolton}--\ref{eq:qvsat},
+\begin{align}
+    &\frac{de_s}{dT} = \frac{4302.6\, e_s(T)}{(T - 29.65)^2}, \label{eq:des_dT} \\
+    &\frac{dq_{v,\mathrm{sat}}}{dT} = \frac{0.622\, p}{(p - e_s)^2} \frac{de_s}{dT}. \label{eq:dqvsat_dT}
+\end{align}
+%
+Thus,
+%
+\begin{equation}
+    f'(T) = c_p + \frac{0.622\, L_v\, p}{(p - e_s)^2} \cdot \frac{4302.6\, e_s(T)}{(T - 29.65)^2}. \label{eq:fprime_explicit}
+\end{equation}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% MATHEMATICA VERIFICATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% cp = 1004;
+% Lv = 2.5*10^6;
+% g = 9.81;
+% z = 5000;
+% h = 340000;
+% es[T_] := 611.2 Exp[17.67 (T - 273.15)/(T - 29.65)]
+% qvsat[T_, p_] := 0.622 es[T]/(p - es[T])
+
+% f[T_, p_] := 1004 T + 2.5*10^6 qvsat[T, p] + 9.81*5000 - 340000
+
+% fprime[T_, p_] := 
+%  1004 + 0.622*2.5*10^6*p/(p - es[T])^2*4302.6 es[T]/(T - 29.65)^2
+
+% (*Numerical derivative*)
+% fprimeNum[T_, p_] := (f[T + 0.001, p] - f[T - 0.001, p])/0.002
+
+% (*Test across reasonable T and p*)
+% Table[{T, p, fprime[T, p], 
+%     fprimeNum[T, p], (fprime[T, p] - fprimeNum[T, p])/
+%      fprimeNum[T, p]}, {T, 240, 300, 
+%     10}, {p, {50000, 80000, 101325}}] // Flatten[#, 1] & // TableForm
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+The unsaturated temperature $T_{\mathrm{dry}}$ serves as the initial guess, and convergence is typically achieved in 2--3 iterations (CHECK!!!!). The vapor mixing ratio is then $q_v = q_{v,\mathrm{sat}}(T, p)$ and the total condensate is $q_t - q_v$, which is partitioned into liquid and ice as
+%
+\begin{equation}
+    q_c = \lambda\,(q_t - q_v), \quad q_i = (1 - \lambda)\,(q_t - q_v), \label{eq:phase_partition}
+\end{equation}
+%
+where
+%
+\begin{equation}
+    \lambda = \max\!\Big(0,\, \min\!\Big(1,\, \frac{T - 235.15}{273.15 - 235.15}\Big)\Big) \label{eq:lambda}
+\end{equation}
+%
+following \citet{khairoutdinov2003}. Finally, the pressure at the next level is computed using the hypsometric equation,
+%
+\begin{equation}
+    p(z + \Delta z) = p(z) \exp\!\left(\frac{-g\,\Delta z}{R_d\, T_v}\right), \label{eq:hypsometric}
+\end{equation}
+%
+where $T_v = T(1 + 0.608\, q_v)$ is the virtual temperature.
+
+\subsubsection{Precipitation}
+
+TO BE REMOVED OR INCLUDED AS FUTURE WORK
+
+Once liquid and ice are diagnosed, they are then partitioned into precipitating and non-precipitating variants using a method similar to that used in SAM \citep{khairoutdinov2003}, with one main adaptation that is necessary for STEAM. 
+
+Given that STEAM is not time dependent, a simplistic precipitating/non-precipitating partioning scheme would neglect the nonzero fall rate of rain and snow. We can partially account for falling precipitation by separately computing precipitation that is due to turbulons of each size class. Larger size classes, associated with larger turbulent eddies with longer lifetimes, would represent turbulons that are on average older, and therefore any precipitation caused by such turbulons would have more time to fall relative to precipitation associated with smaller and younger turbulons. 
+
+To partition precipitating water into components associated with each turbulon size class, we first compute diagnostics for each size class individually using $\langle h\rangle_t + \sum_{k_i>k}\widetilde{h_{k_i}}$ and $\langle q_{t}\rangle_t + \sum_{k_i>k}\widetilde{q_{t_{k_i}}}$ as described above. Precipitating/non-precipitating water fraction is then diagnosed using the method described in \citet{khairoutdinov2003}. Finally, for each grid point and size class, a portion of the local cloud condensate is converted to precipitation and the precipitation is distributed throughout the column below as we now describe. 
+
+A turbulon of scale $k$ has lifetime
+\begin{align}
+  \tau_k = \frac{k}{\Delta v_k}
+\end{align}
+where, from Eqn. \ref{eq:LS directional structure functions},
+\begin{align}
+  \Delta v_k \propto k^{1/3}
+\end{align}
+implying
+\begin{align}
+  \frac{\tau_{k_1}}{\tau_L} = \left(\frac{k_1}{L}\right)^{2/3} \label{eq:eddy relative lifetime}
+\end{align}
+where $\tau_L$ is the lifetime of the largest-scale turbulons with $k=L$, defined as
+\begin{align}
+  \tau_L = \frac{L}{\Delta v_L}
+\end{align}
+where $\Delta v_L$ is the velocity associated with the largest scale ciculations. Here, we use $\Delta v_L=15\,\unit{m/s}$ as a representative value (cite dewitt). 
+
+We assume the precipitation production rate is uniform over the lifetime of a given turbulon. Once precipitation fall speeds $w_P$ are diagnosed following \citep{khairoutdinov2003}, precipitation produced at a given location $\mathbf{x}$ is distributed evenly over the column between $\mathbf{x}$ and $\mathbf{x}-\tau_k w_P \hat{z}$.
+
+\subsection{Pseudocode}
+
+Here we describe the STEAM algorithm in sufficient detail to reproduce it. The inputs are: horizontally uniform ensemble mean profiles $\langle h \rangle_t(z)$ and $\langle q_t \rangle_t(z)$ sampled at vertical spacing $\Delta z_p$; the spheroscale $l_s$; the outer scale $L$; the horizontal domain size $L_x, L_y$ and finest grid spacing $dx, dy$; the domain height $L_z$; and sparsity factors $s_x, s_y, s_z$ (positive integers, default 1). The outer scale must be a power-of-two multiple of $dx$.
+
+\subsubsection{Normalization}
+
+Logarithmically spaced size classes are defined as $k_i = L / 2^i$ for $i = 0, 1, \dots, \log_2(L/dx)$, proceeding from the outer scale down to the grid scale. For each $k_i$, the vertical turbulon size is $k_{z,i} = l_s(k_i / l_s)^{H_z}$ (Eqn.~\ref{apxeq:vertical turbulon size class}).
+
+
+The normalization constant $C_{\Phi, L}$ (Eqn.~\ref{apxeq:norm factor computation}) is computed from the mean profile of each scalar $\Phi \in \{h, q_t\}$. A one-dimensional Mexican hat kernel is constructed at the outer scale $k_{z,L}$ with a support of $\pm 5 k_{z,L}$. The profile is edge-padded by a half-kernel width on each end, then convolved with the kernel. We take the mean absolute response and scale by $N_L / N_p$, where $N_L = \lfloor L_z / k_{z,L} \rfloor$ is the number of outer-scale turbulons that fit vertically within the domain and $N_p$ is the number of profile samples. This converts the per-sample average into a per-turbulon average, ensuring that $C_{\Phi,L}$ is independent of the profile sampling resolution. The scale-dependent normalization $C_{\Phi,k}$ then follows Eqn.~\ref{apxeq:mean turbulon amplitude}.
+
+\subsubsection{Cascade loop}
+
+The perturbation fields $\widetilde{h}$ and $\widetilde{q_t}$ are initialized to zero. The algorithm then iterates over size classes from large to small ($k = L, L/2, \dots, dx$). At each step, the following operations are performed.
+
+\paragraph{Coarsened grid.} Because turbulons of size $k$ need not be resolved at the finest grid spacing, we coarsen the working grid to $\Delta x_k = k/(2s_x)$, $\Delta y_k = k/(2s_y)$, $\Delta z_k = k_z/(2s_z)$. When $s = 1$, the grid spacing equals half the turbulon size, providing Nyquist sampling of the peak-PSD wavelength $k$; when $s > 1$, each turbulon is resolved by $2s$ grid cells along each dimension at proportionally greater computational cost. The horizontal grid dimensions $n_{x,k} = L_x / \Delta x_k$ and $n_{y,k} = L_y / \Delta y_k$ are guaranteed to be exact integers provided that $L_x$ and $L_y$ are integer multiples of $L$ and that $L/dx$ is a power of $k_\text{factors}$.
+
+The vertical dimension requires more care. Because $k_z = l_s(k/l_s)^{H_z}$ is irrational in general, there is no grid spacing that simultaneously tiles the domain exactly and equals $k_z/(2s_z)$. Instead, we first compute the number of turbulons required to span the domain, $n_{\text{turb},z} = \lceil L_z / k_z \rceil$, set $n_{z,k} = 2 s_z \cdot n_{\text{turb},z}$, and define $\Delta z_k = L_z / n_{z,k}$ exactly. Since $n_{\text{turb},z} \geq L_z / k_z$, it follows that $\Delta z_k \leq k_z / (2 s_z)$, so the vertical resolution is guaranteed to be at least as fine as the Nyquist target while the domain is tiled exactly with no rounding error.
+
+\paragraph{Interpolation.} If the perturbation fields from the previous iteration have a different shape than the current coarsened grid, they are trilinearly interpolated to the current resolution. The mean profiles are also linearly interpolated to the current vertical grid.
+
+\paragraph{Gradient computation.} The normalized gradient $G_\Phi$ is computed from the sum of the mean profile and the perturbation accumulated so far. Horizontal gradients use periodic central differences (consistent with the periodic horizontal boundary conditions), while the vertical gradient uses one-sided differences at the boundaries and central differences in the interior. The gradient magnitude is then normalized by its spatial mean, so that $\langle G_\Phi \rangle_\mathbf{x} = 1$.
+
+\paragraph{Sparse noise.} A single noise field $S_k$ is drawn from $\mathcal{N}(0,1)$ on the coarsened grid, with nonzero values placed every $s_x$ grid points in $x$, every $s_y$ in $y$, and every $s_z$ in $z$ (i.e., every $k$ in physical space regardless of $s$). This noise field is shared between $h$ and $q_t$, reflecting the physical constraint that a single eddy transports both scalars. All other entries are zero.
+
+\paragraph{Convolution.} A compact 3D Mexican hat kernel $\mathfrak{T}_k$ is constructed at the current scale using the anisotropic norm (Eqn.~\ref{apxeq:canonical anisotropic norm}), truncated at a support of 10 times the turbulon size along each axis, and forced to have zero mean. The kernel may be larger than the coarsened field in the horizontal dimensions; if so, it is periodically folded (aliased) onto the field period before convolution. The amplitude field $A_\Phi = G_\Phi \cdot S_k \cdot C_{\Phi,k}$ is then convolved with this kernel, using wrap-padding for $x$ and $y$ (periodic boundary) and edge-padding for $z$. The result is added to the perturbation field $\widetilde{\Phi}$.
+
+\subsubsection{Final fields}
+
+After the last iteration ($k = dx$), the perturbation fields are at the finest resolution. The output fields are $h = \langle h \rangle_t + \widetilde{h}$ and $q_t = \langle q_t \rangle_t + \widetilde{q_t}$. Temperature, water vapor, liquid, ice, and pressure are then recovered as described in Sect.~\ref{sect:steam algorithm details}.
+
+
+
+\subsection{Spheroscale calculations}
+
+To determine the variation of the spheroscale as a function of location, we estimate its value at points using Haar fluctuations near the grid resolution. From Eqn. (), the fluxes $\varphi_h$ and $\varphi_v$ are estimated as estimated as
+\begin{align}
+  \varphi_h(\mathbf(x)) = \frac{\Delta \phi(\Delta x, \mathbf{x})}{\Delta x^{1/3}} \\
+  \varphi_v(\mathbf(x)) = \frac{\Delta \phi(\Delta z, \mathbf{x})}{\Delta z^{3/5}}
+\end{align}
+where $\Delta x$ and $\Delta z$ equal some even integer $n$ multiplied by the respective grid resolution $dx$ or $dz$. Here, $n=2$. We define $\Delta x$ and $\Delta z$ using Haar fluctuations
+\begin{align}
+  \Delta \phi (\mathbf{x}) = \frac{1}{n}\Bigg|\left(\sum_{i=1}^{i=n/2}\phi\left(\mathbf{x} - \left(i-\frac{1}{2}\right)dx \mathbf{\hat{x}}\right) - \sum_{i=1}^{i=n/2}\phi\left(\mathbf{x} + \left(i-\frac{1}{2}\right)dx \mathbf{\hat{x}}\right)\right)\Bigg| \\
+  \Delta \phi (\mathbf{z}) = \frac{1}{n}\Bigg|\left(\sum_{i=1}^{i=n/2}\phi\left(\mathbf{z} - \left(i-\frac{1}{2}\right)dz \mathbf{\hat{z}}\right) - \sum_{i=1}^{i=n/2}\phi\left(\mathbf{z} + \left(i-\frac{1}{2}\right)dz \mathbf{\hat{z}}\right)\right)\Bigg|
+\end{align}
+We use $n=4$. Note that, here, $\mathbf{x}$ is located at the central grid cell boundary around which the averages are computed. The spheroscale $l_s$ is defined as the scale at which $\phi(\Delta x) = \phi(\Delta z)$, implying $\varphi_h l_s^{1/3} = \varphi_v l_s^{3/5}$ and
+\begin{align}
+  l_s(\mathbf{x}) = \left(\frac{\varphi_v(\mathbf{x})}{\varphi_h(\mathbf{x})}\right)^{1/(1/3-3/5)}.
+\end{align}
+
+\section{Physical basis for the turbulon flux component} \label{sect:flux physical basis}
+
+The flux cascade introduced in Sect. () rests on three physical claims, in increasing order of subtlety: that there exists a flux that remains conserved across scales even in a cloudy atmosphere; that perturbations to this flux must be proportional to the flux at the next-larger scale \emph{at that location}; and that the proportionality constant is calibrated at the outer scale, where it sets the strength of the intermittency. This appendix presents the physical argument for each claim in turn. It also substantiates the statement in Sect. () that the horizontal component of the cascade is unaffected by buoyancy.
+
+\subsection{Identity and conservation of the flux} \label{sect:flux conservation}
+
+In Kolmogorov's theory of isotropic turbulence, the quantity passed conservatively from large scales to small is the flux of kinetic energy, and its conservation is what fixes the $-5/3$ spectrum. In the atmosphere, buoyancy complicates this picture by continually converting kinetic energy to potential energy and back \citep{bolgiano1959,obukhov1959,schertzer1985}. In a cloudy atmosphere the complication is severe, because buoyancy is thermodynamically composite -- temperature anomalies, water vapor, condensate loading, and latent heating all contribute -- so any conservation argument that requires an explicit accounting of potential energy, for example through a fixed buoyancy frequency, fails wherever clouds form.
+
+There is, however, one flux that buoyancy cannot touch, for a reason that is structural rather than asymptotic: gravity acts only along the vertical. The horizontal momentum equation,
+\begin{align}
+  \frac{\partial \mathbf{u}_h}{\partial t} + \mathbf{u}\cdot\nabla\mathbf{u}_h = -\nabla_h p - f_c\,\hat{\mathbf{z}}\times\mathbf{u}_h + \nu\nabla^2\mathbf{u}_h, \label{apxeq:horizontal momentum}
+\end{align}
+contains no buoyancy term, and this holds whatever buoyancy consists of: temperature anomalies, virtual effects, condensate loading, precipitation drag, and radiatively driven density anomalies all force the vertical momentum equation only. Buoyancy can influence horizontal motion through exactly two indirect routes: advection by the vertical wind (the $w\,\partial_z \mathbf{u}_h$ part of the second term), which transports horizontal momentum but cannot create it, and the pressure-gradient force.
+
+The corresponding statement for the cascade follows from the scale-by-scale energy budget -- the same budget that underlies third-order structure function analyses of atmospheric observations \citep{lindborg1999,cho2001}. For statistically homogeneous and stationary conditions (Boussinesq; density variations matter only at separations approaching the pressure scale height), the budget of horizontal-wind variance across a separation vector $\mathbf{r}$ reads
+\begin{align}
+  \nabla_{\mathbf{r}}\cdot\big\langle \delta\mathbf{u}\,|\delta\mathbf{u}_h|^2 \big\rangle = -4\,\varepsilon_h - 2\big\langle \delta p\;\delta(\partial_z w) \big\rangle, \label{apxeq:scale budget}
+\end{align}
+where $\delta$ denotes a difference across $\mathbf{r}$, e.g. $\delta\mathbf{u}_h = \mathbf{u}_h(\mathbf{x}+\mathbf{r}) - \mathbf{u}_h(\mathbf{x})$, and $\varepsilon_h$ is the mean dissipation rate of horizontal-wind kinetic energy. The Coriolis force has dropped out exactly, because it does no work. The left-hand side is the divergence, in separation space, of the flux of horizontal kinetic energy through scale $r$; where the right-hand side is constant, integration gives $\langle \delta u_L |\delta\mathbf{u}_h|^2\rangle \propto -\varepsilon_h\, r$ (with $\delta u_L$ the component of $\delta\mathbf{u}$ along $\mathbf{r}$), the analogue of Kolmogorov's four-fifths law: the same flux passes through every scale.
+
+Buoyancy is absent from Eqn. \ref{apxeq:scale budget}. Its only foothold is the final term, the two-point form of the pressure--strain redistribution familiar from the turbulence kinetic energy budget: buoyancy generates vertical-velocity variance, and pressure converts a portion of it into horizontal motion. This term plays the role in Eqn. \ref{apxeq:scale budget} that mechanical stirring plays in classical Kolmogorov turbulence: it vanishes as $r \to 0$ and saturates at the separations where the conversion is active. Provided the conversion operates at the energy-containing scales, Eqn. \ref{apxeq:scale budget} reduces within the inertial range to a constant-flux law in which buoyancy determines the \emph{value} of the flux but never appears in its form. Observations support this directly: third-order structure functions of horizontal wind measured from aircraft are linear in $r$ throughout the mesoscale range \citep{cho2001,lindborg2001}, which is precisely the statement that the flux of horizontal kinetic energy is scale-independent in the real, moist atmosphere. Simulations of strongly stratified turbulence show the same constancy \citep{lindborg2006}.
+
+We therefore identify the flux carried by the turbulons with $\varepsilon_\ell(\mathbf{x})$, the local flux of horizontal kinetic energy: the rate at which kinetic energy of horizontal motion is handed from scales larger than $\ell$ to scales smaller than $\ell$ in the neighborhood of $\mathbf{x}$. Its ensemble mean is scale-independent, $\langle \varepsilon_\ell \rangle = \varepsilon_h$; this is the quantity denoted $\varepsilon$ in Eqn. \ref{eq:LS directional structure functions}. Two features of this identification matter for the model. First, conservation holds regardless of the nature of buoyancy, so the flux component requires no modification between dry, cloudy, and precipitating regimes. Second, conservation is an odd-moment (third-order) statement and is therefore immune to intermittency: however strongly the flux field itself concentrates, its mean remains pinned to $\varepsilon_h$. A cascade model must be anchored to a quantity whose conservation survives the model's own intermittency; this one qualifies.
+
+\subsection{Why flux perturbations are proportional to the local larger-scale flux} \label{sect:flux locality}
+
+STEAM sets the amplitude of each flux turbulon proportional to the flux at the next-larger scale at the same location (Sect. ()). This is required, not merely convenient, and the requirement rests on three properties of the flux: it is conserved, it is positive, and the inertial range supplies no second flux against which to compare it.
+
+Some care is needed about what is conserved, because the flux and the energy are different objects. Energy conservation, applied to the band of scales between $2\ell$ and $\ell$ within some region, reads
+\begin{align}
+  \frac{\partial E_b}{\partial t} = \Pi_{2\ell} - \Pi_{\ell}, \label{apxeq:band budget}
+\end{align}
+where $E_b$ is the kinetic energy held by eddies of the band and $\Pi_\ell$ is the rate at which energy passes through scale $\ell$. Conservation by itself therefore ties the \emph{difference} of the fluxes bounding a band to the storage within it; it does not equate them. Two further properties of the inertial range close the gap. First, the band has no sources or sinks: dissipation acts far below, forcing far above, and -- by Sect. \ref{sect:flux conservation} -- buoyancy cannot source horizontal kinetic energy in between. Second, the band cannot hoard: the energy it stores \emph{is} the amplitude of its eddies, and the rate at which eddies hand energy down increases with their amplitude ($\Pi \sim E_b^{3/2}/\ell$; more energetic eddies overturn faster), so a band receiving more than it transmits grows in amplitude until it transmits what it receives. The adjustment takes about one eddy turnover time, $\tau_\ell \propto \ell^{2/3}$ (Eqn. \ref{eq:eddy relative lifetime}). In a statistically steady state the storage term therefore averages away, and the same flux passes through every scale. Note how marginal the equilibration is: the turnover times of adjacent size classes differ only by the factor $2^{2/3} \approx 1.6$, so each generation tracks the supply from above only loosely. This looseness is where the randomness of the cascade, introduced below, physically originates.
+
+The same budget localizes in space, because energy is transported by the eddies themselves at speeds of order the eddy velocity: over the lifetime of an eddy of size $2\ell$, its descendants -- and the energy they carry -- remain within roughly its own extent. The energy that cascades through scale $\ell$ within a parent's footprint is therefore the energy that parent locally supplies, and, averaging over realizations of the small scales while the larger scales are held fixed,
+\begin{align}
+  \big\langle \varepsilon_\ell \,\big|\, \varepsilon_{2\ell} \big\rangle = \varepsilon_{2\ell}: \label{apxeq:local conservation}
+\end{align}
+the sub-eddy flux averages to the \emph{local} parent flux, not to the global mean. (Equivalently, and exactly: if the cascaded quantity is taken to be the flux \emph{density} -- the throughput per unit mass of a region, which in a steady cascade equals the dissipation destined for that region -- then the parent value is by construction the average of the values of its children, and Eqn. \ref{apxeq:local conservation} is an identity of nested averages. This is the object on which cascade multipliers are defined and measured, and it has the additional virtue of being positive, unlike the instantaneous pointwise transfer, which can locally run upscale.) This is why ``proportional to the local larger-scale value'' cannot be weakened to ``correlated with it'': any weaker dependence would make the sub-eddies of energetic regions systematically carry less energy than those regions supply, and quiescent regions more, violating the local budget. Conservation fixes the conditional mean to be exactly linear in the parent. The idea that local statistics are governed by the locally averaged flux is Kolmogorov's refined similarity hypothesis \citep{kolmogorov1962}; what the conservation argument adds is that the dependence of the flux on itself across scales must be linear.
+
+What conservation does not fix is how \emph{unevenly} the parent's supply is divided. Here the other two properties act. Positivity requires the perturbations to scale down where the flux is small: a positive quantity cannot absorb zero-mean perturbations of fixed absolute size, since its quiet regions would be driven negative, so the perturbation amplitude must vanish with the local value. (An additive cascade with field-independent amplitudes still conserves the conditional mean in the sense of Eqn. \ref{apxeq:local conservation}; what it violates is positivity, and by the central limit theorem its fluctuations average toward a Gaussian. Positivity is what forbids a conserved flux from being smoothed in this way.) Define the division ratio $W = \varepsilon_\ell/\varepsilon_{2\ell}$, the fraction of the locally supplied flux carried forward at a given point; Eqn. \ref{apxeq:local conservation} states $\langle W \rangle = 1$. Could the \emph{distribution} of $W$ depend on the parent's value -- strong parents dividing their throughput more evenly than weak ones, say? For it to do so, the inertial-range dynamics would need a second quantity with the dimensions of a flux against which to judge whether a given parent is strong: molecular dissipation is excluded by locality in scale, the domain size and the domain-mean flux by locality in space, and buoyancy by Sect. \ref{sect:flux conservation}. With nothing to compare against, the distribution of $W$ must be the same at every location and every scale. This is the same style of argument, applied to fluxes rather than to lengths, that underlies the $-5/3$ law itself. Such division ratios were introduced by Novikov under the name of breakdown coefficients \citep{novikov1990}, and their distributions, measured in laboratory turbulence, are indeed nearly independent of the parent value \citep{chhabra1992}.
+
+Together, these results give
+\begin{align}
+  \varepsilon_\ell = W\,\varepsilon_{2\ell}, \qquad \langle W \rangle = 1, \qquad W \;\, \mathrm{independent\ of}\;\, \varepsilon_{2\ell}, \label{apxeq:multiplier law}
+\end{align}
+so that after $n$ cascade steps the flux is a product of independent random factors: a conserved multiplicative cascade \citep{mandelbrot1974}, obtained here as a consequence of local conservation and scale invariance rather than as a postulate. In STEAM the same structure is built additively: each flux turbulon carries a perturbation $c\,\xi\,\varepsilon_{2\ell}$, with $\xi$ a zero-mean, unit-variance random amplitude, so that $\varepsilon_\ell = \varepsilon_{2\ell}(1 + c\,\xi)$ and $W = 1 + c\,\xi$.
+
+Intermittency now follows necessarily, rather than as an additional hypothesis. Because conservation pins $\langle W \rangle = 1$ at every step, fluctuations in the division cannot relax away as the cascade proceeds; they can only compound. Dissipation is therefore not only localized in scale -- the standard picture -- but becomes progressively localized in location, concentrating onto ever sparser regions. (Nor is the randomness of $W$ an extra postulate: it is the looseness of the octave-to-octave equilibration noted below Eqn. \ref{apxeq:band budget}.) The moments of the flux then scale as $\langle \varepsilon_\ell^q \rangle \propto \ell^{-K(q)}$ with $K(q) = \log_2\langle W^q \rangle$, and the intermittency parameter is
+\begin{align}
+  C_1 = K'(1) = \frac{\big\langle (1+c\,\xi)\ln(1+c\,\xi) \big\rangle}{\ln 2} \approx \frac{c^2}{2\ln 2} \label{apxeq:C1 from c}
+\end{align}
+to leading order in $c$. (In the turbulon implementation, overlap between neighboring envelopes reduces the effective variance at a point by a geometric packing factor $\kappa$ of order unity, giving $C_1 \approx \kappa\, c^2/(2\ln 2)$; simulations give $\kappa \approx 0.6$ for the Mexican hat envelope at the default turbulon spacing.)
+
+\subsection{What sets the proportionality constant} \label{sect:flux calibration}
+
+Equation \ref{apxeq:multiplier law} leaves exactly one dimensionless number free: $c$, the magnitude of a flux perturbation relative to the local larger-scale flux. In a purely multiplicative formulation the question of what sets $c$ never arises, because the multipliers are dimensionless from the outset. The additive construction, by contrast, must specify the absolute amplitude of its perturbations somewhere -- while Sect. \ref{sect:flux locality} forbids absolute, field-independent amplitudes everywhere below the outer scale. The calibration can therefore only occur at the top of the cascade. At the first step, the ``flux at the larger scale'' is the domain-mean flux itself, so the absolute magnitude of the first flux perturbations is $\sigma_L = c\,\langle\varepsilon\rangle$, or
+\begin{align}
+  c = \frac{\sigma_L}{\langle \varepsilon \rangle}, \label{apxeq:c calibration}
+\end{align}
+the heterogeneity of the flux at the outer scale measured relative to the mean flux. Scale invariance then carries this single number down the hierarchy, and by Eqn. \ref{apxeq:C1 from c} it sets the intermittency:
+\begin{align}
+  C_1 \approx \frac{\kappa}{2\ln 2}\left(\frac{\sigma_L}{\langle \varepsilon \rangle}\right)^{2}. \label{apxeq:C1 from outer scale}
+\end{align}
+In this picture, the strength of atmospheric intermittency is not a universal constant of turbulence: it is the relative unevenness of the energy supply at the outer scale. For a given absolute heterogeneity of the large-scale forcing, a larger mean dissipation rate implies \emph{weaker} intermittency. To our knowledge this consequence of the additive construction has not been noted before, and it is testable: it predicts that $C_1$ varies between meteorological regimes with the relative heterogeneity of the large-scale flux, rather than taking a single universal value.
+% TODO (appendix): wire the three "Sect. ()" placeholders to the main-text flux section once written; \kappa \approx 0.6 is measured from the flux-cascade branch runs (FLUX_SCALE=0.5 -> C1~0.10; 0.1 -> 0.0047); the novelty sentence in the last paragraph should survive a literature sweep before submission.
+
+\section{Complete specification of the LES-ensemble comparison}
+\label{sect:rcemip analysis}
+
+This appendix specifies, in full, the analysis behind the comparison of
+STEAM to the RCEMIP cloud-resolving ensemble
+\citep[][]{wing2018,wing2020}. The intent is that the comparison could be
+reproduced exactly from this description alone. Two independent
+comparisons are described: one against the elongated-channel
+(\texttt{RCE\_large300}) configurations of ten models, used for the
+profile, distribution, and correlation-dimension statistics, and one
+against the small-domain (\texttt{RCE\_small\_les300}) configurations of
+four models, used primarily for object size distributions, for which the
+channel geometry is too narrow.
+
+\subsection{Comparison data}
+\label{sect:rcemip data}
+
+\paragraph{Channel ensemble.} Ten models provide three-dimensional
+snapshot output for the 300~K channel configuration: SAM, CM1, three Met
+Office Unified Model variants (CASIM, RA1-T, RA1-T-nocloud), MESONH,
+SCALE, UCLA-CRM, and two ICON variants (LEM and NWP). Domains are
+channels of approximately $6000\times 400$~km$^2$ at 3~km horizontal
+spacing ($1984$--$2048$ cells long, $128$--$144$ cells wide), with
+model-specific stretched vertical grids ($74$--$98$ levels to
+$33$--$39.5$~km). Each model supplies three snapshots separated by ten
+days (days 80, 90, and 100 of the simulation; days 93, 103, and 113 for
+the UM variants; days 80, 90, and 99 for ICON-LEM). A third ICON variant
+(AES) was excluded because its archived output contains neither a height
+coordinate nor pressure, so moist static energy cannot be constructed.
+
+\paragraph{Small-domain ensemble.} Four models provide small-domain
+output: SAM ($480^2$ cells), CM1 ($540^2$), DALES ($504^2$), and
+ICON-LEM ($500^2$), all at 200~m horizontal spacing (domains
+$96$--$108$~km on a side) with $146$--$156$ stretched vertical levels.
+The final ten daily snapshots of each run are used (days 41--50), except
+ICON-LEM, whose archive holds only four snapshots (days 25--28), all of
+which are used.
+
+\paragraph{Variable handling.} All humidities are converted to mixing
+ratios before any further computation. Most models archive specific
+quantities (mass per unit moist air, CMOR names \texttt{hus},
+\texttt{clw}, \texttt{cli}); these are converted as $r = q/(1-q)$, with
+the vapor-only denominator (the neglected condensate contribution to
+moist-air mass changes $r$ by ${\lesssim}2\%$ where condensate is
+largest). SAM archives vapor as a mixing ratio directly. Cloud liquid
+and ice are taken from \texttt{clw} and \texttt{cli} (UCLA names ice
+\texttt{ice}); precipitating condensate is excluded everywhere, because
+several models do not archive it. SAM's small-domain (native-format)
+output archives only combined non-precipitating condensate
+(\texttt{QN}); it is partitioned into liquid and ice with the same
+temperature ramp STEAM uses internally,
+$\lambda = \mathrm{clip}\!\left[(T - 235.15)/(273.15 - 235.15),\,0,\,1\right]$,
+$q_c = \lambda\,q_n$, $q_i = (1-\lambda)\,q_n$, so that the partition is
+identical on both sides of that comparison.
+
+Total water is $q_t = r_v + r_c + r_i$ and moist static energy is
+$h = c_p T + g z + L_v r_v$ with $c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$,
+$g = 9.81$~m\,s$^{-2}$, $L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's
+constants, applied identically to every model).
+
+\paragraph{Model-specific recoveries.} Three archives require special
+handling. (i)~The ICON files carry only a level \emph{index} (top-down)
+as their vertical coordinate; physical height is recovered by inverting
+the frozen moist static energy field distributed alongside them,
+$z = (f_{\mathrm{mse}} - 1004.64\,T - 2500800\,q_v + 333700\,q_i)/9.80665$
+(the constants of that archive, used only for this recovery), averaged
+horizontally at one snapshot; the level-wise horizontal standard
+deviation of the recovered height is required to be below 50~m.
+(ii)~MESONH's files carry no coordinates at all; the 74-level RCEMIP
+standard grid archived by SCALE is assumed (the two agree level-for-level
+where checkable). (iii)~UCLA-CRM stores height as the fastest dimension
+and includes a below-ground ghost level, which is dropped. Where a model
+archives no pressure (DALES, MESONH, SCALE, UCLA-CRM), the RCEMIP
+analytic-sounding surface pressure of 1014.8~hPa is used to initialize
+STEAM; otherwise the horizontal mean of the model's lowest-level pressure
+is used. All reductions of single-precision fields use double-precision
+accumulators.
+
+One caveat is carried through the interpretation: MESONH's archived
+channel fields are anomalously smooth relative to every other member
+(near-delta anomaly distributions at 4~km), which starves the STEAM run
+matched to it; whether this reflects the model or the archival processing
+cannot be determined from the archive, and MESONH is therefore excluded
+from the shape-sensitive statistics (anomaly distributions, correlation
+dimension, size distributions).
+
+\subsection{STEAM configuration}
+\label{sect:rcemip steam config}
+
+One deliberately untuned configuration is used throughout; nothing is
+calibrated to any individual host. The spheroscale is a constant 10~m at
+all heights, with turbulons isotropic below it
+(\texttt{piecewise\_isotropic\_below\_spheroscale}); the horizontal Hurst
+exponent is $H_h = 1/2$ and the vertical-anisotropy exponent
+$H_z = 5/9$; turbulons use the Mexican-hat envelope; one scale class per
+octave. The turbulon flux component is active with its defaults: flux
+increments drawn from extremal ($\beta = -1$) L\'evy noise with
+$\alpha = 1.8$ in four substeps per scale class, with noise amplitude
+$c = 0.21$, pegged so that the realized flux intermittency is
+$C_1 = 0.1$ (the calibration $C_1 = 1.674\,c^{1.8}$ inverted at
+$C_1 = 0.1$).
+
+For the channel comparison STEAM runs on a $2048\times 128$ grid at
+$\Delta x = 3$~km ($6144\times 384$~km$^2$, matching the host geometry
+class) with outer scale $L = 96$~km, giving five scale classes (96, 48,
+24, 12, 6~km). The domain is periodic; the 384~km cross-channel extent
+holds four outer-scale tiles. For the small-domain comparison STEAM runs
+on a $512^2$ grid at $\Delta x = 200$~m ($102.4$~km$^2$, one outer-scale
+tile) with $L = 102.4$~km, giving nine scale classes (102.4~km down to
+400~m). In both cases the simulated depth is 20~km, and the vertical
+grid follows the model's internal rule
+$\Delta z(z) = k_z(z)/2$ with $k_z$ set by the anisotropy relation at
+each scale class.
+
+Each STEAM run is initialized from one host snapshot: the host's
+horizontal-mean $h(z)$ and $q_t(z)$, interpolated to a uniform 50~m
+profile grid, plus its surface pressure as above. Soft-clamp bounds are
+$h \in [\min h(z) - 10\,c_p,\ \max h(z) + 10\,c_p]$ and
+$q_t \in [0,\ \max(0.03,\ 1.5 \max q_t(z))]$~kg\,kg$^{-1}$. One
+realization is run per host snapshot (three per model for the channel,
+ten --- four for ICON-LEM --- for the small domain), with a distinct seed
+per snapshot, so host and STEAM sample counts match by construction.
+
+\subsection{Profile statistics and anomaly distributions}
+\label{sect:rcemip stats}
+
+Per-level statistics are computed on each case's native vertical grid:
+horizontal mean and variance of $h$ and $q_t$, and cloud fraction
+defined as the areal fraction with non-precipitating condensate
+$q_c + q_i > 0.01$~g\,kg$^{-1}$. For comparison across grids all
+profiles are linearly interpolated to a common 100~m grid spanning
+0--20~km (levels outside a model's native range are excluded, not
+extrapolated), and snapshot-averaged.
+
+Differences are presented as $\Delta = $ STEAM $-$ host, one curve per
+model. The yardstick shading is built from the \emph{pairwise}
+inter-host differences: for each level, all ordered pairs
+host$_i$ $-$ host$_j$ ($i \neq j$; 90 pairs for ten models) are formed
+from the snapshot-averaged profiles, and the shading shows their full
+range and interquartile (25--75\%) range. Pairwise differences, rather
+than deviations from the ensemble mean, are the like-for-like reference
+for a pairwise quantity such as $\Delta$; deviations from the mean are
+smaller by roughly $\sqrt{2}$ and would overstate STEAM's exceedances.
+
+Anomaly probability densities are computed at the model level nearest
+4~km and 10~km: at each level the horizontal mean of that snapshot is
+subtracted, all snapshots of a case are pooled, and the pooled sample is
+histogrammed in 150 equal-width bins spanning the pooled sample's full
+range (no percentile capping, which would truncate the tails that are
+precisely the point of the comparison), normalized to a density.
+
+\subsection{Optical-depth masks, correlation dimension, and size
+distributions}
+\label{sect:rcemip fractal}
+
+Cloud masks are built from vertically integrated optical depth computed
+from the liquid and ice water paths with the SAM bulk-optics
+relationships (as implemented in the \texttt{cloudyview} package);
+precipitating species are excluded as above. A column is cloudy where
+$\tau > 1$. Masks are binary arrays on each case's native horizontal
+grid; the three (channel) or up to ten (small-domain) masks of a case
+are always analyzed together as one ensemble, never averaged
+one-at-a-time.
+
+The ensemble correlation dimension $D_2$ is computed with
+\texttt{objscale} \citep{dewitt2026acp} using the sandbox estimator at
+R\'enyi order $q = 2$ on the one-sided edge set of the masks --- the
+Grassberger--Procaccia correlation integral --- with pair separations
+binned between a minimum of two pixels (6~km) and a maximum of one-third
+the narrow domain extent (${\approx}127$~km) for the channel, and the
+package defaults (8 pixels = 1.6~km to one-third of ${\approx}96$~km =
+32~km) for the small domains; sandbox centers are subsampled by a factor
+of ten. The two-pixel channel minimum admits pixel-scale discretization
+bias at the small end of the range and is the price of retaining one
+decade of scaling in a 128-cell-wide mask; the small-domain analysis is
+free of this compromise. The correlation integrals themselves are
+inspected for linearity in log--log space before the fitted slope is
+reported as a dimension.
+
+Object size distributions use the truncation-corrected estimator of
+\citet{dewitt2024acp}: objects are 4-connected components of the mask;
+areas are binned logarithmically; bins in which more than half the
+objects touch the domain boundary, or which hold fewer than 30 objects,
+are excluded; the power-law exponent is the least-squares slope of
+$\log_{10}$ counts against $\log_{10}$ area over the surviving bins. The
+host channel domains are periodic, but boundary-touching objects are
+treated as truncated rather than wrapped --- a conservative choice that
+discards, rather than reconnects, objects crossing the seam. For the
+channel geometry the surviving range is only ${\approx}1.5$ decades of
+area and the ten hosts' fitted exponents disagree by a factor of four
+(0.6--2.3), so the channel ensemble does not constrain the exponent at
+this domain size --- consistent with the finite-domain analysis of
+\citet{dewitt2024acp} --- and the small-domain ensemble, with objects
+resolved from 400~m, is the meaningful size-distribution comparison.
+
+
+\section{Comparison to the Fractionally Integrated Flux model}  \label{sect:comparison to FIF}
+
+
+
+% \noappendix       %% use this to mark the end of the appendix section. Otherwise the figures might be numbered incorrectly (e.g. 10 instead of 1).
+
+%% Regarding figures and tables in appendices, the following two options are possible depending on your general handling of figures and tables in the manuscript environment:
+
+%% Option 1: If you sorted all figures and tables into the sections of the text, please also sort the appendix figures and appendix tables into the respective appendix sections.
+%% They will be correctly named automatically.
+
+%% Option 2: If you put all figures after the reference list, please insert appendix tables and figures after the normal tables and figures.
+%% To rename them correctly to A1, A2, etc., please add the following commands in front of them:
+
+% \appendixfigures  %% needs to be added in front of appendix figures
+
+% \appendixtables   %% needs to be added in front of appendix tables
+
+%% Please add \clearpage between each table and/or figure. Further guidelines on figures and tables can be found below.
+
+
+
+% \authorcontribution{TEXT} %% this section is mandatory
+
+% \competinginterests{TEXT} %% this section is mandatory even if you declare that no competing interests are present
+
+% \disclaimer{TEXT} %% optional section
+
+% \begin{acknowledgements}
+% TEXT
+% \end{acknowledgements}
+
+
+
+
+%% REFERENCES
+
+
+%% Since the Copernicus LaTeX package includes the BibTeX style file copernicus.bst,
+%% authors experienced with BibTeX only have to include the following two lines:
+%%
+\bibliographystyle{copernicus}
+\bibliography{sources.bib}
+%%
+%% URLs and DOIs can be entered in your BibTeX file as:
+%%
+%% URL = {http://www.xyz.org/~jones/idx_g.htm}
+%% DOI = {10.5194/xyz}
+
+
+%% LITERATURE CITATIONS
+%%
+%% command                        & example result
+%% \citet{jones90}|               & Jones et al. (1990)
+%% \citep{jones90}|               & (Jones et al., 1990)
+%% \citep{jones90,jones93}|       & (Jones et al., 1990, 1993)
+%% \citep[p.~32]{jones90}|        & (Jones et al., 1990, p.~32)
+%% \citep[e.g.,][]{jones90}|      & (e.g., Jones et al., 1990)
+%% \citep[e.g.,][p.~32]{jones90}| & (e.g., Jones et al., 1990, p.~32)
+%% \citeauthor{jones90}|          & Jones et al.
+%% \citeyear{jones90}|            & 1990
+
+
+
+%% FIGURES
+
+%% When figures and tables are placed at the end of the MS (article in one-column style), please add \clearpage
+%% between bibliography and first table and/or figure as well as between each table and/or figure.
+
+% The figure files should be labelled correctly with Arabic numerals (e.g. fig01.jpg, fig02.png).
+
+
+%% ONE-COLUMN FIGURES
+
+%%f
+%\begin{figure}[t]
+%\includegraphics[width=8.3cm]{FILE NAME}
+%\caption{TEXT}
+%\end{figure}
+%
+%%% TWO-COLUMN FIGURES
+%
+%%f
+%\begin{figure*}[t]
+%\includegraphics[width=12cm]{FILE NAME}
+%\caption{TEXT}
+%\end{figure*}
+%
+%
+%%% TABLES
+%%%
+%%% The different columns must be seperated with a & command and should
+%%% end with \\ to identify the column brake.
+%
+%%% ONE-COLUMN TABLE
+%
+%%t
+%\begin{table}[t]
+%\caption{TEXT}
+%\begin{tabular}{column = lcr}
+%\tophline
+%
+%\middlehline
+%
+%\bottomhline
+%\end{tabular}
+%\belowtable{} % Table Footnotes
+%\end{table}
+%
+%%% TWO-COLUMN TABLE
+%
+%%t
+%\begin{table*}[t]
+%\caption{TEXT}
+%\begin{tabular}{column = lcr}
+%\tophline
+%
+%\middlehline
+%
+%\bottomhline
+%\end{tabular}
+%\belowtable{} % Table Footnotes
+%\end{table*}
+%
+%%% LANDSCAPE TABLE
+%
+%%t
+%\begin{sidewaystable*}[t]
+%\caption{TEXT}
+%\begin{tabular}{column = lcr}
+%\tophline
+%
+%\middlehline
+%
+%\bottomhline
+%\end{tabular}
+%\belowtable{} % Table Footnotes
+%\end{sidewaystable*}
+%
+%
+%%% MATHEMATICAL EXPRESSIONS
+%
+%%% All papers typeset by Copernicus Publications follow the math typesetting regulations
+%%% given by the IUPAC Green Book (IUPAC: Quantities, Units and Symbols in Physical Chemistry,
+%%% 2nd Edn., Blackwell Science, available at: http://old.iupac.org/publications/books/gbook/green_book_2ed.pdf, 1993).
+%%%
+%%% Physical quantities/variables are typeset in italic font (t for time, T for Temperature)
+%%% Indices which are not defined are typeset in italic font (x, y, z, a, b, c)
+%%% Items/objects which are defined are typeset in roman font (Car A, Car B)
+%%% Descriptions/specifications which are defined by itself are typeset in roman font (abs, rel, ref, tot, net, ice)
+%%% Abbreviations from 2 letters are typeset in roman font (RH, LAI)
+%%% Vectors are identified in bold italic font using \vec{x}
+%%% Matrices are identified in bold roman font
+%%% Multiplication signs are typeset using the LaTeX commands \times (for vector products, grids, and exponential notations) or \cdot
+%%% The character * should not be applied as mutliplication sign
+%
+%
+%%% EQUATIONS
+%
+%%% Single-row equation
+%
+%\begin{equation}
+%
+%\end{equation}
+%
+%%% Multiline equation
+%
+%\begin{align}
+%& 3 + 5 = 8\\
+%& 3 + 5 = 8\\
+%& 3 + 5 = 8
+%\end{align}
+%
+%
+%%% MATRICES
+%
+%\begin{matrix}
+%x & y & z\\
+%x & y & z\\
+%x & y & z\\
+%\end{matrix}
+%
+%
+%%% ALGORITHM
+%
+%\begin{algorithm}
+%\caption{...}
+%\label{a1}
+%\begin{algorithmic}
+%...
+%\end{algorithmic}
+%\end{algorithm}
+%
+%
+%%% CHEMICAL FORMULAS AND REACTIONS
+%
+%%% For formulas embedded in the text, please use \chem{}
+%
+%%% The reaction environment creates labels including the letter R, i.e. (R1), (R2), etc.
+%
+%\begin{reaction}
+%%% \rightarrow should be used for normal (one-way) chemical reactions
+%%% \rightleftharpoons should be used for equilibria
+%%% \leftrightarrow should be used for resonance structures
+%\end{reaction}
+%
+%
+%%% PHYSICAL UNITS
+%%%
+%%% Please use \unit{} and apply the exponential notation
+
+
+\end{document}

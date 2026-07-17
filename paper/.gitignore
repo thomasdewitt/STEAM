@@ -1,0 +1,6 @@
+# Ignore everything in paper/ except the manuscript sources
+*
+!.gitignore
+!main.tex
+!sources.bib
+!supplement.tex
