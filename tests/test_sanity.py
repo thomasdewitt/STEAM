@@ -10,7 +10,7 @@ from steam.simulate import (
     _compute_all_grids,
     _turbulon_envelope,
     _sparse_levy,
-    _gradient_magnitude,
+    _gradient_components,
 )
 from steam.utils import (
     fold_kernel_to_field,
@@ -380,19 +380,34 @@ def test_sparse_levy_s1_all_nonzero():
     assert np.count_nonzero(field) == 1000
 
 
-def test_gradient_magnitude_positive_for_random_field():
+def test_gradient_components_positive_for_random_field():
     rng = np.random.default_rng(0)
     field = rng.standard_normal((20, 20, 20)).astype(np.float32)
-    G = _gradient_magnitude(field, 1.0, 1.0, 1.0)
-    assert G.shape == field.shape
-    assert np.all(G >= 0)
-    assert G.mean() > 0
+    grad_h, grad_z = _gradient_components(field, 1.0, 1.0, 1.0)
+    for G in (grad_h, grad_z):
+        assert G.shape == field.shape
+        assert np.all(G >= 0)
+        assert G.mean() > 0
 
 
-def test_gradient_magnitude_zero_for_uniform_field():
+def test_gradient_components_zero_for_uniform_field():
     field = np.ones((10, 10, 10), dtype=np.float32) * 300e3
-    G = _gradient_magnitude(field, 100.0, 100.0, 50.0)
-    np.testing.assert_allclose(G, 0.0, atol=1e-6)
+    grad_h, grad_z = _gradient_components(field, 100.0, 100.0, 50.0)
+    np.testing.assert_allclose(grad_h, 0.0, atol=1e-6)
+    np.testing.assert_allclose(grad_z, 0.0, atol=1e-6)
+
+
+def test_gradient_components_split_directions():
+    # x-only variation -> grad_h > 0, grad_z == 0; z-only -> the reverse.
+    x_ramp = np.tile(np.arange(10, dtype=np.float32)[:, None, None], (1, 10, 10))
+    grad_h, grad_z = _gradient_components(x_ramp, 1.0, 1.0, 1.0)
+    assert grad_h[3:7].mean() > 0          # interior (rolls wrap at edges)
+    np.testing.assert_allclose(grad_z, 0.0, atol=1e-6)
+    z_ramp = np.tile(np.arange(10, dtype=np.float32)[None, None, :], (10, 10, 1))
+    grad_h, grad_z = _gradient_components(z_ramp, 1.0, 1.0, 1.0)
+    assert np.all(grad_z > 0)
+    interior = grad_h[:, :, :]  # x,y uniform -> horizontal gradient zero everywhere
+    np.testing.assert_allclose(interior, 0.0, atol=1e-6)
 
 
 def test_fold_kernel_preserves_sum():

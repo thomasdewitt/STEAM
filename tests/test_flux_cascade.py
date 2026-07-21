@@ -144,9 +144,10 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
     monkeypatch.setattr(sm, "CONVOLVE", record_convolution)
     C_h = [np.ones(int(nz), dtype=np.float32) for nz in grids["nz"]]
     C_qt = [np.ones(int(nz), dtype=np.float32) for nz in grids["nz"]]
+    ref = [np.ones(int(nz), dtype=np.float32) for nz in grids["nz"]]
 
     sm.cascade_loop(
-        h_profile, qt_profile, z_profile, grids, C_h, C_qt,
+        h_profile, qt_profile, z_profile, grids, C_h, C_qt, ref, ref,
         315 * 1004, 355 * 1004, 0.0, 0.03,
         0, (1, 1, 1), np.random.SeedSequence(4).spawn(len(grids["k"])),
     )

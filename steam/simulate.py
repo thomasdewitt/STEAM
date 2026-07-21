@@ -23,29 +23,6 @@ from .output import write_netcdf
 CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
 
-# ─── INTERMITTENCY KNOB: gradient-weight exponent ───────────────────────────
-# The per-class gradient-magnitude weights (normalized to per-z-level mean 1) are
-# what give the cascade its emergent intermittency. Raising them to a power > 1
-# (then renormalizing back to mean 1) sharpens the weighting -> turbulon amplitude
-# concentrates where gradients are large -> MORE intermittent / spikier field,
-# WITHOUT changing the field mean (so mean LWP is preserved; no re-tuning needed).
-# 1.0 = unchanged (current behavior). DYCOMS/TWPICE/GATE under-intermittency work
-# (2026-06-26) uses this to push concentration toward the LES. Override at runtime
-# via `steam.simulate.GRADIENT_WEIGHT_POWER = <value>`.
-GRADIENT_WEIGHT_POWER = 1.0
-
-# ─── WEIGHTING MODE: what concentrates turbulon amplitude ────────────────────
-# 'gradient' (default, original): weight by |grad(field)| * soft-clamp -> amplitude
-#   concentrates at edges/interfaces.
-# 'field'   : weight by the soft-clamp ALONE, i.e. (field-min)*(max-field) (the
-#   both-sides-clamped field departure). With max set to ~2x the observed field
-#   max, the data only reaches the rising half, so the weight ~ |field-min| over
-#   the real range -> amplitude concentrates in the BODY of high-field (moist/warm)
-#   regions, not edges. Aimed at building the qt-MSE joint (mixing-line) structure
-#   the gradient form misses. Override at runtime via
-#   `steam.simulate.WEIGHTING = 'field'`.
-WEIGHTING = 'gradient'
-
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. One octave is taken per dyadic size
 # class. Each substep multiplies the flux by exp(gamma), where gamma is an
@@ -464,12 +441,20 @@ def simulate(
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
+    # Deterministic ensemble means E[W] of the advective weights (ensemble
+    # norm; see _weight_reference).
+    ref_h_k = _weight_reference(C_h_k, h_profile, z_profile, spheroscale_profile,
+                                anisotropy, k_values, grids['z_arrays'])
+    ref_qt_k = _weight_reference(C_qt_k, qt_profile, z_profile, spheroscale_profile,
+                                 anisotropy, k_values, grids['z_arrays'])
+
     child_seeds = seed_sequence.spawn(n_classes)
 
     h_pert, qt_pert, flux_field, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
+        ref_h_k, ref_qt_k,
         h_min, h_max, qt_min, qt_max,
         min_distance_to_ground,
         sparsity_factors,
@@ -565,6 +550,7 @@ def cascade_loop(
     h_profile, qt_profile, z_profile,
     grids,
     C_h_k, C_qt_k,
+    ref_h_k, ref_qt_k,
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
@@ -753,51 +739,33 @@ def cascade_loop(
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
         # Process h and qt sequentially to halve peak memory
-        for (perturbation_field, mean_1d, var_min, var_max, C_k_i) in (
-            (h_perturbation,  h_mean_1d,  h_min,  h_max,  C_h_k[i]),
-            (qt_perturbation, qt_mean_1d, qt_min, qt_max, C_qt_k[i]),
+        for (perturbation_field, mean_1d, C_k_i, ref_i) in (
+            (h_perturbation,  h_mean_1d,  C_h_k[i],  ref_h_k[i]),
+            (qt_perturbation, qt_mean_1d, C_qt_k[i], ref_qt_k[i]),
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
-            if WEIGHTING == 'field':
-                G = None
-            else:
-                # GRADIENT weighting (original): |grad(field)| * soft-clamp.
-                # Compute it before reusing running_sum as the soft-clip buffer.
-                G = _gradient_magnitude(running_sum, dx_k, dy_k, z_k)
-
-            # Soft-clamp in the no-longer-needed running-field buffer. Reordering
-            # this after the gradient removes one full-domain live array at the
-            # gradient peak without changing the calculation.
-            running_sum -= np.float32(var_min)
-            running_sum /= np.float32(var_max - var_min)
-            np.clip(running_sum, 0, 1, out=running_sum)
-            running_sum *= (1 - running_sum)
-            if G is None:
-                # FIELD weighting: the soft-clamp IS the weight (no gradient).
-                G = running_sum
-            else:
-                G *= running_sum
-                del running_sum
-            mean_G = G.mean(axis=(0, 1), keepdims=True)
-            G /= np.where(mean_G > 0, mean_G, np.float32(1.0))
-            del mean_G
-
-            # Intermittency knob: sharpen the (mean-1) weights, renormalize to
-            # mean 1 so the field mean is unchanged. See GRADIENT_WEIGHT_POWER.
-            if GRADIENT_WEIGHT_POWER != 1.0:
-                G **= np.float32(GRADIENT_WEIGHT_POWER)
-                mean_Gp = G.mean(axis=(0, 1), keepdims=True)
-                G /= np.where(mean_Gp > 0, mean_Gp, np.float32(1.0))
-                del mean_Gp
-
-            # Amplitude: reuse G buffer (G becomes A)
-            G *= C_k_i          # 1D broadcast, in-place
-            G *= S_k            # in-place; G is now A
+            # Advective weight (Eqn eq:local amplitude):
+            #   W = |∂φ/∂z| F^H_z + |∇_h φ| F,
+            # φ the field from classes L > ℓ, F the flux from classes L ≥ ℓ.
+            # Normalized by the deterministic ensemble mean E[W](z) — an
+            # ensemble norm, never the realized level mean — then scaled to
+            # the mean turbulon amplitude C_k(z).
+            grad_h, grad_z = _gradient_components(running_sum, dx_k, dy_k, z_k)
+            del running_sum
+            W = flux ** np.float32(H_z)
+            W *= grad_z
+            del grad_z
+            grad_h *= flux
+            W += grad_h
+            del grad_h
+            W /= ref_i          # 1D broadcast: E[W](z)
+            W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
+            W *= S_k            # signed multiplier noise; W is now A
 
             # Convolve and accumulate (periodic x,y; zero-padded z)
-            perturbation_field += CONVOLVE(G, kernel, device=device)
-            del G
+            perturbation_field += CONVOLVE(W, kernel, device=device)
+            del W
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -1248,38 +1216,71 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
     return C_k
 
 
-def _gradient_magnitude(field_3d, dx, dy, z_coords):
-    """Compute |∇f|, the gradient magnitude (unnormalized).
+def _gradient_components(field_3d, dx, dy, z_coords):
+    """Horizontal gradient magnitude |∇_h f| and vertical |∂f/∂z|.
 
-    Uses periodic central differences for x,y and np.gradient for z.
-    z_coords may be a scalar spacing (uniform grid) or a 1D array of
-    z-positions (non-uniform grid); np.gradient handles both.
-
-    Memory-efficient: accumulates squared gradients in-place into a single
-    result buffer, using ~3 arrays peak instead of 6-7.
+    Periodic central differences in x,y; np.gradient in z (z_coords may be a
+    scalar spacing or a 1D array of z-positions). Returns (grad_h, grad_z),
+    both non-negative. In-place accumulation keeps the peak at ~3 arrays.
     """
     dx_f32 = np.float32(2 * dx)
     dy_f32 = np.float32(2 * dy)
 
-    # X: periodic central difference → result holds grad_x**2
-    result = np.roll(field_3d, -1, axis=0)
-    result -= np.roll(field_3d, 1, axis=0)
-    result /= dx_f32
-    result **= 2
+    # X: periodic central difference → grad_h holds grad_x**2
+    grad_h = np.roll(field_3d, -1, axis=0)
+    grad_h -= np.roll(field_3d, 1, axis=0)
+    grad_h /= dx_f32
+    grad_h **= 2
 
-    # Y: accumulate grad_y**2 into result
+    # Y: accumulate grad_y**2
     grad = np.roll(field_3d, -1, axis=1)
     grad -= np.roll(field_3d, 1, axis=1)
     grad /= dy_f32
     grad **= 2
-    result += grad
+    grad_h += grad
     del grad
+    np.sqrt(grad_h, out=grad_h)
 
-    # Z: accumulate grad_z**2 into result
     grad_z = np.gradient(field_3d, z_coords.astype(np.float32) if hasattr(z_coords, 'astype') else z_coords, axis=2)
-    grad_z **= 2
-    result += grad_z
-    del grad_z
+    np.abs(grad_z, out=grad_z)
+    return grad_h, grad_z
 
-    np.sqrt(result, out=result)
-    return result
+
+def _weight_reference(C_k, mean_profile, z_profile, spheroscale_profile,
+                      anisotropy, k_values, z_arrays):
+    """Deterministic ensemble mean E[W] of the advective weight, per class.
+
+    The weight is W = |∂φ/∂z| F^H_z + |∇_h φ| F (Eqn eq:local amplitude).
+    Its ensemble mean is computed with NO conditioning on the realization —
+    this is what makes the amplitude normalization an ensemble norm rather
+    than a per-realization norm (a realized-mean norm concentrates the whole
+    level budget onto rare spikes wherever a level is nearly structureless).
+
+    E[F] = 1 exactly (conserved flux); E[F^H_z] ≈ 1 (|K(H_z)| ≪ 1 at the
+    C1 values used). Gradients: the mean profile contributes |d<φ>/dz|;
+    each coarser class j < i contributes turbulon fluctuations of mean
+    amplitude C_j(z) at vertical scale k_z_j(z) and horizontal scale k_j,
+    i.e. gradient magnitudes ~ π C_j / scale (the RMS gradient of a
+    unit-amplitude envelope of characteristic wavelength k, up to an O(1)
+    shape constant absorbed by calibration).
+
+    Levels where E[W] = 0 (flat profile, no prior classes) are mapped to 1;
+    the realized W is exactly zero there, so the ratio is zero regardless.
+
+    Returns a list of n_classes float32 arrays, one per class z-grid.
+    """
+    refs = []
+    for i, k in enumerate(k_values):
+        z_i = z_arrays[i]
+        mean_i = np.interp(z_i, z_profile, mean_profile)
+        vertical = np.abs(np.gradient(mean_i, z_i))
+        horizontal = np.zeros_like(vertical)
+        spheroscale_i = np.interp(z_i, z_profile, spheroscale_profile)
+        for j in range(i):
+            C_j = np.interp(z_i, z_arrays[j], C_k[j])
+            k_z_j = _k_z(anisotropy, k_values[j], spheroscale_i)
+            vertical += np.pi * C_j / k_z_j
+            horizontal += np.pi * C_j / k_values[j]
+        reference = vertical + horizontal
+        refs.append(np.where(reference > 0, reference, 1.0).astype(np.float32))
+    return refs
