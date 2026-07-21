@@ -24,41 +24,5 @@
 
 \section{Simulation Construction}
 
-The basic computational method for creating a BEAM field of e.g. water content is to begin with a base field and introduce turbulent pertubations in the field randomly at various spatial scales. and therefore represents the  Most simply, this may be accomplished using the following procedure:
-
-\begin{enumerate}
-  \item Create arrays representing the desired base field 
-  \item For each simulated size of blob:
-  \begin{enumerate}
-    \item Calculate mean blob amplitude, shape, and number of blobs such that the total variance is as specified by Eqn. ()
-    \item Generate random amplitudes and locations for each individual blob
-    \item Multiply the base field by each blob
-  \end{enumerate}
-\end{enumerate}
-
-However, this direct approach becomes computationally inefficient due to the large number of individual blobs required to achieve the desired statistical properties. In the following sections, we develop an equivalent but more efficient process that produces fields with identical statistical properties.
-
-A key insight in developing a more efficient method is that a single blob centered at position $\mathbf{r}$ is mathematically equivalent to the convolution of the blob shape function with a delta function centered at $\mathbf{r}$. If we denote the blob shape function as $B(\mathbf{x},l)$ where $l$ is the characteristic size of the blob, we have
-\begin{equation}
-    B(\mathbf{x} - \mathbf{r}, l) = \sum_{\mathbf{x}'} B(\mathbf{x} - \mathbf{x'}) \delta(\mathbf{x'} - \mathbf{r}) 
-\end{equation}
-where $\delta$ is the delta function:
-\begin{align}
-  \delta(\mathbf{x}) = \begin{cases}
-    1, \quad \mathbf{x}=0 \\
-    0 \quad \text{otherwise}
-  \end{cases}.
-\end{align}
-Because the convolution is a linear operator,
-
-This representation suggests a more efficient computational approach. Instead of creating and multiplying individual blob shapes one at a time, we can first create a field containing just the blob amplitudes at their respective locations (effectively, a field of weighted delta functions), and then perform a single convolution of this field with the blob shape. This approach is computationally much more efficient than the direct method of creating and multiplying by many individual blob shapes.
-
-More specificially, BEAM is implemented using Python in the following way. A multiplicative pertubation field $B'$ is created representing turbulent pertubations from the mean state $\langle B\rangle$ where $B=B'\langle B\rangle$. To create $B'$, a loop is performed over all simulated blob size classes. For each blob size, a list of blob amplitudes and locations are generated. The blob amplitudes are generated a lognormal distribution, and the blob locations are uniformly distributed across the array. An intermediate array $B'_i$ is created where each array location is equal to the product of the blob amplitudes for blobs centered at the array location. Locations without a blob center are set to 0. This array is convolved with the blob ``envelope'', which defines the blob shape and sums to 1. Here, the blob envelope is a Gaussian function that is truncated at a multiple of the characteristic distance $l_i$, here set to 3.
-
-It is necessary to simulate blobs that are beyond the array boundary because, even if the blob center is outside of the array, some part of the blob may nonetheless be within the array. To account for this, $B_i'$ is larger than $B'$ and has coordinates ($-3l_i, s_j + 3l_i$) where $s_j$ is the length of $B'$ in direction $j$ in units of grid cells. 
-
-After the convolution, $B'$ is multiplied by $B_i'$, ignoring the non-overlapping padded regions. The same procedure is then performed for the next blob size $l_i$. For computational efficiency, the $B_i'$ for large $l_i$ are simulated using a coarser grid and are interpolated to the resolution of $B'$.
-
-The code is also implemented in such a way that very large fields may be simulated without loading the entire array into memory at once. This is accomplished by dividing the computation into chunks and calculating the perturbation field for each chunk separately. This chunked approach allows for the generation of arbitrarily large fields while maintaining reasonable memory requirements.
 
 \end{document}
