@@ -418,14 +418,10 @@ def simulate(
     qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
     spheroscale_on_finest = np.interp(z_finest, z_profile, spheroscale_profile)
 
-    # Vertical outer scale in finest-grid points (constant across height).
-    # Ratio k_z_L / dz_min = 2*s_z * k_z(outer_scale) / k_z(k_min) — only
-    # simplifies to (outer_scale/k_min)^H_z under canonical anisotropy.
-    k_min = k_values[-1]
-    vertical_outer_scale_grid_pts = int(round(
-        2 * s_z * _k_z(anisotropy, outer_scale, spheroscale_mean)
-        / _k_z(anisotropy, k_min, spheroscale_mean)
-    ))
+    # Local vertical outer scale k_z,L(z) from the local spheroscale, so the
+    # normalization response (a vertical-gradient measure of the mean profile
+    # at scale k_z,L) dies where the profile is flat over the local k_z,L.
+    k_z_L_on_finest = _k_z(anisotropy, outer_scale, spheroscale_on_finest)
 
     # Outer-scale turbulon envelope; its x=y=0 center column is the 1D response
     # used to normalize against the mean profile (Eqn apxeq:norm factor computation).
@@ -457,11 +453,11 @@ def simulate(
         )
 
     C_h_k = _compute_normalization(
-        h_on_finest, vertical_outer_scale_grid_pts, n_large_turbulons,
+        h_on_finest, k_z_L_on_finest, domain_height,
         k_values, outer_scale, grids, unit_turbulon,
     )
     C_qt_k = _compute_normalization(
-        qt_on_finest, vertical_outer_scale_grid_pts, n_large_turbulons,
+        qt_on_finest, k_z_L_on_finest, domain_height,
         k_values, outer_scale, grids, unit_turbulon,
     )
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
@@ -1182,19 +1178,24 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
     return envelope
 
 
-def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts,
-                           n_large_turbulons, k_values, outer_scale, z_arrays,
-                           turbulon):
+def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_height,
+                           k_values, outer_scale, z_arrays, turbulon):
     """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
 
-        C_{Phi,L}(z) = (N_L / N_p) |T_L(x=y=0) * <Phi>_t(z)|
+        C_{Phi,L}(z) = (N_L(z) / N_p) |T_L(x=y=0) * <Phi>_t(z)|
 
     The outer-scale envelope's center column T_L(x=y=0) is convolved along the
-    mean profile (edge-padded), kept height-dependent. N_L = floor(L_z / k_z,L)
-    outer-scale turbulons fit vertically; N_p is the number of profile samples,
-    so N_L/N_p makes the summed response independent of profile resolution.
+    mean profile (edge-padded). The column has the LOCAL vertical outer scale
+    k_z,L(z) from the local spheroscale, so the response is a local
+    vertical-gradient measure of the mean profile that dies where the profile
+    is flat over the local k_z,L. Because the kernel width varies with height,
+    the convolution is an explicit per-level discrete sum, not one stationary
+    convolution. N_L(z) = L_z / k_z,L(z) outer-scale turbulons fit vertically
+    at that height's scale; N_p is the number of profile samples. N_L(z)/N_p
+    makes the response independent of profile resolution (the summed response
+    scales as cells-per-kernel = k_z,L/dz; the prefactor as its inverse).
     C_{Phi,k} then follows (k/L)^H_h.
 
     The column is a slice of the 3D-mean-subtracted envelope, so it is not itself
@@ -1205,10 +1206,10 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     ----------
     profile_on_finest_grid : ndarray, shape (nz_finest,)
         Mean profile <Phi>_t interpolated to the finest-resolution z-grid.
-    vertical_outer_scale_grid_pts : int
-        Finest-grid cells spanning the vertical outer scale k_z,L.
-    n_large_turbulons : int
-        N_L, outer-scale turbulons fitting vertically in the domain.
+    k_z_L_on_finest : ndarray, shape (nz_finest,)
+        Local vertical outer scale k_z(outer_scale, spheroscale(z)) [m].
+    domain_height : float
+        Vertical domain extent L_z [m].
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
     z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
@@ -1219,19 +1220,26 @@ def _compute_normalization(profile_on_finest_grid, vertical_outer_scale_grid_pts
     -------
     list of n_classes 1D float32 arrays.
     """
-    # Center column T_L(x=y=0), resampled from the +/-SUPPORT_FACTOR*k envelope
-    # onto the finest grid (k_z,L spans vertical_outer_scale_grid_pts cells).
     column = turbulon[turbulon.shape[0] // 2, turbulon.shape[1] // 2, :].astype(np.float64)
-    n_half = SUPPORT_FACTOR * vertical_outer_scale_grid_pts
-    kernel = np.interp(np.arange(-n_half, n_half + 1),
-                       np.linspace(-n_half, n_half, column.size), column)
-    kernel -= kernel.mean()
-
-    padded = np.pad(profile_on_finest_grid, (n_half, n_half), mode='edge')
-    response = np.abs(np.convolve(padded, kernel, mode='valid'))
-    response *= n_large_turbulons / profile_on_finest_grid.size
-
     z_finest = z_arrays['z_arrays'][-1]
+    dz_finest = float(np.mean(np.diff(z_finest)))
+    n_p = profile_on_finest_grid.size
+
+    # Per-level kernel half-width in finest cells: SUPPORT_FACTOR * k_z,L(z) / dz.
+    n_half = np.maximum(1, np.round(
+        SUPPORT_FACTOR * np.asarray(k_z_L_on_finest) / dz_finest).astype(int))
+    n_max = int(n_half.max())
+    padded = np.pad(profile_on_finest_grid, (n_max, n_max), mode='edge')
+
+    response = np.empty(n_p)
+    for i in range(n_p):
+        m = int(n_half[i])
+        kernel = np.interp(np.arange(-m, m + 1),
+                           np.linspace(-m, m, column.size), column)
+        kernel -= kernel.mean()
+        segment = padded[i + n_max - m: i + n_max + m + 1]
+        response[i] = abs(np.dot(kernel, segment)) \
+            * (domain_height / k_z_L_on_finest[i]) / n_p
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h)
