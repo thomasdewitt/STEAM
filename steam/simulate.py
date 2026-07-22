@@ -52,6 +52,10 @@ SUPPORT_FACTOR = 5
 FLUX_SCALE = 0.21
 FLUX_ALPHA = 1.8
 
+# Taper buffer in units of the summed mean-absolute amplitudes of the
+# remaining cascade (current class and all smaller classes).
+BOUND_BUFFER_MULTIPLE = 3
+
 
 def _extremal_levy(alpha, size, rng):
     """Extremal (maximally skewed, beta=-1) Levy alpha-stable draws.
@@ -229,9 +233,11 @@ def simulate(
     seed : int or None
         Random seed for reproducibility.
     h_min, h_max : float
-        Soft-clamp bounds on moist static energy [J/kg].
+        Physical bounds (taper + mean-preserving projection) on moist
+        static energy [J/kg].
     qt_min, qt_max : float
-        Soft-clamp bounds on total water mixing ratio [kg/kg].
+        Physical bounds (taper + mean-preserving projection) on total
+        water mixing ratio [kg/kg].
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
         of the ground. Must be a non-negative integer.
@@ -450,12 +456,9 @@ def simulate(
         ls_i = np.interp(grids['z_arrays'][i], z_profile, spheroscale_profile)
         aspect_k.append((_k_z(anisotropy, k, ls_i) / k).astype(np.float32))
 
-    # Deterministic ensemble means E[W] of the advective weights (ensemble
-    # norm; see _weight_reference).
-    ref_h_k = _weight_reference(C_h_k, h_profile, z_profile, spheroscale_profile,
-                                anisotropy, k_values, grids['z_arrays'], aspect_k)
-    ref_qt_k = _weight_reference(C_qt_k, qt_profile, z_profile, spheroscale_profile,
-                                 anisotropy, k_values, grids['z_arrays'], aspect_k)
+    # Per-class taper buffer widths b_{Phi,i}(z) (see _bound_buffers).
+    b_h_k = _bound_buffers(C_h_k, grids['z_arrays'])
+    b_qt_k = _bound_buffers(C_qt_k, grids['z_arrays'])
 
     child_seeds = seed_sequence.spawn(n_classes)
 
@@ -463,7 +466,7 @@ def simulate(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
-        ref_h_k, ref_qt_k, aspect_k,
+        b_h_k, b_qt_k, aspect_k,
         h_min, h_max, qt_min, qt_max,
         min_distance_to_ground,
         sparsity_factors,
@@ -487,8 +490,8 @@ def simulate(
     qt_3d = np.ascontiguousarray(qt_pert)
     del h_pert, qt_pert
 
-    np.clip(h_3d, h_min, h_max, out=h_3d)
-    np.clip(qt_3d, qt_min, qt_max, out=qt_3d)
+    # No final clip: the per-class mean-preserving projection in cascade_loop
+    # guarantees h_3d in [h_min, h_max] and qt_3d in [qt_min, qt_max].
 
     flux_3d = np.ascontiguousarray(flux_field)
 
@@ -559,7 +562,7 @@ def cascade_loop(
     h_profile, qt_profile, z_profile,
     grids,
     C_h_k, C_qt_k,
-    ref_h_k, ref_qt_k, aspect_k,
+    b_h_k, b_qt_k, aspect_k,
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
@@ -594,10 +597,15 @@ def cascade_loop(
     C_h_k, C_qt_k : list of 1D ndarray
         Scale-dependent amplitudes, one entry per scale class. Each is a
         1D array of length nz_k that broadcasts over (nx_k, ny_k, nz_k).
+    b_h_k, b_qt_k : list of 1D ndarray
+        Per-class taper buffer widths b_{Phi,i}(z), parallel to
+        C_h_k/C_qt_k (see _bound_buffers).
     h_min, h_max : float
-        Soft-clamp bounds for moist static energy.
+        Physical bounds (taper + mean-preserving projection) for moist
+        static energy.
     qt_min, qt_max : float
-        Soft-clamp bounds for total water mixing ratio.
+        Physical bounds (taper + mean-preserving projection) for total
+        water mixing ratio.
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
         of the ground. The lowest 2 * s_z * min_distance_to_ground z-cells
@@ -758,9 +766,9 @@ def cascade_loop(
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
         # Process h and qt sequentially to halve peak memory
-        for (perturbation_field, mean_1d, C_k_i, ref_i) in (
-            (h_perturbation,  h_mean_1d,  C_h_k[i],  ref_h_k[i]),
-            (qt_perturbation, qt_mean_1d, C_qt_k[i], ref_qt_k[i]),
+        for (perturbation_field, mean_1d, C_k_i, b_i, phi_min, phi_max) in (
+            (h_perturbation,  h_mean_1d,  C_h_k[i],  b_h_k[i],  h_min,  h_max),
+            (qt_perturbation, qt_mean_1d, C_qt_k[i], b_qt_k[i], qt_min, qt_max),
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
@@ -771,22 +779,36 @@ def cascade_loop(
             # The flux enters the amplitude ONCE, through S_k (which
             # carries the local larger-scale flux); multiplying W by the
             # flux as well would double-count it (removed 2026-07-22).
-            # Normalized by the deterministic ensemble mean E[W](z) — an
-            # ensemble norm, never the realized level mean — then scaled to
-            # the mean turbulon amplitude C_k(z).
             grad_h, grad_z = _gradient_components(running_sum, dx_k, dy_k, z_k)
-            del running_sum
             W = grad_z
             W *= aspect_k[i]    # 1D broadcast: ℓ_z/ℓ_x
             W += grad_h
             del grad_h
-            W /= ref_i          # 1D broadcast: E[W](z)
+
+            # Realized norm: normalizing by the realized horizontal mean
+            # enforces the mean-absolute turbulon amplitude C_k exactly at
+            # every level and class (self-correcting; no deterministic
+            # reference, no compounding bias). Structureless levels
+            # (level mean zero) keep W = 0.
+            level_mean = W.mean(axis=(0, 1), keepdims=True, dtype=np.float64)
+            W /= np.where(level_mean > 0, level_mean, 1.0).astype(np.float32)
+
+            # Bound taper, applied AFTER the norm: proximity of one part of
+            # the field to a bound reduces that level's total variance
+            # rather than redistributing it to other parts of the level.
+            W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
+            del running_sum
+
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
             W *= S_k            # signed multiplier noise; W is now A
 
             # Convolve and accumulate (periodic x,y; zero-padded z)
             perturbation_field += CONVOLVE(W, kernel, device=device)
             del W
+
+            # Mean-preserving projection onto the bounds, so subsequent
+            # classes' gradients see a field already within [φ_min, φ_max].
+            _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max)
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -1268,42 +1290,79 @@ def _gradient_components(field_3d, dx, dy, z_coords):
     return grad_h, grad_z
 
 
-def _weight_reference(C_k, mean_profile, z_profile, spheroscale_profile,
-                      anisotropy, k_values, z_arrays, aspect_k):
-    """Deterministic ensemble mean E[W] of the advective weight, per class.
+def _bound_buffers(C_k, z_arrays):
+    """Per-class taper buffer widths b_{Phi,i}(z), one array per size class.
 
-    The weight is W = F (|∇_h φ| + (ℓ_z/ℓ_x) |∂φ/∂z|) (Eqn eq:anisotropic
-    gradient weighing), with aspect_k the per-class ℓ_z/ℓ_x profiles.
-    Its ensemble mean is computed with NO conditioning on the realization —
-    this is what makes the amplitude normalization an ensemble norm rather
-    than a per-realization norm (a realized-mean norm concentrates the whole
-    level budget onto rare spikes wherever a level is nearly structureless).
+        b_{Phi,i}(z) = BOUND_BUFFER_MULTIPLE * sum_{j >= i} C_{Phi,j}(z)
 
-    E[F] = 1 exactly (conserved flux), so F drops out of the reference.
-    Gradients: the mean profile contributes |d<φ>/dz|;
-    each coarser class j < i contributes turbulon fluctuations of mean
-    amplitude C_j(z) at vertical scale k_z_j(z) and horizontal scale k_j,
-    i.e. gradient magnitudes ~ π C_j / scale (the RMS gradient of a
-    unit-amplitude envelope of characteristic wavelength k, up to an O(1)
-    shape constant absorbed by calibration).
+    — the current class plus all SMALLER classes, a LINEAR sum of
+    mean-absolute amplitudes (deliberately not quadrature; first-moment
+    discipline). Each C_{Phi,j} lives on its own per-class z-grid and is
+    interpolated onto class i's grid before summing.
 
-    Levels where E[W] = 0 (flat profile, no prior classes) are mapped to 1;
-    the realized W is exactly zero there, so the ratio is zero regardless.
-
-    Returns a list of n_classes float32 arrays, one per class z-grid.
+    Returns a list of n_classes float32 arrays parallel to C_k.
     """
-    refs = []
-    for i, k in enumerate(k_values):
+    n_classes = len(C_k)
+    buffers = []
+    for i in range(n_classes):
         z_i = z_arrays[i]
-        mean_i = np.interp(z_i, z_profile, mean_profile)
-        vertical = np.abs(np.gradient(mean_i, z_i))
-        horizontal = np.zeros_like(vertical)
-        spheroscale_i = np.interp(z_i, z_profile, spheroscale_profile)
-        for j in range(i):
-            C_j = np.interp(z_i, z_arrays[j], C_k[j])
-            k_z_j = _k_z(anisotropy, k_values[j], spheroscale_i)
-            vertical += np.pi * C_j / k_z_j
-            horizontal += np.pi * C_j / k_values[j]
-        reference = vertical * aspect_k[i] + horizontal
-        refs.append(np.where(reference > 0, reference, 1.0).astype(np.float32))
-    return refs
+        total = np.zeros(len(z_i), dtype=np.float64)
+        for j in range(i, n_classes):
+            total += np.interp(z_i, z_arrays[j], C_k[j])
+        buffers.append((BOUND_BUFFER_MULTIPLE * total).astype(np.float32))
+    return buffers
+
+
+def _bound_taper(running_sum, b, phi_min, phi_max):
+    """Taper factor g = clip(min((φ - φ_min)/b, (φ_max - φ)/b), 0, 1).
+
+    φ is the running field (running_sum), b the 1D buffer-width profile
+    broadcast over (x, y). Computed in float32, in place: running_sum is
+    consumed as the output buffer. Where b <= 0 the tiny surrogate divisor
+    gives g = 1 strictly inside the bounds and g = 0 at or outside them.
+    """
+    g = running_sum
+    g -= np.float32(phi_min)
+    np.minimum(g, np.float32(phi_max - phi_min) - g, out=g)
+    g /= np.where(b > 0, b, np.float32(1e-30))
+    np.clip(g, np.float32(0.0), np.float32(1.0), out=g)
+    return g
+
+
+def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max):
+    """Project onto [phi_min, phi_max] preserving each level's horizontal mean.
+
+    For field = perturbation + mean, each level with any out-of-bounds value
+    is replaced by clip(field - mu, phi_min, phi_max) with the scalar mu
+    chosen so the level's horizontal mean is unchanged — the
+    least-squares-closest field satisfying the bounds plus per-level mean
+    preservation. The level mean of clip(field - mu, lo, hi) is continuous,
+    piecewise-linear, and monotonically non-increasing in mu (each grid
+    point's clipped value is non-increasing in mu; strictly decreasing while
+    any point is interior), so mu is found by bisection in float64 on the
+    safe bracket [-(phi_max - phi_min), +(phi_max - phi_min)]. Levels with
+    no violations are untouched. Modifies perturbation_field in place,
+    folding the correction into the running perturbation.
+    """
+    lo = float(phi_min)
+    hi = float(phi_max)
+    width = hi - lo
+    for lev in range(perturbation_field.shape[2]):
+        field_lev = perturbation_field[:, :, lev].astype(np.float64)
+        field_lev += float(mean_1d[lev])
+        if field_lev.min() >= lo and field_lev.max() <= hi:
+            continue
+        target = field_lev.mean()
+        mu_low, mu_high = -width, width
+        for _ in range(60):
+            mu = 0.5 * (mu_low + mu_high)
+            if np.clip(field_lev - mu, lo, hi).mean() > target:
+                mu_low = mu
+            else:
+                mu_high = mu
+            if mu_high - mu_low < 1e-12 * width:
+                break
+        mu = 0.5 * (mu_low + mu_high)
+        np.clip(field_lev - mu, lo, hi, out=field_lev)
+        field_lev -= float(mean_1d[lev])
+        perturbation_field[:, :, lev] = field_lev
