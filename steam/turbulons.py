@@ -21,16 +21,20 @@ SHAPES = {'mexican_hat', 'morlet_omega0_6'}
 
 
 def mexican_hat(r_norm_sq, k):
-    """3D Mexican hat wavelet envelope.
+    """3D Mexican hat (Marr) wavelet envelope: -Laplacian of a Gaussian.
 
     (Apxeq:turbulon shape)
-    T(r) = (1 - ρ) exp(-ρ/2),  ρ = r_norm² / σ²,  σ = k/π
+    T(r) = (3 - ρ) exp(-ρ/2),  ρ = r_norm² / σ²,  σ = k/π
 
-    σ = k/π places the 3D PSD peak at wavelength k, so dx = k/2
-    Nyquist-samples the peak wavelength.
+    The leading constant equals the number of dimensions: (3 - ρ) makes
+    the envelope integrate to zero over 3D space (wavelet admissibility),
+    unlike the 1D profile (1 - ρ) rotated into 3D, whose volume integral
+    is negative (the r² volume element overweights the negative shell).
+    With σ = k/π the shell-integrated PSD peaks near wavelength 1.15 k
+    and the 1D center column's PSD near sqrt(2) k.
     """
     ratio_sq = r_norm_sq / (k / np.pi) ** 2
-    return (1.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)
+    return (3.0 - ratio_sq) * np.exp(-ratio_sq / 2.0)
 
 
 def morlet_omega0_6(r_norm_sq, k):
