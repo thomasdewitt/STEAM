@@ -764,11 +764,13 @@ def cascade_loop(
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
-            # Advective weight (Eqn eq:anisotropic gradient weighing):
-            #   W = F (|∇_h φ| + (ℓ_z/ℓ_x) |∂φ/∂z|),
-            # φ the field from classes L > ℓ, F the flux from classes L ≥ ℓ,
-            # ℓ_z/ℓ_x the deterministic turbulon aspect ratio (flux enters
-            # both terms linearly; Δw/Δu = ℓ_z/ℓ_x is kinematics).
+            # Advective weight (Apxeq:advective weight):
+            #   W = |∇_h φ| + (ℓ_z/ℓ_x) |∂φ/∂z|,
+            # φ the field from classes L > ℓ, ℓ_z/ℓ_x the deterministic
+            # turbulon aspect ratio (Δw/Δu = ℓ_z/ℓ_x is kinematics).
+            # The flux enters the amplitude ONCE, through S_k (which
+            # carries the local larger-scale flux); multiplying W by the
+            # flux as well would double-count it (removed 2026-07-22).
             # Normalized by the deterministic ensemble mean E[W](z) — an
             # ensemble norm, never the realized level mean — then scaled to
             # the mean turbulon amplitude C_k(z).
@@ -778,7 +780,6 @@ def cascade_loop(
             W *= aspect_k[i]    # 1D broadcast: ℓ_z/ℓ_x
             W += grad_h
             del grad_h
-            W *= flux
             W /= ref_i          # 1D broadcast: E[W](z)
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
             W *= S_k            # signed multiplier noise; W is now A
