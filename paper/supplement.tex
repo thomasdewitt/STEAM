@@ -74,35 +74,13 @@ follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 (density compensation per the main-text appendix) and are interpolated
 to each size class's vertical grid.
 
-The ensemble-mean weight $\langle W_{\Phi,k}\rangle_i(z)$ used to
-normalize the advective weighting (main-text appendix) is assembled from
-the same known quantities: the mean-profile vertical gradient plus the
-turbulon gradient magnitudes $\pi C_{\Phi,j}/k_{z,j}$ (vertical) and
-$\pi C_{\Phi,j}/k_j$ (horizontal) summed over all larger size classes
-$k_j > k$, with the vertical part multiplied by the aspect ratio
-$k_z/k$ and the ensemble-mean flux equal to one. Levels where the
-reference is exactly zero (a flat profile with no larger classes) are
-mapped to one; the realized weight is identically zero there.
-
-The bound-buffer widths and the ensemble-mean bound factor are computed
-from the same amplitude profiles. The buffer width is
-$b_{\Phi,k}(z) = n_b \big(\sum_{k_j \le k} C_{\Phi,j}(z)^2\big)^{1/2}$,
-summed over the current and all smaller size classes. The ensemble mean
-$\langle g_\Phi \rangle_i(z)$, which multiplies the assembled reference
-weight, is evaluated under a Gaussian closure: the running field at
-each level is treated as Gaussian with mean $\langle \Phi \rangle_t(z)$
-and standard deviation $\big(\sum_{k_j > k}
-C_{\Phi,j}(z)^2\big)^{1/2}$, the amplitudes already added by larger
-classes. For the lower ramp $r(f) = \min(1, \max(0, (f -
-\Phi_{\min})/b))$, the expectation is
-\begin{equation}
-  \langle r \rangle = \frac{1}{b} \int_{\Phi_{\min}}^{\Phi_{\min}+b}
-  P(f > t)\, dt,
-\end{equation}
-with the Gaussian exceedance probability $P$, and analogously for the
-upper ramp; since the two buffers never overlap in practice,
-$\langle g_\Phi \rangle_i = \langle r_{\mathrm{lower}} \rangle +
-\langle r_{\mathrm{upper}} \rangle - 1$.
+The bound-buffer widths are computed from the same amplitude profiles:
+$b_{\Phi,k}(z) = n_b \sum_{k_j \le k} C_{\Phi,j}(z)$, a linear sum of
+the mean absolute amplitudes of the current and all smaller size
+classes, with each $C_{\Phi,j}$ interpolated to the current class's
+vertical grid. (No deterministic ensemble-mean weight is used: the
+advective weight is normalized by its realized horizontal mean at each
+level, computed during the cascade loop below.)
 
 \subsection{Working grids}
 
@@ -150,12 +128,15 @@ between $h$ and $q_t$.
 Next, the scalar amplitudes are computed. Gradients of the running field
 $f = \langle \Phi \rangle_t + \widetilde{\Phi}$ are taken with periodic
 central differences in $x$ and $y$ and with one-sided differences at the
-vertical boundaries (central in the interior), and the bound factor
-$g_\Phi$ is evaluated from the same running field with the buffer width
-$b_{\Phi,k}(z)$ above. The weight $W_{\Phi,k} = g_\Phi
-(|\nabla_h f| + (k_z/k)|\partial f/\partial z|)$ is divided by the
-precomputed ensemble mean $\langle W_{\Phi,k}\rangle_i(z)$, multiplied
-by $C_{\Phi,k}(z)$ and by $S_k$, giving the amplitude field $A_\Phi$.
+vertical boundaries (central in the interior). The weight $W_{\Phi,k} =
+|\nabla_h f| + (k_z/k)|\partial f/\partial z|$ is divided by its
+realized horizontal mean at each level (levels where the mean is
+exactly zero are left at zero), then multiplied by the bound factor
+$g_\Phi$, evaluated pointwise from the same running field with the
+buffer width $b_{\Phi,k}(z)$ above --- the taper is applied after the
+normalization, so that proximity to a bound reduces a level's total
+amplitude rather than redistributing it --- and finally by
+$C_{\Phi,k}(z)$ and $S_k$, giving the amplitude field $A_\Phi$.
 
 The amplitudes are then convolved with the turbulon envelope. The 3D
 Mexican hat of the main-text appendix ($3 - \rho$ form) is constructed
