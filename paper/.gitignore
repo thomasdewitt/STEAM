@@ -4,3 +4,8 @@
 !main.tex
 !sources.bib
 !supplement.tex
+# Copernicus journal template files (needed to build the paper)
+!copernicus.cls
+!copernicus.cfg
+!copernicus.bst
+!README_copernicus_package_6_9.txt
