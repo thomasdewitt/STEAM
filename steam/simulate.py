@@ -56,6 +56,11 @@ FLUX_ALPHA = 1.8
 # remaining cascade (current class and all smaller classes).
 BOUND_BUFFER_MULTIPLE = 3
 
+# Haar -> turbulon-amplitude calibration for C_{Phi,L}: equal integrated
+# squared fluctuation between a unit-amplitude Haar structure and a
+# unit-amplitude turbulon column (see _compute_normalization docstring).
+HAAR_TO_MHAT = 0.5 * (np.sqrt(np.pi) / 6.75) ** 0.5   # ~= 0.256
+
 
 def _extremal_levy(alpha, size, rng):
     """Extremal (maximally skewed, beta=-1) Levy alpha-stable draws.
@@ -434,13 +439,13 @@ def simulate(
         )
 
     C_h_k = _compute_normalization(
-        h_on_finest, k_z_L_on_finest, domain_height,
-        k_values, outer_scale, grids, unit_turbulon,
+        h_on_finest, k_z_L_on_finest,
+        k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
     )
     C_qt_k = _compute_normalization(
-        qt_on_finest, k_z_L_on_finest, domain_height,
-        k_values, outer_scale, grids, unit_turbulon,
+        qt_on_finest, k_z_L_on_finest,
+        k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
     )
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
@@ -1184,25 +1189,34 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
     return envelope
 
 
-def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_height,
-                           k_values, outer_scale, z_arrays, turbulon,
+def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
+                           k_values, outer_scale, z_arrays,
                            n_scale_classes_per_dyad=1):
     """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
 
-        C_{Phi,L}(z) = (N_L(z) / N_p) |T_L(x=y=0) * <Phi>_t(z)|
+        C_{Phi,L}(z) = lambda * |Haar_{k_z,L}(<Phi>_t)|(z)
 
-    The outer-scale envelope's center column T_L(x=y=0) is convolved along the
-    mean profile (edge-padded). The column has the LOCAL vertical outer scale
-    k_z,L(z) from the local spheroscale, so the response is a local
-    vertical-gradient measure of the mean profile that dies where the profile
-    is flat over the local k_z,L. Because the kernel width varies with height,
-    the convolution is an explicit per-level discrete sum, not one stationary
-    convolution. N_L(z) = L_z / k_z,L(z) outer-scale turbulons fit vertically
-    at that height's scale; N_p is the number of profile samples. N_L(z)/N_p
-    makes the response independent of profile resolution (the summed response
-    scales as cells-per-kernel = k_z,L/dz; the prefactor as its inverse).
+    The Haar fluctuation at scale k_z,L(z) — the mean of the profile over the
+    upper half of a k_z,L-wide window minus the mean over the lower half — is
+    the characteristic anomaly produced by an overturning eddy of depth k_z,L:
+    parcels arriving at z from z +- k_z,L/2 carry the profile difference
+    across the eddy. An odd (first-difference) measure is required: an even
+    zero-mean kernel (e.g. the envelope column) annihilates constant
+    gradients, yet a constant vertical gradient is precisely the case where
+    advection must produce variability. The window uses the LOCAL vertical
+    outer scale k_z,L(z) from the local spheroscale; half-window MEANS make
+    the response independent of profile resolution with no extra bookkeeping.
+
+    HAAR_TO_MHAT converts the measured Haar coefficient to the cascade's
+    turbulon amplitude convention by matching power: a Haar-shaped structure
+    of unit amplitude (lobes +-1; Haar coefficient 2, hence the factor 1/2)
+    carries integrated squared fluctuation k_z,L, while a unit-amplitude
+    turbulon's vertical column (3 - u^2) exp(-u^2/2), u = z/sigma,
+    sigma = k_z,L/pi, carries (6.75/sqrt(pi)) k_z,L. Equal power gives
+    lambda = (1/2) sqrt(sqrt(pi)/6.75) ~= 0.256.
+
     C_{Phi,k} then follows n_c^{-1/alpha} (k/L)^H_h, with n_c =
     n_scale_classes_per_dyad: the same density compensation as the flux
     cascade, ASSUMED to carry over to the scalars because S_k is built from
@@ -1210,48 +1224,38 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
     per-octave variance is invariant under s ~ n_c^{-1/alpha}). Not verified
     for all scalar statistics; unity at the production n_c = 1.
 
-    The column is a slice of the 3D-mean-subtracted envelope, so it is not itself
-    zero-mean; it is made zero-mean here (the discretized-wavelet admissibility
-    criterion) by subtracting its own mean before convolving.
-
     Parameters
     ----------
     profile_on_finest_grid : ndarray, shape (nz_finest,)
         Mean profile <Phi>_t interpolated to the finest-resolution z-grid.
     k_z_L_on_finest : ndarray, shape (nz_finest,)
         Local vertical outer scale k_z(outer_scale, spheroscale(z)) [m].
-    domain_height : float
-        Vertical domain extent L_z [m].
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
     z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
-    turbulon : ndarray
-        Outer-scale 3D envelope (already 3D-mean-subtracted).
 
     Returns
     -------
     list of n_classes 1D float32 arrays.
     """
-    column = turbulon[turbulon.shape[0] // 2, turbulon.shape[1] // 2, :].astype(np.float64)
     z_finest = z_arrays['z_arrays'][-1]
     dz_finest = float(np.mean(np.diff(z_finest)))
     n_p = profile_on_finest_grid.size
 
-    # Per-level kernel half-width in finest cells: SUPPORT_FACTOR * k_z,L(z) / dz.
+    # Per-level Haar half-window k_z,L(z)/2 in finest cells (>= 1 cell).
     n_half = np.maximum(1, np.round(
-        SUPPORT_FACTOR * np.asarray(k_z_L_on_finest) / dz_finest).astype(int))
+        0.5 * np.asarray(k_z_L_on_finest) / dz_finest).astype(int))
     n_max = int(n_half.max())
-    padded = np.pad(profile_on_finest_grid, (n_max, n_max), mode='edge')
+    padded = np.pad(profile_on_finest_grid.astype(np.float64),
+                    (n_max, n_max), mode='edge')
 
     response = np.empty(n_p)
     for i in range(n_p):
         m = int(n_half[i])
-        kernel = np.interp(np.arange(-m, m + 1),
-                           np.linspace(-m, m, column.size), column)
-        kernel -= kernel.mean()
-        segment = padded[i + n_max - m: i + n_max + m + 1]
-        response[i] = abs(np.dot(kernel, segment)) \
-            * (domain_height / k_z_L_on_finest[i]) / n_p
+        center = i + n_max
+        upper = padded[center + 1: center + m + 1].mean()
+        lower = padded[center - m: center].mean()
+        response[i] = HAAR_TO_MHAT * abs(upper - lower)
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
