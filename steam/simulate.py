@@ -441,12 +441,21 @@ def simulate(
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
+    # Turbulon aspect ratio l_z/l_x per class and level (Eqn eq:turbulon
+    # aspect ratio scaling): the deterministic factor that suppresses
+    # vertical-gradient advection for pancake-shaped large turbulons and
+    # approaches 1 at the spheroscale.
+    aspect_k = []
+    for i, k in enumerate(k_values):
+        ls_i = np.interp(grids['z_arrays'][i], z_profile, spheroscale_profile)
+        aspect_k.append((_k_z(anisotropy, k, ls_i) / k).astype(np.float32))
+
     # Deterministic ensemble means E[W] of the advective weights (ensemble
     # norm; see _weight_reference).
     ref_h_k = _weight_reference(C_h_k, h_profile, z_profile, spheroscale_profile,
-                                anisotropy, k_values, grids['z_arrays'])
+                                anisotropy, k_values, grids['z_arrays'], aspect_k)
     ref_qt_k = _weight_reference(C_qt_k, qt_profile, z_profile, spheroscale_profile,
-                                 anisotropy, k_values, grids['z_arrays'])
+                                 anisotropy, k_values, grids['z_arrays'], aspect_k)
 
     child_seeds = seed_sequence.spawn(n_classes)
 
@@ -454,7 +463,7 @@ def simulate(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
-        ref_h_k, ref_qt_k,
+        ref_h_k, ref_qt_k, aspect_k,
         h_min, h_max, qt_min, qt_max,
         min_distance_to_ground,
         sparsity_factors,
@@ -550,7 +559,7 @@ def cascade_loop(
     h_profile, qt_profile, z_profile,
     grids,
     C_h_k, C_qt_k,
-    ref_h_k, ref_qt_k,
+    ref_h_k, ref_qt_k, aspect_k,
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
@@ -745,20 +754,21 @@ def cascade_loop(
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
-            # Advective weight (Eqn eq:local amplitude):
-            #   W = |∂φ/∂z| F^H_z + |∇_h φ| F,
-            # φ the field from classes L > ℓ, F the flux from classes L ≥ ℓ.
+            # Advective weight (Eqn eq:anisotropic gradient weighing):
+            #   W = F (|∇_h φ| + (ℓ_z/ℓ_x) |∂φ/∂z|),
+            # φ the field from classes L > ℓ, F the flux from classes L ≥ ℓ,
+            # ℓ_z/ℓ_x the deterministic turbulon aspect ratio (flux enters
+            # both terms linearly; Δw/Δu = ℓ_z/ℓ_x is kinematics).
             # Normalized by the deterministic ensemble mean E[W](z) — an
             # ensemble norm, never the realized level mean — then scaled to
             # the mean turbulon amplitude C_k(z).
             grad_h, grad_z = _gradient_components(running_sum, dx_k, dy_k, z_k)
             del running_sum
-            W = flux ** np.float32(H_z)
-            W *= grad_z
-            del grad_z
-            grad_h *= flux
+            W = grad_z
+            W *= aspect_k[i]    # 1D broadcast: ℓ_z/ℓ_x
             W += grad_h
             del grad_h
+            W *= flux
             W /= ref_i          # 1D broadcast: E[W](z)
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
             W *= S_k            # signed multiplier noise; W is now A
@@ -1247,17 +1257,18 @@ def _gradient_components(field_3d, dx, dy, z_coords):
 
 
 def _weight_reference(C_k, mean_profile, z_profile, spheroscale_profile,
-                      anisotropy, k_values, z_arrays):
+                      anisotropy, k_values, z_arrays, aspect_k):
     """Deterministic ensemble mean E[W] of the advective weight, per class.
 
-    The weight is W = |∂φ/∂z| F^H_z + |∇_h φ| F (Eqn eq:local amplitude).
+    The weight is W = F (|∇_h φ| + (ℓ_z/ℓ_x) |∂φ/∂z|) (Eqn eq:anisotropic
+    gradient weighing), with aspect_k the per-class ℓ_z/ℓ_x profiles.
     Its ensemble mean is computed with NO conditioning on the realization —
     this is what makes the amplitude normalization an ensemble norm rather
     than a per-realization norm (a realized-mean norm concentrates the whole
     level budget onto rare spikes wherever a level is nearly structureless).
 
-    E[F] = 1 exactly (conserved flux); E[F^H_z] ≈ 1 (|K(H_z)| ≪ 1 at the
-    C1 values used). Gradients: the mean profile contributes |d<φ>/dz|;
+    E[F] = 1 exactly (conserved flux), so F drops out of the reference.
+    Gradients: the mean profile contributes |d<φ>/dz|;
     each coarser class j < i contributes turbulon fluctuations of mean
     amplitude C_j(z) at vertical scale k_z_j(z) and horizontal scale k_j,
     i.e. gradient magnitudes ~ π C_j / scale (the RMS gradient of a
@@ -1281,6 +1292,6 @@ def _weight_reference(C_k, mean_profile, z_profile, spheroscale_profile,
             k_z_j = _k_z(anisotropy, k_values[j], spheroscale_i)
             vertical += np.pi * C_j / k_z_j
             horizontal += np.pi * C_j / k_values[j]
-        reference = vertical + horizontal
+        reference = vertical * aspect_k[i] + horizontal
         refs.append(np.where(reference > 0, reference, 1.0).astype(np.float32))
     return refs
