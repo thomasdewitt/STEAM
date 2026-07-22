@@ -24,20 +24,21 @@ CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
-# F is dimensionless and initialized to one. One octave is taken per dyadic size
-# class. Each substep multiplies the flux by exp(gamma), where gamma is an
-# EXTREMAL (maximally skewed, beta=-1) Levy alpha-stable field -- the log-
-# generator of a universal-multifractal random measure, so the cascade converges
-# to a true multifractal as the substep count grows. gamma is scaled by
-# FLUX_SCALE / N_FLUX_SUBSTEPS**(1/alpha): by alpha-stability the per-octave
-# generator is EXACTLY invariant in distribution under the substep count, so more
-# substeps only make the bounded-below update  F += conv(psi, (exp(gamma)-1)*F)
-# clip at zero less often. gamma is shifted so <exp(gamma)> = 1 exactly (the
-# alpha-generalization of the lognormal -sigma^2/2 shift; see LEVY_LOG_MEAN),
-# which conserves the flux mean. Scalar turbulons inherit the signed first-
-# substep multiplier noise, so they are skewed too; the extremal generator is
-# heavy-tailed on the low-multiplier side, giving the h'/qt' interior a
-# convective right-skew.
+# F is dimensionless and initialized to one. The flux is advanced exactly ONCE
+# per size class: each advance multiplies the flux by exp(gamma), where gamma
+# is an EXTREMAL (maximally skewed, beta=-1) Levy alpha-stable field -- the
+# log-generator of a universal-multifractal random measure. gamma is scaled by
+# FLUX_SCALE / n_scale_classes_per_dyad**(1/alpha): adjacent classes are
+# separated by scale ratio 2**(1/n), so by alpha-stability the per-OCTAVE
+# generator is exactly invariant in distribution under the class density --
+# n_scale_classes_per_dyad is the single cascade-density knob, controlling
+# both the scalar size classes and the flux cascade. gamma is shifted so
+# <exp(gamma)> = 1 exactly (the alpha-generalization of the lognormal
+# -sigma^2/2 shift; see LEVY_LOG_MEAN), which conserves the flux mean under
+# the bounded-below update  F += conv(psi, (exp(gamma)-1)*F), clipped at
+# zero. Scalar turbulons inherit the signed multiplier noise, so they are
+# skewed too; the extremal generator is heavy-tailed on the low-multiplier
+# side, giving the h'/qt' interior a convective right-skew.
 #
 # Realized intermittency calibrates as  C1 = A * FLUX_SCALE**alpha  (fit in
 # turbulon-analysis/calibration); at alpha=2 the generator is Gaussian and the
@@ -45,9 +46,11 @@ SUPPORT_FACTOR = 5
 # FLUX_SCALE is set so the realized flux C1 = 0.1, the measured TWPICE
 # horizontal-wind intermittency; C1 = 1.674 c^1.8 from calibration
 # (turbulon-analysis/calibration), so c = (0.1/1.674)^(1/1.8) = 0.21.
+# NOTE: that calibration was fit under the since-removed n_flux_substeps=4
+# configuration (flux advanced four times per octave); it must be re-fit for
+# the single-advance-per-class scheme.
 FLUX_SCALE = 0.21
 FLUX_ALPHA = 1.8
-N_FLUX_SUBSTEPS = 4
 
 
 def _extremal_levy(alpha, size, rng):
@@ -261,11 +264,6 @@ def simulate(
             "n_scale_classes_per_dyad must be a positive integer, "
             f"got {n_scale_classes_per_dyad}"
         )
-    if n_scale_classes_per_dyad != 1:
-        raise ValueError(
-            "The flux cascade requires one dyadic size class per octave; "
-            "set n_scale_classes_per_dyad=1"
-        )
     if not isinstance(min_distance_to_ground, int) or min_distance_to_ground < 0:
         raise ValueError(
             f"min_distance_to_ground must be a non-negative integer, got {min_distance_to_ground}"
@@ -432,10 +430,12 @@ def simulate(
     C_h_k = _compute_normalization(
         h_on_finest, k_z_L_on_finest, domain_height,
         k_values, outer_scale, grids, unit_turbulon,
+        n_scale_classes_per_dyad=n_scale_classes_per_dyad,
     )
     C_qt_k = _compute_normalization(
         qt_on_finest, k_z_L_on_finest, domain_height,
         k_values, outer_scale, grids, unit_turbulon,
+        n_scale_classes_per_dyad=n_scale_classes_per_dyad,
     )
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
     C_h_L = float(np.mean(C_h_k[0]))
@@ -468,6 +468,7 @@ def simulate(
         min_distance_to_ground,
         sparsity_factors,
         child_seeds,
+        n_scale_classes_per_dyad=n_scale_classes_per_dyad,
         turbulon_shape=turbulon_shape,
         device=device,
     )
@@ -540,7 +541,6 @@ def simulate(
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
         'flux_alpha': FLUX_ALPHA,
-        'n_flux_substeps': N_FLUX_SUBSTEPS,
     }
 
     write_netcdf(
@@ -564,6 +564,7 @@ def cascade_loop(
     min_distance_to_ground,
     sparsity_factors,
     seeds_or_rng,
+    n_scale_classes_per_dyad=1,
     h_perturbation=None,
     qt_perturbation=None,
     turbulon_shape='mexican_hat',
@@ -607,6 +608,11 @@ def cascade_loop(
         If a list of SeedSequence, each element seeds one size class
         independently. If a Generator, it is used directly for all
         classes (legacy behavior).
+    n_scale_classes_per_dyad : int
+        Cascade density: number of size classes per octave. Must match the
+        multiplicative spacing of ``grids['k']`` (adjacent-class ratio
+        ``2 ** (1 / n_scale_classes_per_dyad)``). Sets the per-class flux
+        generator scale (see the FLUX CASCADE note).
     h_perturbation, qt_perturbation : ndarray or None
         Existing perturbation fields for nested simulations. If None,
         initialized to zero at the first scale class resolution.
@@ -633,16 +639,20 @@ def cascade_loop(
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(grids['k'])
     n_zero = int(round(2 * s_z * min_distance_to_ground))
-    if not isinstance(N_FLUX_SUBSTEPS, int) or N_FLUX_SUBSTEPS < 1:
+    if not isinstance(n_scale_classes_per_dyad, int) or n_scale_classes_per_dyad < 1:
         raise ValueError(
-            f"N_FLUX_SUBSTEPS must be a positive integer, got {N_FLUX_SUBSTEPS}"
+            "n_scale_classes_per_dyad must be a positive integer, "
+            f"got {n_scale_classes_per_dyad}"
         )
 
     if n_classes > 1:
+        expected_ratio = 2.0 ** (1.0 / n_scale_classes_per_dyad)
         class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
-        if not np.allclose(class_ratios, 2.0):
+        if not np.allclose(class_ratios, expected_ratio):
             raise ValueError(
-                "The flux cascade requires dyadic size classes (one octave per step)"
+                "grids['k'] spacing is inconsistent with "
+                f"n_scale_classes_per_dyad={n_scale_classes_per_dyad} "
+                f"(expected adjacent-class ratio {expected_ratio})"
             )
 
     # Determine whether we have per-class seeds or a shared Generator
@@ -740,7 +750,7 @@ def cascade_loop(
             rng = seeds_or_rng
 
         S_k, _ = _advance_flux(
-            flux, rng, kernel, FLUX_SCALE, N_FLUX_SUBSTEPS,
+            flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
             device=device,
         )
@@ -798,71 +808,62 @@ def cascade_loop(
 
 
 def _advance_flux(
-    flux, rng, kernel, flux_noise_scale, n_flux_substeps,
+    flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
     device='cpu',
 ):
     """Advance the dimensionless flux cascade by one size class.
 
-    Each substep multiplies the flux by exp(gamma) with gamma an extremal-Levy
-    generator field (see the FLUX CASCADE note), scaled and shifted to unit
-    mean, giving the bounded-below update F += conv(psi, (exp(gamma)-1)*F). The
-    scalar turbulon amplitude carries the SIGNED first-substep multiplier noise
-    and the entering flux, normalized to mean absolute value one:
-    S_k = (exp(gamma_1)-1) * F_{k-1} / <|exp(gamma_1)-1|>.
+    A single advance multiplies the flux by exp(gamma) with gamma an
+    extremal-Levy generator field (see the FLUX CASCADE note), scaled and
+    shifted to unit mean, giving the bounded-below update
+    F += conv(psi, (exp(gamma)-1)*F). With n = n_scale_classes_per_dyad,
+    adjacent classes are separated by scale ratio 2**(1/n), so by
+    alpha-stability the per-class generator scale is
+    flux_noise_scale / n**(1/alpha) — the per-octave generator is invariant
+    in distribution under the class density. The scalar turbulon amplitude
+    carries the SIGNED multiplier noise and the entering flux, normalized to
+    mean absolute value one:
+    S_k = (exp(gamma)-1) * F_{k-1} / <|exp(gamma)-1|>.
     """
     s_x, s_y, s_z = sparsity_factors
-    substep_scale = flux_noise_scale / n_flux_substeps ** (1.0 / FLUX_ALPHA)
-    shift = np.float32(LEVY_LOG_MEAN * substep_scale ** FLUX_ALPHA)
-    substep_scale = np.float32(substep_scale)
-    scalar_amplitude = None
-    substeps = []
+    per_class_scale = flux_noise_scale / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
+    shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
+    per_class_scale = np.float32(per_class_scale)
 
-    for substep in range(n_flux_substeps):
-        gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
-        if zero_bottom and n_zero > 0:
-            gamma[:, :, :n_zero] = 0
-        if zero_top and n_zero > 0:
-            gamma[:, :, -n_zero:] = 0
+    gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
+    if zero_bottom and n_zero > 0:
+        gamma[:, :, :n_zero] = 0
+    if zero_top and n_zero > 0:
+        gamma[:, :, -n_zero:] = 0
 
-        # Unit-mean multiplier noise exp(gamma)-1 at the turbulon centers, and
-        # exactly 0 off-centers (no turbulon there); bounded below by -1.
-        gamma *= substep_scale
-        noise = np.expm1(gamma - shift)
-        noise[gamma == 0.0] = np.float32(0.0)
+    # Unit-mean multiplier noise exp(gamma)-1 at the turbulon centers, and
+    # exactly 0 off-centers (no turbulon there); bounded below by -1.
+    gamma *= per_class_scale
+    noise = np.expm1(gamma - shift)
+    noise[gamma == 0.0] = np.float32(0.0)
 
-        if substep == 0:
-            mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
-            scalar_amplitude = noise * flux
-            if mean_abs > 0:
-                scalar_amplitude *= np.float32(1.0 / mean_abs)
+    mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
+    scalar_amplitude = noise * flux
+    if mean_abs > 0:
+        scalar_amplitude *= np.float32(1.0 / mean_abs)
 
-        noise *= flux
-        flux += CONVOLVE(noise, kernel, device=device)
+    noise *= flux
+    flux += CONVOLVE(noise, kernel, device=device)
 
-        n_clipped = int(np.count_nonzero(flux < 0))
-        np.maximum(flux, np.float32(0.0), out=flux)
-        mean_flux = flux.mean(axis=(0, 1), keepdims=True)
-        empty_levels = (mean_flux <= 0).reshape(-1)
-        if np.any(empty_levels):
-            flux[:, :, empty_levels] = np.float32(1.0)
-            mean_flux[:, :, empty_levels] = np.float32(1.0)
-        flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
+    n_clipped = int(np.count_nonzero(flux < 0))
+    np.maximum(flux, np.float32(0.0), out=flux)
+    mean_flux = flux.mean(axis=(0, 1), keepdims=True)
+    empty_levels = (mean_flux <= 0).reshape(-1)
+    if np.any(empty_levels):
+        flux[:, :, empty_levels] = np.float32(1.0)
+        mean_flux[:, :, empty_levels] = np.float32(1.0)
+    flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
 
-        substeps.append({
-            'substep': substep + 1,
-            'n_clipped': n_clipped,
-            'n_points': int(flux.size),
-            'clip_fraction': n_clipped / flux.size,
-        })
-
-    total_clipped = sum(step['n_clipped'] for step in substeps)
-    total_points = int(flux.size) * n_flux_substeps
     diagnostics = {
-        'n_clipped': total_clipped,
-        'n_points': total_points,
-        'clip_fraction': total_clipped / total_points,
-        'substeps': substeps,
+        'n_clipped': n_clipped,
+        'n_points': int(flux.size),
+        'clip_fraction': n_clipped / flux.size,
     }
     return scalar_amplitude, diagnostics
 
@@ -872,7 +873,7 @@ def simulate_flux_only(
     sparsity_factors=(1, 1, 1),
     seed=None,
     flux_noise_scale=None,
-    n_flux_substeps=None,
+    n_scale_classes_per_dyad=1,
     min_distance_to_ground=0,
     turbulon_shape='mexican_hat',
     zero_bottom=False,
@@ -881,9 +882,11 @@ def simulate_flux_only(
     """Run only the unit-mean flux cascade on root-simulation grids.
 
     This is a cheap calibration/diagnostic path: it performs one convolution
-    or more convolutions per size class and skips the scalar profiles, gradients, and scalar
+    per size class and skips the scalar profiles, gradients, and scalar
     convolutions. ``grids`` must come from :func:`_compute_all_grids` with a
-    common physical extent at every class (the root-simulation case).
+    common physical extent at every class (the root-simulation case), and its
+    ``k`` spacing must match ``n_scale_classes_per_dyad`` (adjacent-class
+    ratio ``2 ** (1 / n_scale_classes_per_dyad)``).
 
     Returns
     -------
@@ -917,19 +920,21 @@ def simulate_flux_only(
     c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
     if not np.isfinite(c) or c < 0:
         raise ValueError(f"flux_noise_scale must be finite and non-negative, got {c}")
-    n_substeps = N_FLUX_SUBSTEPS if n_flux_substeps is None else n_flux_substeps
-    if not isinstance(n_substeps, int) or n_substeps < 1:
+    if not isinstance(n_scale_classes_per_dyad, int) or n_scale_classes_per_dyad < 1:
         raise ValueError(
-            f"n_flux_substeps must be a positive integer, got {n_substeps}"
+            "n_scale_classes_per_dyad must be a positive integer, "
+            f"got {n_scale_classes_per_dyad}"
         )
 
     n_classes = len(grids['k'])
     if n_classes > 1:
+        expected_ratio = 2.0 ** (1.0 / n_scale_classes_per_dyad)
         class_ratios = np.asarray(grids['k'][:-1]) / np.asarray(grids['k'][1:])
-        if not np.allclose(class_ratios, 2.0):
+        if not np.allclose(class_ratios, expected_ratio):
             raise ValueError(
-                "simulate_flux_only requires dyadic size classes "
-                "(one octave per step)"
+                "simulate_flux_only: grids['k'] spacing is inconsistent with "
+                f"n_scale_classes_per_dyad={n_scale_classes_per_dyad} "
+                f"(expected adjacent-class ratio {expected_ratio})"
             )
     seeds = np.random.SeedSequence(seed).spawn(n_classes)
     n_zero = int(round(2 * s_z * min_distance_to_ground))
@@ -955,7 +960,7 @@ def simulate_flux_only(
 
         rng = np.random.default_rng(seeds[i])
         scalar_amplitude, advance = _advance_flux(
-            flux, rng, kernel, c, n_substeps, sparsity_factors,
+            flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
             n_zero, zero_bottom, zero_top,
         )
         del scalar_amplitude
@@ -969,7 +974,7 @@ def simulate_flux_only(
 
     diagnostics = {
         'flux_noise_scale': float(c),
-        'n_flux_substeps': n_substeps,
+        'n_scale_classes_per_dyad': n_scale_classes_per_dyad,
         'steps': steps,
         'n_clipped': total_clipped,
         'n_points': total_points,
@@ -1157,7 +1162,8 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
 
 
 def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_height,
-                           k_values, outer_scale, z_arrays, turbulon):
+                           k_values, outer_scale, z_arrays, turbulon,
+                           n_scale_classes_per_dyad=1):
     """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
@@ -1174,7 +1180,12 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
     at that height's scale; N_p is the number of profile samples. N_L(z)/N_p
     makes the response independent of profile resolution (the summed response
     scales as cells-per-kernel = k_z,L/dz; the prefactor as its inverse).
-    C_{Phi,k} then follows (k/L)^H_h.
+    C_{Phi,k} then follows n_c^{-1/2} (k/L)^H_h, with n_c =
+    n_scale_classes_per_dyad: classes carry fresh zero-mean signed noise, so
+    per-octave variance is proportional to the class count and the per-class
+    amplitude must shrink as n_c^{-1/2} to keep the fields statistically
+    independent of the cascade density (the scalar analogue of the flux
+    cascade's n_c^{-1/alpha} generator scaling).
 
     The column is a slice of the 3D-mean-subtracted envelope, so it is not itself
     zero-mean; it is made zero-mean here (the discretized-wavelet admissibility
@@ -1220,7 +1231,7 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
             * (domain_height / k_z_L_on_finest[i]) / n_p
     C_k = []
     for i, k in enumerate(k_values):
-        hurst_scale = float((k / outer_scale) ** H_h)
+        hurst_scale = float((k / outer_scale) ** H_h) / np.sqrt(n_scale_classes_per_dyad)
         C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
         C_k.append(C_profile)
     return C_k

@@ -136,6 +136,23 @@ def test_rejects_invalid_n_scale_classes_per_dyad(tmp_path, simple_profiles):
                  n_scale_classes_per_dyad=1.5)
 
 
+def test_simulate_runs_with_two_scale_classes_per_dyad(tmp_path, simple_profiles):
+    # n_scale_classes_per_dyad is the single cascade-density knob: it sets
+    # both the sqrt(2) scalar class spacing and the per-class flux scale.
+    h, qt = simple_profiles
+    out = tmp_path / "half_octave.nc"
+    simulate(h, qt, nx=16, ny=16, dx=500, dy=500,
+             outer_scale=8000, spheroscale=100,
+             domain_height=3000, profile_dz=30,
+             output_path=out, seed=42,
+             n_scale_classes_per_dyad=2)
+    assert out.exists()
+    with netCDF4.Dataset(out) as ds:
+        assert int(ds.n_scale_classes_per_dyad) == 2
+        k = ds.variables["k_values"][:]
+        np.testing.assert_allclose(k[:-1] / k[1:], np.sqrt(2.0), rtol=1e-6)
+
+
 def test_rejects_float_sparsity(tmp_path, simple_profiles):
     h, qt = simple_profiles
     with pytest.raises(ValueError, match="positive integer"):

@@ -26,7 +26,6 @@ def _root_grids():
 def test_flux_cascade_default_scale():
     assert sm.FLUX_SCALE == 0.21
     assert sm.FLUX_ALPHA == 1.8
-    assert sm.N_FLUX_SUBSTEPS == 4
 
 
 def test_levy_log_mean_reduces_to_lognormal_at_alpha_two():
@@ -38,11 +37,11 @@ def test_levy_log_mean_reduces_to_lognormal_at_alpha_two():
     assert abs(float(np.log(np.mean(np.exp(draw)))) - 1.0) < 0.01
 
 
-def test_flux_only_rejects_non_dyadic_classes():
+def test_flux_only_rejects_class_spacing_inconsistent_with_density():
     grids = _root_grids()
     grids["k"] = np.array([8.0, 5.0, 2.0])
 
-    with np.testing.assert_raises_regex(ValueError, "dyadic"):
+    with np.testing.assert_raises_regex(ValueError, "n_scale_classes_per_dyad"):
         sm.simulate_flux_only(grids, seed=1)
 
 
@@ -58,8 +57,8 @@ def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
         c, 1, (1, 1, 1),
     )
 
-    # One substep: substep_scale = c, multiplier noise = exp(c*gamma0 - shift)-1,
-    # zero at the off-center (gamma0 == 0) draw.
+    # n_scale_classes_per_dyad=1: per-class scale = c, multiplier noise
+    # = exp(c*gamma0 - shift)-1, zero at the off-center (gamma0 == 0) draw.
     shift = sm.LEVY_LOG_MEAN * c ** sm.FLUX_ALPHA
     noise = np.expm1(gamma0.ravel() * c - shift)
     noise[gamma0.ravel() == 0.0] = 0.0
@@ -76,12 +75,12 @@ def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, rtol=1e-6)
 
 
-def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
-    draws = iter([
-        np.full((2, 2, 1), -0.25, dtype=np.float32),
-        np.full((2, 2, 1), 0.25, dtype=np.float32),
-    ])
-    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: next(draws))
+def test_advance_flux_scales_generator_by_class_density(monkeypatch):
+    # With n classes per dyad the per-class generator scale is
+    # c / n**(1/alpha) (per-octave invariance by alpha-stability); a single
+    # advance draws ONE generator field and counts each point once.
+    gamma0 = np.full((2, 2, 1), -0.25, dtype=np.float32)
+    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: gamma0.copy())
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel, device="cpu": field.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
@@ -91,15 +90,43 @@ def test_flux_substeps_use_fresh_noise_and_count_each_point(monkeypatch):
         c, n, (1, 1, 1),
     )
 
-    # Scalar amplitude uses only the first substep; equal draws give
-    # |noise| = mean_abs, so S_k = sign(noise) exactly.
+    # Equal draws give |noise| = mean_abs, so S_k = sign(noise) exactly.
     scale = c / n ** (1.0 / sm.FLUX_ALPHA)
     shift = sm.LEVY_LOG_MEAN * scale ** sm.FLUX_ALPHA
     noise0 = np.expm1(-0.25 * scale - shift)
     np.testing.assert_allclose(amplitude, noise0 / abs(noise0))
-    assert diagnostics["n_points"] == 8
-    assert len(diagnostics["substeps"]) == 2
+    assert diagnostics["n_points"] == flux.size
+    assert "substeps" not in diagnostics
     np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
+
+    # F += (exp(gamma)-1)*F with identity convolution, then unit-mean renorm:
+    # a uniform draw renormalizes back to exactly one.
+    np.testing.assert_allclose(flux, 1.0, rtol=1e-6)
+
+
+def test_flux_only_runs_with_two_classes_per_dyad():
+    # sqrt(2)-spaced size classes with n_scale_classes_per_dyad=2.
+    k_values = 8.0 / 2.0 ** (np.arange(5) / 2.0)
+    z_profile = np.arange(17, dtype=np.float64)
+    spheroscale = np.full_like(z_profile, 8.0)
+    grids = sm._compute_all_grids(
+        k_values,
+        inner_extent_x=16.0,
+        inner_extent_y=16.0,
+        inner_height=16.0,
+        sparsity_factors=(1, 1, 1),
+        spheroscale_profile=spheroscale,
+        z_profile=z_profile,
+    )
+
+    flux, diagnostics = sm.simulate_flux_only(
+        grids, seed=7, n_scale_classes_per_dyad=2,
+    )
+
+    assert np.all(flux >= 0)
+    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=2e-6)
+    assert diagnostics["n_scale_classes_per_dyad"] == 2
+    assert len(diagnostics["steps"]) == len(k_values)
 
 
 def test_flux_only_starts_at_one_and_preserves_unit_horizontal_mean():
@@ -115,7 +142,7 @@ def test_flux_only_starts_at_one_and_preserves_unit_horizontal_mean():
 
 def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     flux, diagnostics = sm.simulate_flux_only(
-        _root_grids(), seed=9, flux_noise_scale=5.0,
+        _root_grids(), seed=3, flux_noise_scale=5.0,
     )
 
     assert diagnostics["n_clipped"] > 0
@@ -131,7 +158,7 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
     qt_profile = 0.005 + 0.0001 * z_profile
     convolved_fields = []
 
-    def fake_advance(flux, rng, kernel, flux_noise_scale, n_flux_substeps,
+    def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
                      device="cpu"):
         return np.ones_like(flux), {"n_clipped": 0}
