@@ -145,7 +145,7 @@ where $H_x$ and $H_z$ are equal to their values for the horizontal component of 
 Hurst exponents for quantities that are not pure advected scalars might not follow Eqns. \ref{eq:LS scalar directional structure functions}, but could still be expected to display the aspect ratio scaling prescribed by Eqn. \ref{eq:turbulon aspect ratio scaling}. As an example, if the wind field contains a perturbation in a given location, other fields such as temperature or cloud condensate might be expected to also show perturbations with varying amplitudes but identical geometry. Indeed, \citet{guillaume2018} found that the aspect ratio of cloud cross-sections, as observed by the satellite-based radar CALYPSO, show the   predicted aspect ratio scaling, although their reported results require some algebraic manipulation as we show in Appendix ().
 
 
-\subsection{Distribution of turbulon amplitudes across scale}
+\subsection{Distribution of turbulon amplitudes across scale} \label{sect:distribution of turbulon amplitudes across scale}
 
 Both structure functions and wavenumber spectra represent a scale decomposition of a signal, where scale is measured using either field differences or wavenumber. Both may be recast as a special case of a generalized scale decomposition framework using wavelet transforms. Here, this framework is useful because it shows that the differences in Eqn. \ref{eq:LS directional structure functions} may be replaced by a turbulon envelope function $\mathfrak{T}$ without any change to the power-law dependence in $\Delta x$ or $\Delta z$. Thus, Eqn. \ref{eq:LS directional structure functions} may be interpreted as a constraint on the mean amplitude of the turbulons as a function of their scale parameter $k$. Specifically, if the turbulon envelope function is defined through
 
@@ -176,23 +176,26 @@ One remaining ingredient that is needed for simulations is to determine the cons
 
 At its core, the basic action of a turbulent cascade is to transfer variability from large scales to small scales. In such a downscale cascade, the overall magnitude of the fluctuations at each scale are determined by the amplitude of the fluctuations at the largest scales. For STEAM, this idea is operationalized by computing the large-scale fluctuation magnitudes using the ensemble mean profile. For simplicity, we consider a horizontally uniform domain mean, and so the large-scale flucutation magnitude is computed using a  one-dimensional vertical convolution between the largest simulated turbulon and the ensemble mean profile for each simulated scalar field, as described in Appendix (). The resulting amplitudes at each height are interpreted as the mean amplitude of the turbulon components at the outer scale. Using Eqn. \ref{eq:turbulon amplitude vs scale}, outer-scale amplitudes are used to set the proportionality constants for the mean turbulon amplitudes at every other scale. Because the gradient of the mean profile typically varies with height, the proportionality constants will also vary with height. This has two consequences. First, fields which have horizontally and vertically uniform mean profiles will not produce any variability in the simulated scalars, as should be expected. As an example, convective activity should not be expected to modify local concentrations of an already well-mixed gas like argon. Second, any level within the domain that has a stronger mean gradient will produce more small-scale variance, as might also be expected intuitively. Stratocumulus fields near a strong inversion, for example, display much greater moisture variance within in the cloud layer than in the mixed layer below because the proximity to the strong inversion allows for very dry pockets of air to intrude from the free troposphere above. 
  
-\subsection{Distribution of turbulon amplitudes in space}
+\subsection{Distribution of turbulon amplitudes in space} \label{sect:distribution of turbulon amplitudes in space}
 
 Although Eqn. \ref{eq:LS scalar directional structure functions} constrains the mean absolute turbulon amplitude as a function of scale $k$ globally, at any given location a turbulon amplitude should also depend on the local structure of the field. There are two particular aspects to consider: the amount of structure in the scalar field that is available to be advected, and the strength of the eddies that cause such advection to occur. Because advection represents a rearrangement of the field, there must be some nonzero gradient spanning the region in which a given eddy operates if that eddy is to introduce any perturbation in a scalar field. If the scalar field was initially uniform, an eddy might transport molecules from one location to another, but the scalar concentration would not change. If the scalar field does have a nonzero gradient, then it might be expected that the size of the perturbation caused by the eddy would be proportional to the magnitude of the gradient. 
+
+As a first approximation, consider an rearrangement of a linearized gradient in some scalar field $\varphi$. The amplitude of the perturbation due to the rearrangement will be proportional to the gradient magnitude and the length of the eddy that causes this rearrangement. Since the eddies are highly aniostropic, they have very different vertical and horizontal lengths, so we can model advection by introducing a perturbation that is proportional to 
+\begin{align}
+  \delta \varphi \propto \ell_x|\nabla_h \varphi| + \ell_z|\frac{\partial \varphi}{\partial z}|, \label{eq:anisotropic gradient weighing}
+\end{align}
+where $\nabla_h$ represents the horizontal component of the gradient operator.
 
 The second aspect of local field structure to consider is the strength of the eddy that causes a perturbation. In a turbulent cascade, eddy strength is determined by the down-cascade turbulent flux, i.e. the dynamically-relevant quantity that is conserved as it is passed from large scales to small. In isotropic Kolmogorov turbulence this quantity is the kinetic energy dissipation rate $\varepsilon$. In Lovejoy-Schertzer turbulence, there are two such fluxes $\varepsilon_h$ and $\phi$ (Eqn. ()), with the relevant flux dependent on the direction of the flow. To model eddy strength, STEAM simulations include a normalized flux quantity $\mathcal{F}$ as a prognostic variable alongside $h$ and $q_t$. The main difference between the turbulent flux and the scalar fields is that the turbulent flux is conserved at each scale through the cascade, implying that the amplitude of the flux component of the turbulons does not depend on scale, at least on average. Instead, at each scale $\ell$ the mean perturbation $\langle \mathcal{F}_\ell \rangle$ is equal to a constant that is independent of $\ell$ and must be specified as a boundary condition. Because we use a normalized and dimensionless quantity for $\mathcal{F}$, the exact physical nature of the flux is not important and might depend on the flow being simulated. It is rather the property of being conserved across scale that is key for a nondimensional flux. For each turbulon, we assume the magnitude of the wind vector is proportional to the flux amplitude.
 
 The flux $\mathcal{F}$ is not spatially uniform. Local regions within a convective cell will have higher eddy dissipation rates than adjacent clear air, for example. Specifically, we hypothesize that turbulons of scale $\ell$ form with a mean amplitude that is proportional to the local value of $\mathcal{F}_{L>\ell}$, that is, the flux field associated with turbulons larger than scale $\ell$. As show in Appendix (), this hypothesis naturally creates multiplicative intermittency in the flux field $\mathcal{F}$, and the strength of the intermittency is larger for flows with higher mean dissipation rates. Notably, the intermittency of $\mathcal{F}$ can be quantified using a more common multiplicative cascade framework but has the advantage of tying the strength of the intermittency to the mean dissipation rate.
 
-Thus, the flux controls the strength of the eddies while the scalar gradient controls the concentration that is available to be advected. But because the flow is highly stratified, especially at larger scales, the alignment of the concentration gradient and wind matters. It is not enough for a region to have a strong vertical concentration gradient if the vertical velocity is not strong enough to mix that gradient. To account for this effect, consider that a turbulent eddy has characteristic horizontal velocity $\Delta u \sim \ell_x/\tau$ where $\tau$ is the lifetime of the eddy and $\ell_x$ is its horizontal length. Similarly, its vertical velocity is $\Delta w \sim \ell_z\tau$ where $\ell_z$ is its height. For the eddy to be a coherent physical object, making up the wind component of a turbulon, its lifetime must be the same in both equations. Since the turbulon is anisotropic with $\ell_z\sim\ell_x^{H_z}$, we have $\Delta_w \propto \Delta u^{H_z}$ and therefore $\Delta w \propto \mathcal{F}^{H_z}$.
-
-The amplitude of the perturbation in the concentration field due to an eddy should, strictly speaking, be equal to the dot product of the wind vector and the scalar gradient. However, STEAM does not yet simulate a full vector wind field. Instead, we assume the perturbation magnitude for some field $\varphi$ is proportional to 
+Thus, the flux controls the strength of the eddies while the scalar gradient controls the concentration that is available to be advected. Together, in STEAM these physical effects are modeled as follows, described in further detail in Appendix (). The simulation proceeds from large scales to small. At each scale, the first step is to compute perturbations in $\mathcal{F}_\ell$ that are associated with each turbulon of size $\ell$. This is done by drawing a random variable with unit mean and unit amplitude from the distribution described in Appendix (), and then scaling the perturbation by the local field $\mathcal{F}_{L>\ell}$ while enforcing that $\langle \mathcal{F}_\ell \rangle$ is equal to the specified ensemble mean value. Perturbations in $h_\ell$ and $q_{t_\ell}$ are then computed such that the local value is proportional to, from Eqns. \ref{eq:anisotropic gradient weighing} and \ref{eq:turbulon aspect ratio scaling},
 \begin{align}
-  \frac{\partial \varphi}{\partial z}\Delta w + \nabla_h \Delta u \approx \frac{\partial \varphi}{\partial z}\mathcal{F}_\ell^{H_z} + \nabla_h \mathcal{F}_\ell.
+  \delta h \propto \mathcal{F}\left(\ell_x|\nabla_h h| + l_s^{1-H_z}\ell_x^{H_z}|\frac{\partial h}{\partial z}|\right) \\
+  \delta q_t \propto \mathcal{F}\left(\ell_x|\nabla_h q_t| + l_s^{1-H_z}\ell_x^{H_z}|\frac{\partial q_t}{\partial z}|\right).
 \end{align}
-This appoximation accounts for the most important source of misalignment between the scalar gradient and the wind vector, namely stratification where the horizontal wind is much larger than the vertical wind at larger scales.
-
-The above global and local constraints on turbulon amplitudes are implemented in STEAM as follows, described in further detail in Appendix (). The simulation proceeds from large scales to small. At each scale, the first step is to compute perturbations in $\mathcal{F}_\ell$ that are associated with each turbulon of size $\ell$. This is done by drawing a random variable with unit mean and unit amplitude from the distribution described in Appendix (), and then scaling the perturbation by the local field $\mathcal{F}_{L>\ell}$ while enforcing that $\langle \mathcal{F}_\ell \rangle$ is equal to the specified ensemble mean value. Perturbations in $h_\ell$ and $q_{t_\ell}$ are then computed such that the local value is proportional to both the gradient $\nabla h_{L>\ell}$ or  $\nabla q_t{_{L>\ell}}$ and the turbulent flux $\mathcal{F}_{L\ge \ell}$, while enforcing that the ensemble mean $\langle h_\ell\rangle$ or $\langle q_{t_\ell}\rangle$ follows Eqn. \ref{eq:turbulon amplitude vs scale}. Finally, for all three fields, a perturbation with shape defined by the turbulon envelope function and amplitude scaled as described above are added to the parent fields, and the simulation proceeds to the next smaller scale.
+The proportionality constant is set by enfocing that the ensemble mean $\langle h_\ell\rangle$ or $\langle q_{t_\ell}\rangle$ follows Eqn. \ref{eq:turbulon amplitude vs scale}. Finally, for all three fields, a perturbation with shape defined by the turbulon envelope function and amplitude scaled as described above are added to the parent fields, and the simulation proceeds to the next smaller scale.
 
 \subsection{Diagnostic variables}
 
@@ -321,29 +324,29 @@ The selected cloud renderings shown in Fig. () were produced using the cloud vis
 \section{STEAM algorithm} \label{sect:steam algorithm details}
 
 Here we provide an explicit description of the STEAM algorithm for modeling moist static energy $h$, total water mixing ratio $q$, and the conserved turbulent flux $\varepsilon_h$.
-As a point of notation, there are three distinct types of averages requiring disambiguation. Consider a large ensemble of statistically independent turbulent flows. Any variable may be averaged along the spatial directions, which we denote $\langle \rangle_\mathbf{x}$. The result may in principle still have time dependence and differ between ensemble members. Alternatively, if we average only along the time direction, denoted by $\langle \rangle_t$, in principle the result may differ spatially and among ensemble members. Finally, we might average across ensemble members, which we denote $\langle \rangle_i$, which in principle could result in an ensemble mean that still varies in time and space. Unit vectors are denoted as $\hat{x}, \hat{y}, \hat{z}$, and we denote the gradient of some arbitrary field $f$
+As a point of notation, there are three distinct types of averages requiring disambiguation. Consider a large ensemble of statistically independent turbulent flows. Any variable may be averaged along the spatial directions, which we denote $\langle \rangle_\mathbf{x}$. The result may in principle still have time dependence and differ between ensemble members. Alternatively, if we average only along the time direction, denoted by $\langle \rangle_t$, in principle the result may differ spatially and among ensemble members. Finally, we might average across ensemble members, which we denote $\langle \rangle_i$, which in principle could result in an ensemble mean that still varies in time and space. Unit vectors are denoted as $\hat{x}, \hat{y}, \hat{z}$, and we denote the horizontal gradient magnitude of some arbitrary field $f$
 \begin{align}
-  \nabla f = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2 + \left(\frac{\partial f}{\partial z}\right)^2}.
+  |\nabla_h f| = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2}.
 \end{align}
 
-We assume the ensemble means $\langle h \rangle_t$ and $\langle q_t \rangle_t$ are known and horizontally uniform, in which case they may be simply represented by a 1D profile along the vertical direction. We also assume the outer scale $L$ and the spheroscale $l_s$ are known, and we consider logarithmically-spaced size classes for the turbulons $L, L/2, L/4, \dots, dx$, implying the outer scale must be a power of two factor of the horizontal grid resolution. 
+We assume the ensemble means $\langle h \rangle_t$ and $\langle q_t \rangle_t$ are known and horizontally uniform, in which case they may be simply represented by a 1D profile along the vertical direction. We also assume the outer scale $L$ and the spheroscale $l_s$ are known, and we consider logarithmically-spaced size classes for the turbulons $L, L/2, L/4, \dots, 2dx$, implying the outer scale must be a power of two factor of the horizontal grid resolution. The smallest size class is $2dx$ rather than $dx$ so that the finest turbulons are Nyquist-sampled by the output grid.
 
-First, define the three-dimensional turbulon envelope shape $\mathfrak{T}_k$ as a function of size class $k$. For simplicity we will use a Mexican hat, defined as
+First, define the three-dimensional turbulon envelope shape $\mathfrak{T}_k$ as a function of size class $k$. For simplicity we will use a Mexican hat with standard deviation $\sigma = k/\pi$, chosen so that the envelope's power spectral density peaks at wavelength $k$:
 \begin{align}
-  \mathfrak{T}_k||r|| = \left(1-\frac{||r||^2}{k^2}\right)\exp \left(-\frac{||r||^2}{2k^2}\right) \label{apxeq:turbulon shape}
+  \mathfrak{T}_k(||r||) = \left(1-\frac{\pi^2||r||^2}{k^2}\right)\exp \left(-\frac{\pi^2||r||^2}{2k^2}\right) \label{apxeq:turbulon shape}
 \end{align}
 where $||r||$ is a vertically-stretched distance metric defined by
 \begin{align}
   ||r|| = \left(x^{2} +y^{2} + \left(z\frac{k}{k_z}\right)^{2}\right)^{1/2}. \label{apxeq:stretched distance}
 \end{align}
-The turbulon aspect ratio $k_h/k_z$ is defined by Eqn. \ref{eq:turbulon aspect ratio scaling} such that 
+The turbulon aspect ratio $k_h/k_z$ is defined by Eqn. \ref{eq:turbulon aspect ratio scaling} such that
 \begin{align}
   k_z = l_s \left(\frac{k}{l_s}\right)^{H_z}. \label{apxeq:vertical turbulon size class}
 \end{align}
-Note that the value for the smallest turbulon size class should be chosen such that the smallest turbulons are reasonably well resolved; for the Mexican Hat envelope function, $k_\text{min}=dx$ is a reasonable choice but other shape functions for $\mathfrak{T}$ may require a different $k_\text{min}$.
+In practice the stretched metric is realized by constructing an envelope that is isotropic in grid-index space on a working grid whose vertical spacing is compressed in proportion to $k_z/k$ (see the supplement), which is equivalent to Eqn. \ref{apxeq:stretched distance} when the sparsity factors defined below are equal.
 
 
-On a basic level, the three scalar fields $\varepsilon$, $h$ and $q$ are simulated by constructing a hierarchy of 3D arrays for each turbulon size class $k$, called $\widetilde{\varepsilon}_k$, $\widetilde{h}_k$ and $\widetilde{q}_k$, each representing the contribution of turbulons of a given size to the resulting scalar fields $\varepsilon$, $h$ and $q$. The simulation proceeds in a sequential manner, beginning with $k=L$ and progressively stepping down until the smallest $k=dx$ is reached. The final fields are the sum of the ensemble mean field and the perturbation due to each turbulon size class:
+On a basic level, the three scalar fields $\varepsilon$, $h$ and $q$ are simulated by constructing a hierarchy of 3D arrays for each turbulon size class $k$, called $\widetilde{\varepsilon}_k$, $\widetilde{h}_k$ and $\widetilde{q}_k$, each representing the contribution of turbulons of a given size to the resulting scalar fields $\varepsilon$, $h$ and $q$. The simulation proceeds in a sequential manner, beginning with $k=L$ and progressively stepping down until the smallest $k=2dx$ is reached. The final fields are the sum of the ensemble mean field and the perturbation due to each turbulon size class:
 \begin{align}
   h = \langle h \rangle_t + \sum_k \widetilde{h_k}, \\
   q = \langle q \rangle_t + \sum_k \widetilde{q_k}, \\
@@ -358,56 +361,53 @@ At each size class, a computationally efficient means of superimposing turbulons
 \widetilde{\varepsilon}_k &=  \mathfrak{T}_k * A_\varepsilon
 \end{align}
 where $A_\Phi$ represents turbulon amplitudes as a function of $\mathbf{x}$ and $k$.
-For a given location $\mathbf{x}$ and size class $k_i$, the turbulon amplitude fields are defined in a similar way for the advected scalar fields $h$ and $q_t$, but differently for the turbulent flux $\varepsilon$ due to their different physical roles. Due to scale-by-scale flux conservation, the mean amplitude of perturbations in the flux field are independent of scale. But for a given location within a given realization, the amplitude of the flux perturbations varies widely, with the perturbation amplitude scaling with large-scale flux values. Specifically, amplitudes are computed as
-\begin{align}
-  A_\varepsilon &= \gamma_i \left(\langle \varepsilon\rangle_t + \sum_{k_i>k}\widetilde{\varepsilon_{k_i}}\right) \label{eq:flux at scale}
-\end{align}
-where $ \gamma_i$ are a unit, independent, independent, and identically distributed random variable with mean 1. The parenthetical factor in Eqn. \ref{eq:flux at scale} represents the large-scale flux at a given location. It is not clear exactly which distribution should be used for $\gamma_i$, but for simplicity we choose a lognormal and consider the effects of other choices in Appendix (). Once $A_k$ are computed at each step, the other amplitude factors are computed as
-\begin{align}
-A_h &= A_\varepsilon G_{h, k} C_{h, k}, \\
-A_q &= A_\varepsilon G_{q, k} C_{q, k},
-  \label{apxeq:amplitude propto gradient normalized} 
-\end{align}
-where $G_k$ and $C_k$ represent two distinct physical phenomena.
+For a given location $\mathbf{x}$ and size class $k_i$, the turbulon amplitude fields are defined in a similar way for the advected scalar fields $h$ and $q_t$, but differently for the turbulent flux due to their different physical roles.
 
-The first factor $G_k$ represents the amount of structure in the scalar field that is available for mixing from Eqn. \ref{eq:variance redistribution rate}. For a given size class, $G$ is computed from the component of the field containing larger turbulons $\sum_{k>k_i} \widetilde{h}_k$ or $\sum_{k>k_i} \widetilde{q}_k$, respectively. It is defined as
+The flux is represented by a dimensionless field $\mathcal{F}$, initialized to one everywhere at the outer scale. Due to scale-by-scale flux conservation, the mean amplitude of flux perturbations is independent of scale. But for a given location within a given realization, the flux perturbation amplitude scales with the local large-scale flux: at each size class the flux is updated as
 \begin{align}
-  G_{\Phi, k} =  g_{\Phi, k}/\langle g_{\Phi, k}\rangle_\mathbf{x};\qquad g_{\Phi, k} = \left( f-\Phi_\text{min}\right)\left(\Phi_\text{max} - f \right)| \nabla f|;\qquad
-  \begin{cases}
-      f= \langle \Phi\rangle_t + \sum_{k_i>k}\widetilde{\Phi_{k_i}};\qquad &k<L \\
-     f= \nabla \langle \Phi \rangle_t  \qquad &k=L.
-  \end{cases}
+  \mathcal{F} \mathrel{+}= \mathfrak{T}_k * \left[\left(e^{\gamma} - 1\right)\mathcal{F}\right] \label{eq:flux at scale}
 \end{align}
+where $\gamma$ is a sparse field of independent random variables drawn at the turbulon centers, so that each flux increment is proportional to the local flux from larger scales, per the hypothesis of Sect. \ref{sect:distribution of turbulon amplitudes in space}. The draws are from an extremal (maximally skewed, $\beta=-1$) L\'evy $\alpha$-stable distribution with $\alpha = 1.8$, the log-generator of a universal multifractal \citep{lovejoy2010FIF}, shifted such that $\langle e^\gamma \rangle = 1$ exactly so that the mean flux is conserved; at $\alpha=2$ the generator is Gaussian and the flux cascade reduces to the lognormal case. Each octave is subdivided into several substeps (by $\alpha$-stability the per-octave generator is invariant under the substep count); the update is clipped at zero, which preserves the positivity of the flux, and the horizontal mean is renormalized to one at each level. The amplitude of $\gamma$ is a free parameter that sets the intermittency of the flux and, through the weighting below, of the scalar fields.
 
-
-The second factor $C_k$ is a normalization factor representing the total domain-integrated variance that is to be distributed across scales. 
-The factors $C_k$ are constrained by the Lovejoy-Schertzer law of scalar advection (Eqn. \ref{eq:LS scalar directional structure functions}) such that
+Scalar turbulon amplitudes are then computed following Eqn. \ref{eq:anisotropic gradient weighing} as
 \begin{align}
-    C_{\Phi, k} = C_{\Phi, L}\left(\frac{k}{L}\right)^{H_h}, \qquad H_h=1/3.\label{apxeq:mean turbulon amplitude}
-\end{align} 
+A_h &= C_{h, k} \frac{W_{h,k}}{\langle W_{h,k}\rangle_i} S_k, \\
+A_q &= C_{q, k} \frac{W_{q,k}}{\langle W_{q,k}\rangle_i} S_k,
+  \label{apxeq:amplitude propto gradient normalized}
+\end{align}
+where $W_k$ is the local advective weight, $\langle W_k \rangle_i$ its ensemble mean, $C_k$ the mean turbulon amplitude of Eqn. \ref{apxeq:mean turbulon amplitude}, and $S_k$ a signed random noise, shared between $h$ and $q_t$ because a single eddy transports both scalars. $S_k$ is taken from the first flux substep of the same size class (the signed increment $(e^\gamma-1)\mathcal{F}$, normalized to unit mean absolute value), so that scalar perturbations inherit the skewness of the flux.
+
+The weight follows the anisotropic advective form of the main text,
+\begin{align}
+  W_{\Phi, k} = \mathcal{F}\left(| \nabla_h f| + \frac{k_z}{k}\left|\frac{\partial f}{\partial z}\right|\right); \qquad f = \langle \Phi\rangle_t + \sum_{k_i>k}\widetilde{\Phi_{k_i}}, \label{apxeq:advective weight}
+\end{align}
+where $k_z/k$ is the turbulon aspect ratio of Eqn. \ref{apxeq:vertical turbulon size class} and $\mathcal{F}$ is the flux field including the current size class. The normalization by $\langle W_k \rangle_i$ enforces the ensemble-mean amplitude of Eqn. \ref{apxeq:mean turbulon amplitude}. Critically, $\langle W_k \rangle_i$ is the mean over the \textit{ensemble}, not over the realization: it is computed deterministically from quantities known before the simulation runs, using $\langle \mathcal{F} \rangle_i = 1$ and estimating the ensemble-mean gradients from the mean profile plus the turbulon amplitudes of all larger size classes,
+\begin{align}
+  \langle W_{\Phi,k} \rangle_i (z) = \frac{k_z}{k}\left(\left|\frac{d \langle \Phi\rangle_t}{d z}\right| + \sum_{k_j > k} \frac{\pi C_{\Phi,j}}{k_{z,j}}\right) + \sum_{k_j > k} \frac{\pi C_{\Phi,j}}{k_j}, \label{apxeq:ensemble weight reference}
+\end{align}
+where $\pi C_{\Phi,j}/k_j$ is the gradient magnitude of a turbulon of mean amplitude $C_{\Phi,j}$ and wavelength $k_j$. Normalizing by a realized spatial mean instead would force every level to carry its full amplitude budget regardless of how little structure the realization contains there, concentrating amplitude onto rare fluctuations at levels where the ensemble-mean gradient is near zero.
+
+
+The factor $C_k$ is a normalization factor representing the mean turbulon amplitude at each scale. The factors $C_k$ are constrained by the Lovejoy-Schertzer law of scalar advection (Eqn. \ref{eq:LS scalar directional structure functions}) such that
+\begin{align}
+    C_{\Phi, k} = C_{\Phi, L}\left(\frac{k}{L}\right)^{H_h}.\label{apxeq:mean turbulon amplitude}
+\end{align}
 The overall normalization factor $C_L$
-represents the mean amplitude of the largest size class of turbulons. Physically, this represents the large-scale field variance that is available to cascade to smaller scales. This large-scale variance is computed using a convolution of the largest turbulon $\mathfrak{T}_L$ with the ensemble mean array $\langle\Phi\rangle_t$ using edge-padded boundaries (i.e., the profile is extended by repeating its boundary values). Specifically, assuming horizontal mean profiles $\langle \Phi\rangle_t(\mathbf{x}) = \langle \Phi\rangle_t(z)$,
+represents the mean amplitude of the largest size class of turbulons. Physically, this represents the large-scale fluctuation magnitude that is available to cascade to smaller scales, computed from the vertical structure of the ensemble mean profile as described in Sect. \ref{sect:distribution of turbulon amplitudes across scale}. Specifically, assuming horizontally uniform mean profiles $\langle \Phi\rangle_t(\mathbf{x}) = \langle \Phi\rangle_t(z)$,
 \begin{align}
-  C_{\Phi, L} = \frac{N_L}{N_p}\left| \mathfrak{T}_L(x=y=0) * \langle \Phi \rangle_t\right| \label{apxeq:norm factor computation} (FIX)
+  C_{\Phi, L}(z) = \frac{N_L(z)}{N_p}\left| \mathfrak{T}_L(x=y=0) * \langle \Phi \rangle_t\right|(z) \label{apxeq:norm factor computation}
 \end{align}
-where $N_L = \lfloor L_z / k_{z,L} \rfloor$ is the number of outer-scale turbulons that fit vertically within the domain and $N_p$ is the number of profile samples. The factor $N_L / N_p$ converts the per-sample mean absolute response into a per-turbulon average, ensuring that $C_{\Phi,L}$ is independent of the profile sampling resolution. The normalization factors are, in general, height-dependent. The convolution in Eqn. \ref{apxeq:norm factor computation} is done using an algorithm that pads the edges below and above the domain with the lowest and highest profile value, respectively, and the resulting profile for $C_{\Phi, L}$ is interpolated during the simulation to each individual height level such that $C_{\Phi, k}$ also vary with height.
+where $\mathfrak{T}_L(x=y=0)$ is the center column of the outer-scale turbulon envelope, constructed with the \textit{local} vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$, $N_L(z) = L_z / k_{z,L}(z)$ is the number of outer-scale turbulons that fit vertically within the domain at that height's scale, and $N_p$ is the number of profile samples. The factor $N_L / N_p$ makes $C_{\Phi,L}$ independent of the profile sampling resolution. Because the kernel width varies with height when the spheroscale does, the convolution is evaluated as a discrete sum at each level, with the profile edge-padded (extended by repeating its boundary values). The zero-mean envelope column acts as a vertical-gradient measure at the scale $k_{z,L}(z)$: $C_{\Phi,L}$ dies wherever the mean profile is flat over the local vertical outer scale, so a field with a uniform mean profile receives no variability at all, and heights where the spheroscale is small receive correspondingly less. The resulting profile is interpolated during the simulation to each size class's height levels such that $C_{\Phi, k}$ also vary with height.
 
 
-For computational efficiency, the finest output grid is not used for all cascade steps. Because the field components $\widetilde{\varepsilon_k}$, $\widetilde{h}_k$, and $\widetilde{q}_k$ do not contain variance at scales smaller than $k$, they may be computed on a coarsened grid without significant loss of accuracy. This grid is specified by defining positive integer ``sparsity factors'' $s_x, s_y, s_z$ such that the working resolution for size class $k$ is $\Delta x_k = k/s_x$, $\Delta y_k = k/s_y$, $\Delta z_k = k_z/s_z$. When $s=1$, the grid spacing equals the turbulon size, which is the most aggressive coarsening that can be achieved. When $s > 1$, each turbulon spans $s$ grid cells along each dimension, providing better resolution of the turbulon shape at greater computational cost. On this coarsened grid, turbulon centers are placed every $s$ grid points:
-\begin{align}
-  \begin{cases}
-    S_k  = \mathcal{N}(0,1) \qquad &\text{at grid indices } (i,j,l) \text{ where } s_x | i,\; s_y | j,\; s_z | l \\
-    S_k = 0 \qquad &\text{otherwise}
-  \end{cases}
-\end{align}
-where $s | i$ denotes that $i$ is a multiple of $s$. For the simulations here, we use the most aggressive sparsity factors $s_x=s_y=s_z=1$ and fine that larger factors affect simulation output relatively little (not shown).
+For computational efficiency, the finest output grid is not used for all cascade steps. Because the field components $\widetilde{\varepsilon_k}$, $\widetilde{h}_k$, and $\widetilde{q}_k$ do not contain variance at scales smaller than $k$, they may be computed on a coarsened grid without significant loss of accuracy. This grid is specified by defining positive integer ``sparsity factors'' $s_x, s_y, s_z$ such that the working resolution for size class $k$ is $\Delta x_k = k/(2s_x)$, $\Delta y_k = k/(2s_y)$, $\Delta z_k = k_z/(2s_z)$. When $s=1$, the grid spacing equals half the turbulon size, which Nyquist-samples the envelope's peak wavelength and is the most aggressive coarsening that can be achieved. When $s > 1$, each turbulon spans $2s$ grid cells along each dimension, providing better resolution of the turbulon shape at greater computational cost. On this coarsened grid, the sparse noise field $S_k$ (and likewise the flux generator $\gamma$) is nonzero only at turbulon centers, placed every $s_x, s_y, s_z$ grid points along the respective dimensions, i.e. every $k/2$ in physical space. For the simulations here, we use the most aggressive sparsity factors $s_x=s_y=s_z=1$ and find that larger factors affect simulation output relatively little (not shown).
 
-We use horizontally periodic boundary conditions, and along the vertical direction we use edge-padded convolutions (i.e., the field is extended by repeating its boundary values). Physically, this means that turbulons near the Earth's surface may be ``cut off'' by the boundary but are otherwise unaffected. However, the statistics of $h$ and $q$ near the surface remain affected in a non-obvious way. Without a domain boundary at the surface, there would be turbulons centered at negative values of $z$ that affect $h$ and $q$ at positive $z$ given that some portion of such turbulons might extend to positive $z$. Imposing a boundary at the surface removes the influence of such turbulons and therefore the overall fields $h$ and $q$ are affected. It remains to be determined whether such an effect is physically realistic.
+We use horizontally periodic boundary conditions, and along the vertical direction we use zero-padded convolutions, so that no turbulons are centered below the surface or above the domain top. Physically, this means that turbulons near the Earth's surface may be ``cut off'' by the boundary but are otherwise unaffected. However, the statistics of $h$ and $q$ near the surface remain affected in a non-obvious way. Without a domain boundary at the surface, there would be turbulons centered at negative values of $z$ that affect $h$ and $q$ at positive $z$ given that some portion of such turbulons might extend to positive $z$. Imposing a boundary at the surface removes the influence of such turbulons and therefore the overall fields $h$ and $q$ are affected. It remains to be determined whether such an effect is physically realistic.
 
 
 \subsection{Recovering diagnostic variables from prognostic variables}
 
-Once three-dimensional fields of $h(\mathbf{r})$ and $q_t(\mathbf{r})$ are obtained, we recover temperature and water phase at each grid point. We assume the surface pressure $p_s$ is known and use the hyposmetric equation to diagnose the pressure at each level. The simulations described in the main text assume a constant value for the pressure at $z=z_{\min}$ of $1013\,\unit{hPa}$.
+Once three-dimensional fields of $h(\mathbf{r})$ and $q_t(\mathbf{r})$ are obtained, we recover temperature and water phase at each grid point. We assume the surface pressure $p_s$ is known and use the hypsometric equation to diagnose the pressure at each level; for the simulations described in the main text, $p_s$ is taken from the corresponding host model.
 
 For each column $(x, y)$, we proceed upward from $z = z_{\min}$. At each level, we first test for saturation by assuming all water is in vapor phase, giving a tentative temperature
 %
@@ -477,7 +477,7 @@ Thus,
 %     10}, {p, {50000, 80000, 101325}}] // Flatten[#, 1] & // TableForm
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-The unsaturated temperature $T_{\mathrm{dry}}$ serves as the initial guess, and convergence is typically achieved in 2--3 iterations (CHECK!!!!). The vapor mixing ratio is then $q_v = q_{v,\mathrm{sat}}(T, p)$ and the total condensate is $q_t - q_v$, which is partitioned into liquid and ice as
+The unsaturated temperature $T_{\mathrm{dry}}$ serves as the initial guess, and a fixed five Newton iterations are performed, which is ample for convergence from this starting point. The vapor mixing ratio is then $q_v = q_{v,\mathrm{sat}}(T, p)$ and the total condensate is $q_t - q_v$, which is partitioned into liquid and ice as
 %
 \begin{equation}
     q_c = \lambda\,(q_t - q_v), \quad q_i = (1 - \lambda)\,(q_t - q_v), \label{eq:phase_partition}
@@ -526,39 +526,6 @@ where $\tau_L$ is the lifetime of the largest-scale turbulons with $k=L$, define
 where $\Delta v_L$ is the velocity associated with the largest scale ciculations. Here, we use $\Delta v_L=15\,\unit{m/s}$ as a representative value (cite dewitt). 
 
 We assume the precipitation production rate is uniform over the lifetime of a given turbulon. Once precipitation fall speeds $w_P$ are diagnosed following \citep{khairoutdinov2003}, precipitation produced at a given location $\mathbf{x}$ is distributed evenly over the column between $\mathbf{x}$ and $\mathbf{x}-\tau_k w_P \hat{z}$.
-
-\subsection{Pseudocode}
-
-Here we describe the STEAM algorithm in sufficient detail to reproduce it. The inputs are: horizontally uniform ensemble mean profiles $\langle h \rangle_t(z)$ and $\langle q_t \rangle_t(z)$ sampled at vertical spacing $\Delta z_p$; the spheroscale $l_s$; the outer scale $L$; the horizontal domain size $L_x, L_y$ and finest grid spacing $dx, dy$; the domain height $L_z$; and sparsity factors $s_x, s_y, s_z$ (positive integers, default 1). The outer scale must be a power-of-two multiple of $dx$.
-
-\subsubsection{Normalization}
-
-Logarithmically spaced size classes are defined as $k_i = L / 2^i$ for $i = 0, 1, \dots, \log_2(L/dx)$, proceeding from the outer scale down to the grid scale. For each $k_i$, the vertical turbulon size is $k_{z,i} = l_s(k_i / l_s)^{H_z}$ (Eqn.~\ref{apxeq:vertical turbulon size class}).
-
-
-The normalization constant $C_{\Phi, L}$ (Eqn.~\ref{apxeq:norm factor computation}) is computed from the mean profile of each scalar $\Phi \in \{h, q_t\}$. A one-dimensional Mexican hat kernel is constructed at the outer scale $k_{z,L}$ with a support of $\pm 5 k_{z,L}$. The profile is edge-padded by a half-kernel width on each end, then convolved with the kernel. We take the mean absolute response and scale by $N_L / N_p$, where $N_L = \lfloor L_z / k_{z,L} \rfloor$ is the number of outer-scale turbulons that fit vertically within the domain and $N_p$ is the number of profile samples. This converts the per-sample average into a per-turbulon average, ensuring that $C_{\Phi,L}$ is independent of the profile sampling resolution. The scale-dependent normalization $C_{\Phi,k}$ then follows Eqn.~\ref{apxeq:mean turbulon amplitude}.
-
-\subsubsection{Cascade loop}
-
-The perturbation fields $\widetilde{h}$ and $\widetilde{q_t}$ are initialized to zero. The algorithm then iterates over size classes from large to small ($k = L, L/2, \dots, dx$). At each step, the following operations are performed.
-
-\paragraph{Coarsened grid.} Because turbulons of size $k$ need not be resolved at the finest grid spacing, we coarsen the working grid to $\Delta x_k = k/(2s_x)$, $\Delta y_k = k/(2s_y)$, $\Delta z_k = k_z/(2s_z)$. When $s = 1$, the grid spacing equals half the turbulon size, providing Nyquist sampling of the peak-PSD wavelength $k$; when $s > 1$, each turbulon is resolved by $2s$ grid cells along each dimension at proportionally greater computational cost. The horizontal grid dimensions $n_{x,k} = L_x / \Delta x_k$ and $n_{y,k} = L_y / \Delta y_k$ are guaranteed to be exact integers provided that $L_x$ and $L_y$ are integer multiples of $L$ and that $L/dx$ is a power of $k_\text{factors}$.
-
-The vertical dimension requires more care. Because $k_z = l_s(k/l_s)^{H_z}$ is irrational in general, there is no grid spacing that simultaneously tiles the domain exactly and equals $k_z/(2s_z)$. Instead, we first compute the number of turbulons required to span the domain, $n_{\text{turb},z} = \lceil L_z / k_z \rceil$, set $n_{z,k} = 2 s_z \cdot n_{\text{turb},z}$, and define $\Delta z_k = L_z / n_{z,k}$ exactly. Since $n_{\text{turb},z} \geq L_z / k_z$, it follows that $\Delta z_k \leq k_z / (2 s_z)$, so the vertical resolution is guaranteed to be at least as fine as the Nyquist target while the domain is tiled exactly with no rounding error.
-
-\paragraph{Interpolation.} If the perturbation fields from the previous iteration have a different shape than the current coarsened grid, they are trilinearly interpolated to the current resolution. The mean profiles are also linearly interpolated to the current vertical grid.
-
-\paragraph{Gradient computation.} The normalized gradient $G_\Phi$ is computed from the sum of the mean profile and the perturbation accumulated so far. Horizontal gradients use periodic central differences (consistent with the periodic horizontal boundary conditions), while the vertical gradient uses one-sided differences at the boundaries and central differences in the interior. The gradient magnitude is then normalized by its spatial mean, so that $\langle G_\Phi \rangle_\mathbf{x} = 1$.
-
-\paragraph{Sparse noise.} A single noise field $S_k$ is drawn from $\mathcal{N}(0,1)$ on the coarsened grid, with nonzero values placed every $s_x$ grid points in $x$, every $s_y$ in $y$, and every $s_z$ in $z$ (i.e., every $k$ in physical space regardless of $s$). This noise field is shared between $h$ and $q_t$, reflecting the physical constraint that a single eddy transports both scalars. All other entries are zero.
-
-\paragraph{Convolution.} A compact 3D Mexican hat kernel $\mathfrak{T}_k$ is constructed at the current scale using the anisotropic norm (Eqn.~\ref{apxeq:canonical anisotropic norm}), truncated at a support of 10 times the turbulon size along each axis, and forced to have zero mean. The kernel may be larger than the coarsened field in the horizontal dimensions; if so, it is periodically folded (aliased) onto the field period before convolution. The amplitude field $A_\Phi = G_\Phi \cdot S_k \cdot C_{\Phi,k}$ is then convolved with this kernel, using wrap-padding for $x$ and $y$ (periodic boundary) and edge-padding for $z$. The result is added to the perturbation field $\widetilde{\Phi}$.
-
-\subsubsection{Final fields}
-
-After the last iteration ($k = dx$), the perturbation fields are at the finest resolution. The output fields are $h = \langle h \rangle_t + \widetilde{h}$ and $q_t = \langle q_t \rangle_t + \widetilde{q_t}$. Temperature, water vapor, liquid, ice, and pressure are then recovered as described in Sect.~\ref{sect:steam algorithm details}.
-
-
 
 \subsection{Spheroscale calculations}
 
@@ -643,202 +610,6 @@ the heterogeneity of the flux at the outer scale measured relative to the mean f
 \end{align}
 In this picture, the strength of atmospheric intermittency is not a universal constant of turbulence: it is the relative unevenness of the energy supply at the outer scale. For a given absolute heterogeneity of the large-scale forcing, a larger mean dissipation rate implies \emph{weaker} intermittency. To our knowledge this consequence of the additive construction has not been noted before, and it is testable: it predicts that $C_1$ varies between meteorological regimes with the relative heterogeneity of the large-scale flux, rather than taking a single universal value.
 % TODO (appendix): wire the three "Sect. ()" placeholders to the main-text flux section once written; \kappa \approx 0.6 is measured from the flux-cascade branch runs (FLUX_SCALE=0.5 -> C1~0.10; 0.1 -> 0.0047); the novelty sentence in the last paragraph should survive a literature sweep before submission.
-
-\section{Complete specification of the LES-ensemble comparison}
-\label{sect:rcemip analysis}
-
-This appendix specifies, in full, the analysis behind the comparison of
-STEAM to the RCEMIP cloud-resolving ensemble
-\citep[][]{wing2018,wing2020}. The intent is that the comparison could be
-reproduced exactly from this description alone. Two independent
-comparisons are described: one against the elongated-channel
-(\texttt{RCE\_large300}) configurations of ten models, used for the
-profile, distribution, and correlation-dimension statistics, and one
-against the small-domain (\texttt{RCE\_small\_les300}) configurations of
-four models, used primarily for object size distributions, for which the
-channel geometry is too narrow.
-
-\subsection{Comparison data}
-\label{sect:rcemip data}
-
-\paragraph{Channel ensemble.} Ten models provide three-dimensional
-snapshot output for the 300~K channel configuration: SAM, CM1, three Met
-Office Unified Model variants (CASIM, RA1-T, RA1-T-nocloud), MESONH,
-SCALE, UCLA-CRM, and two ICON variants (LEM and NWP). Domains are
-channels of approximately $6000\times 400$~km$^2$ at 3~km horizontal
-spacing ($1984$--$2048$ cells long, $128$--$144$ cells wide), with
-model-specific stretched vertical grids ($74$--$98$ levels to
-$33$--$39.5$~km). Each model supplies three snapshots separated by ten
-days (days 80, 90, and 100 of the simulation; days 93, 103, and 113 for
-the UM variants; days 80, 90, and 99 for ICON-LEM). A third ICON variant
-(AES) was excluded because its archived output contains neither a height
-coordinate nor pressure, so moist static energy cannot be constructed.
-
-\paragraph{Small-domain ensemble.} Four models provide small-domain
-output: SAM ($480^2$ cells), CM1 ($540^2$), DALES ($504^2$), and
-ICON-LEM ($500^2$), all at 200~m horizontal spacing (domains
-$96$--$108$~km on a side) with $146$--$156$ stretched vertical levels.
-The final ten daily snapshots of each run are used (days 41--50), except
-ICON-LEM, whose archive holds only four snapshots (days 25--28), all of
-which are used.
-
-\paragraph{Variable handling.} All humidities are converted to mixing
-ratios before any further computation. Most models archive specific
-quantities (mass per unit moist air, CMOR names \texttt{hus},
-\texttt{clw}, \texttt{cli}); these are converted as $r = q/(1-q)$, with
-the vapor-only denominator (the neglected condensate contribution to
-moist-air mass changes $r$ by ${\lesssim}2\%$ where condensate is
-largest). SAM archives vapor as a mixing ratio directly. Cloud liquid
-and ice are taken from \texttt{clw} and \texttt{cli} (UCLA names ice
-\texttt{ice}); precipitating condensate is excluded everywhere, because
-several models do not archive it. SAM's small-domain (native-format)
-output archives only combined non-precipitating condensate
-(\texttt{QN}); it is partitioned into liquid and ice with the same
-temperature ramp STEAM uses internally,
-$\lambda = \mathrm{clip}\!\left[(T - 235.15)/(273.15 - 235.15),\,0,\,1\right]$,
-$q_c = \lambda\,q_n$, $q_i = (1-\lambda)\,q_n$, so that the partition is
-identical on both sides of that comparison.
-
-Total water is $q_t = r_v + r_c + r_i$ and moist static energy is
-$h = c_p T + g z + L_v r_v$ with $c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$,
-$g = 9.81$~m\,s$^{-2}$, $L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's
-constants, applied identically to every model).
-
-\paragraph{Model-specific recoveries.} Three archives require special
-handling. (i)~The ICON files carry only a level \emph{index} (top-down)
-as their vertical coordinate; physical height is recovered by inverting
-the frozen moist static energy field distributed alongside them,
-$z = (f_{\mathrm{mse}} - 1004.64\,T - 2500800\,q_v + 333700\,q_i)/9.80665$
-(the constants of that archive, used only for this recovery), averaged
-horizontally at one snapshot; the level-wise horizontal standard
-deviation of the recovered height is required to be below 50~m.
-(ii)~MESONH's files carry no coordinates at all; the 74-level RCEMIP
-standard grid archived by SCALE is assumed (the two agree level-for-level
-where checkable). (iii)~UCLA-CRM stores height as the fastest dimension
-and includes a below-ground ghost level, which is dropped. Where a model
-archives no pressure (DALES, MESONH, SCALE, UCLA-CRM), the RCEMIP
-analytic-sounding surface pressure of 1014.8~hPa is used to initialize
-STEAM; otherwise the horizontal mean of the model's lowest-level pressure
-is used. All reductions of single-precision fields use double-precision
-accumulators.
-
-One caveat is carried through the interpretation: MESONH's archived
-channel fields are anomalously smooth relative to every other member
-(near-delta anomaly distributions at 4~km), which starves the STEAM run
-matched to it; whether this reflects the model or the archival processing
-cannot be determined from the archive, and MESONH is therefore excluded
-from the shape-sensitive statistics (anomaly distributions, correlation
-dimension, size distributions).
-
-\subsection{STEAM configuration}
-\label{sect:rcemip steam config}
-
-One deliberately untuned configuration is used throughout; nothing is
-calibrated to any individual host. The spheroscale is a constant 10~m at
-all heights, with turbulons isotropic below it
-(\texttt{piecewise\_isotropic\_below\_spheroscale}); the horizontal Hurst
-exponent is $H_h = 1/2$ and the vertical-anisotropy exponent
-$H_z = 5/9$; turbulons use the Mexican-hat envelope; one scale class per
-octave. The turbulon flux component is active with its defaults: flux
-increments drawn from extremal ($\beta = -1$) L\'evy noise with
-$\alpha = 1.8$ in four substeps per scale class, with noise amplitude
-$c = 0.21$, pegged so that the realized flux intermittency is
-$C_1 = 0.1$ (the calibration $C_1 = 1.674\,c^{1.8}$ inverted at
-$C_1 = 0.1$).
-
-For the channel comparison STEAM runs on a $2048\times 128$ grid at
-$\Delta x = 3$~km ($6144\times 384$~km$^2$, matching the host geometry
-class) with outer scale $L = 96$~km, giving five scale classes (96, 48,
-24, 12, 6~km). The domain is periodic; the 384~km cross-channel extent
-holds four outer-scale tiles. For the small-domain comparison STEAM runs
-on a $512^2$ grid at $\Delta x = 200$~m ($102.4$~km$^2$, one outer-scale
-tile) with $L = 102.4$~km, giving nine scale classes (102.4~km down to
-400~m). In both cases the simulated depth is 20~km, and the vertical
-grid follows the model's internal rule
-$\Delta z(z) = k_z(z)/2$ with $k_z$ set by the anisotropy relation at
-each scale class.
-
-Each STEAM run is initialized from one host snapshot: the host's
-horizontal-mean $h(z)$ and $q_t(z)$, interpolated to a uniform 50~m
-profile grid, plus its surface pressure as above. Soft-clamp bounds are
-$h \in [\min h(z) - 10\,c_p,\ \max h(z) + 10\,c_p]$ and
-$q_t \in [0,\ \max(0.03,\ 1.5 \max q_t(z))]$~kg\,kg$^{-1}$. One
-realization is run per host snapshot (three per model for the channel,
-ten --- four for ICON-LEM --- for the small domain), with a distinct seed
-per snapshot, so host and STEAM sample counts match by construction.
-
-\subsection{Profile statistics and anomaly distributions}
-\label{sect:rcemip stats}
-
-Per-level statistics are computed on each case's native vertical grid:
-horizontal mean and variance of $h$ and $q_t$, and cloud fraction
-defined as the areal fraction with non-precipitating condensate
-$q_c + q_i > 0.01$~g\,kg$^{-1}$. For comparison across grids all
-profiles are linearly interpolated to a common 100~m grid spanning
-0--20~km (levels outside a model's native range are excluded, not
-extrapolated), and snapshot-averaged.
-
-Differences are presented as $\Delta = $ STEAM $-$ host, one curve per
-model. The yardstick shading is built from the \emph{pairwise}
-inter-host differences: for each level, all ordered pairs
-host$_i$ $-$ host$_j$ ($i \neq j$; 90 pairs for ten models) are formed
-from the snapshot-averaged profiles, and the shading shows their full
-range and interquartile (25--75\%) range. Pairwise differences, rather
-than deviations from the ensemble mean, are the like-for-like reference
-for a pairwise quantity such as $\Delta$; deviations from the mean are
-smaller by roughly $\sqrt{2}$ and would overstate STEAM's exceedances.
-
-Anomaly probability densities are computed at the model level nearest
-4~km and 10~km: at each level the horizontal mean of that snapshot is
-subtracted, all snapshots of a case are pooled, and the pooled sample is
-histogrammed in 150 equal-width bins spanning the pooled sample's full
-range (no percentile capping, which would truncate the tails that are
-precisely the point of the comparison), normalized to a density.
-
-\subsection{Optical-depth masks, correlation dimension, and size
-distributions}
-\label{sect:rcemip fractal}
-
-Cloud masks are built from vertically integrated optical depth computed
-from the liquid and ice water paths with the SAM bulk-optics
-relationships (as implemented in the \texttt{cloudyview} package);
-precipitating species are excluded as above. A column is cloudy where
-$\tau > 1$. Masks are binary arrays on each case's native horizontal
-grid; the three (channel) or up to ten (small-domain) masks of a case
-are always analyzed together as one ensemble, never averaged
-one-at-a-time.
-
-The ensemble correlation dimension $D_2$ is computed with
-\texttt{objscale} \citep{dewitt2026acp} using the sandbox estimator at
-R\'enyi order $q = 2$ on the one-sided edge set of the masks --- the
-Grassberger--Procaccia correlation integral --- with pair separations
-binned between a minimum of two pixels (6~km) and a maximum of one-third
-the narrow domain extent (${\approx}127$~km) for the channel, and the
-package defaults (8 pixels = 1.6~km to one-third of ${\approx}96$~km =
-32~km) for the small domains; sandbox centers are subsampled by a factor
-of ten. The two-pixel channel minimum admits pixel-scale discretization
-bias at the small end of the range and is the price of retaining one
-decade of scaling in a 128-cell-wide mask; the small-domain analysis is
-free of this compromise. The correlation integrals themselves are
-inspected for linearity in log--log space before the fitted slope is
-reported as a dimension.
-
-Object size distributions use the truncation-corrected estimator of
-\citet{dewitt2024acp}: objects are 4-connected components of the mask;
-areas are binned logarithmically; bins in which more than half the
-objects touch the domain boundary, or which hold fewer than 30 objects,
-are excluded; the power-law exponent is the least-squares slope of
-$\log_{10}$ counts against $\log_{10}$ area over the surviving bins. The
-host channel domains are periodic, but boundary-touching objects are
-treated as truncated rather than wrapped --- a conservative choice that
-discards, rather than reconnects, objects crossing the seam. For the
-channel geometry the surviving range is only ${\approx}1.5$ decades of
-area and the ten hosts' fitted exponents disagree by a factor of four
-(0.6--2.3), so the channel ensemble does not constrain the exponent at
-this domain size --- consistent with the finite-domain analysis of
-\citet{dewitt2024acp} --- and the small-domain ensemble, with objects
-resolved from 400~m, is the meaningful size-distribution comparison.
-
 
 \section{Comparison to the Fractionally Integrated Flux model}  \label{sect:comparison to FIF}
 
