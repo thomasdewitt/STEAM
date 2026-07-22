@@ -324,7 +324,7 @@ The selected cloud renderings shown in Fig. () were produced using the cloud vis
 \section{STEAM algorithm} \label{sect:steam algorithm details}
 
 Here we provide an explicit description of the STEAM algorithm for modeling moist static energy $h$, total water mixing ratio $q$, and the conserved turbulent flux $\mathcal{F}$.
-As a point of notation, there are three distinct types of averages requiring disambiguation. Consider a large ensemble of statistically independent turbulent flows. Any variable may be averaged along the spatial directions, which we denote $\langle \rangle_\mathbf{x}$. The result may in principle still have time dependence and differ between ensemble members. Alternatively, if we average only along the time direction, denoted by $\langle \rangle_t$, in principle the result may differ spatially and among ensemble members. Finally, we might average across ensemble members, which we denote $\langle \rangle_i$, which in principle could result in an ensemble mean that still varies in time and space. Unit vectors are denoted as $\hat{x}, \hat{y}, \hat{z}$, and we denote the horizontal gradient magnitude of some arbitrary field $f$
+As a point of notation, there are three distinct types of averages requiring disambiguation. Consider a large ensemble of statistically independent turbulent flows. Any variable may be averaged along the spatial directions, which we denote $\langle \rangle_\mathbf{x}$, or alternatively $\langle \rangle_\mathbf{x}(z)$ when the average is taken over the horizontal dimensions only. The result may in principle still have time dependence and differ between ensemble members. Alternatively, if we average only along the time direction, denoted by $\langle \rangle_t$, in principle the result may differ spatially and among ensemble members. Finally, we might average across ensemble members, which we denote $\langle \rangle_i$, which in principle could result in an ensemble mean that still varies in time and space. Unit vectors are denoted as $\hat{x}, \hat{y}, \hat{z}$, and we denote the horizontal gradient magnitude of some arbitrary field $f$
 \begin{align}
   |\nabla_h f| = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2}.
 \end{align}
@@ -376,39 +376,17 @@ At each cascade step, after the perturbation field is generated according to Eqn
 
 Scalar turbulon amplitudes are then computed following Eqn. \ref{eq:anisotropic gradient weighing} as
 \begin{align}
-A_h &= C_{h, k}\, g_h \frac{W_{h,k}}{\langle W_{h,k}\rangle_\mathbf{x}} \frac{S_k}{\langle S_k\rangle_\mathbf{x}}, \\
-A_q &= C_{q, k}\, g_q \frac{W_{q,k}}{\langle W_{q,k}\rangle_\mathbf{x}} \frac{S_k}{\langle S_k\rangle_\mathbf{x}},
+A_h &= C_{h, k}\, g_h \frac{W_{h,k}}{\langle W_{h,k}\rangle_\mathbf{x}} \frac{S_k}{\langle |S_k|\rangle}, \\
+A_q &= C_{q, k}\, g_q \frac{W_{q,k}}{\langle W_{q,k}\rangle_\mathbf{x}(z)} \frac{S_k}{\langle |S_k|\rangle},
   \label{apxeq:amplitude propto gradient normalized}
 \end{align}
-where $W_k$ is the local advective weight, $\langle W_k \rangle_\mathbf{x}(z)$ its realized horizontal mean at each level, $g_\Phi$ the bound factor defined below, and $C_k$ the mean absolute turbulon amplitude described below in Eqn. \ref{apxeq:mean turbulon amplitude}. The factor $S_k$ is the amplitude of the flux component of a turbulon, equal to 
-\begin{align}
-S_k = \left(e^{\gamma} - 1\right)\left(1+\sum_{k>k_i} \widetilde{\mathcal{F}_k}\right)
-\end{align} 
-whose convolution generates the flux perturbation in Eqn. \ref{eq:flux at scale}. This implements the hypothesis discussed in Sect. () that the amplitude of a turbulon's scalar component is proportional to the amplitude of its flux component, both being set by the strength of the eddy's overturning motion. The factor is shared between $h$ and $q_t$ because a single eddy transports both scalars. Because $S_k$ is signed and centered at zero, scalar perturbations mix in both directions and inherit the skewness of the flux perturbations. Unit normalization leaves the mean absolute amplitude of scalar perturbations set by $C_{\Phi,k}$. Note that $S_k$ depends only on size classes larger than $k_i$, so each cascade step is fully determined by the classes preceding it.
+where $W_k$ is the local advective weight, $\langle W_k \rangle_\mathbf{x}(z)$ its realized horizontal mean at each level, $g_\Phi$ a bound factor, $S_k$ the flux weighting factor, and $C_k$ the mean absolute turbulon amplitude. We will take each factor in turn.
 
-
-The weight $W$ follows the anisotropic advective form of the main text:
-\begin{align}
-  W_{\Phi, k} =  | \nabla_h f| + \frac{k_z}{k}\left|\frac{\partial f}{\partial z}\right|; \qquad f = \langle \Phi\rangle_t + \sum_{k_i>k}\widetilde{\Phi_{k_i}}, \label{apxeq:advective weight}
-\end{align}
-where $k_z/k$ is the turbulon aspect ratio of Eqn. \ref{apxeq:vertical turbulon size class}. The normalization by the realized horizontal mean $\langle W_k \rangle_\mathbf{x}(z)$ enforces the mean absolute turbulon amplitude of Eqn. \ref{apxeq:mean turbulon amplitude} exactly at every level and size class: the weighting redistributes amplitude within a level according to the local gradients but cannot change the level's total amplitude budget. Every level contains many turbulons of each size class, so the realized mean is a well-sampled estimate of the corresponding ensemble mean. At levels where the weight vanishes identically (a flat mean profile with no fluctuations from larger classes), no turbulons are placed.
-
-The bound factor $g_\Phi$ accounts for the physical bounds on the scalar fields. Because advection simply rearranges the fluid, the value of a conserved scalar cannot exceed its original bounds. This is approximated in STEAM by forcing fluctuations to vanish as a bound is approached, using a linear taper for advective weight within a buffer distance $b_{\Phi,k}$ of either bound, computed as
-\begin{align}
-  g_\Phi = \max\left[0,\ \min\left(1,\ \frac{f - \Phi_{\min}}{b_{\Phi,k}},\ \frac{\Phi_{\max} - f}{b_{\Phi,k}}\right)\right], \label{apxeq:bound factor}
-\end{align}
-where $f$ is the same running sum of the scalar field used for the gradients. Note that when field values lie outside the buffer region, $g_\Phi = 1$ and the bound does not affect the cascade. The buffer width $b_{\Phi,k}$ is set by the expected value of fluctuations that has yet to be added by the current and all smaller size classes,
-\begin{align}
-  b_{\Phi,k}(z) = n_b \sum_{k_j \le k} C_{\Phi,j}(z), \label{apxeq:bound buffer}
-\end{align} % This seemed to be RMS effectively, and I changed to mean absolute amplitude. What was the point of squaring - sqrt?
-with $n_b = 3$, so that the amplitude tapers exactly where the remaining cascade is likely to carry the field into a bound and not before. Viewed as a stochastic process, fluctuations decelerate in proportion to the remaining distance in the same way that the fluctuations of a geometric random walk decelerate near zero, and crossings become rare rather than routine. Importantly, $g_\Phi$ multiplies the amplitude \emph{after} the weight is normalized, so that proximity to a bound reduces the total fluctuation amplitude of a level rather than redistributing it: that one part of the field is near a bound does not mean another part should receive additional variance.
-
-
-The factor $C_k$ is a normalization factor representing the mean absolute turbulon amplitude at each scale. The factors $C_k$ are constrained by the Lovejoy-Schertzer law of scalar advection (Eqn. \ref{eq:LS scalar directional structure functions}) such that
+The first factor $C_k$ is a normalization factor representing the mean absolute turbulon amplitude at each scale, and the unit normalization for the weight and flux factors $W_{\Phi,k}$ and $S_k$ ensures that $C_k$ alone sets the overall variability of scalar perturbations, at least for regions away from the bounds set by $g_\Phi$. The factors $C_k$ are constrained by the Lovejoy-Schertzer law of scalar advection (Eqn. \ref{eq:LS scalar directional structure functions}) such that
 \begin{align}
     C_{\Phi, k} = n_c^{-1/\alpha}\, C_{\Phi, L}\left(\frac{k}{L}\right)^{H_h}.\label{apxeq:mean turbulon amplitude}
 \end{align}
-The factor $n_c^{-1/\alpha}$ compensates for the cascade density in the same way as $c_\mathcal{F}$ does for the flux. For the flux, the exponent follows exactly from $\alpha$-stability as described above. For the scalars, we assume the same compensation applies because $S_k$ is built from the same noise. A more full theoretical investigation of STEAM may be required to confirm or reject this assumption. In any case, the simulations presented here use $n_c = 1$ for which the factor is unity.
+The factor $n_c^{-1/\alpha}$ compensates for the cascade density in the same way as $c_\mathcal{F}$ does for the flux. For the flux, the exponent follows exactly from $\alpha$-stability as described above. For the scalars, we assume the same compensation applies because $S_k$ is built from the same noise. A fuller theoretical investigation of STEAM may be required to confirm or reject this assumption. In any case, the simulations presented here use $n_c = 1$ for which the factor is unity.
 
 The overall normalization factor $C_L$
 represents the mean amplitude of the largest size class of turbulons. Physically, this represents the large-scale fluctuation magnitude that is available to cascade to smaller scales, computed from the vertical structure of the ensemble mean profile as described in Sect. \ref{sect:distribution of turbulon amplitudes across scale}. Specifically, assuming horizontally uniform mean profiles $\langle \Phi\rangle_t(\mathbf{x}) = \langle \Phi\rangle_t(z)$,
@@ -417,7 +395,32 @@ represents the mean amplitude of the largest size class of turbulons. Physically
 \end{align}
 where $\mathfrak{T}_L(x=y=0)$ is the center column of the outer-scale turbulon envelope, constructed with the local vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$. The factor $N_L(z) = L_z / k_{z,L}(z)$ is the number of outer-scale turbulons that fit vertically within the domain at that height, and $N_p$ is the number of profile samples. The factor $N_L / N_p$ makes $C_{\Phi,L}$ independent of the profile sampling resolution. Because the kernel width varies with height when the spheroscale does, the convolution is evaluated as a discrete sum at each level with the profile edge-padded (extended by repeating its boundary values). The zero-mean envelope column acts as a vertical-gradient measure at the scale $k_{z,L}(z)$: $C_{\Phi,L}$ dies wherever the mean profile is flat over the local vertical outer scale, so a field with a uniform mean profile receives no variability at all, and heights where the spheroscale is small receive correspondingly less. The resulting profile is interpolated during the simulation to each size class's height levels such that $C_{\Phi, k}$ also vary with height. % OHHH THATS why I used haar! For a linear profile, mhat sees nothing! Ug this is an issue. Your "acts as a vertical-gradient measure" is wrong; it can't see gradients only curvature. Of course, if there is a vertical constant gradient, the model SHOULD produce variance.
 
-Even with the tapered weighting, occasional large increments may still carry a scalar past its bounds, and simply clipping the field there would not preserve the mean, and wherever the mean value is small relative to the fluctuations the accumulated drift can become substantial. We therefore project each scalar field, after each size class is added, onto the set of fields that both respect the bounds and preserve the horizontal mean at every level. The projection takes a simple form,
+The next factor in Eqn. \ref{apxeq:amplitude propto gradient normalized}, $S_k$, is the amplitude of the flux component of a turbulon, equal to
+\begin{align}
+S_k = \left(e^{\gamma} - 1\right)\left(1+\sum_{k>k_i} \widetilde{\mathcal{F}_k}\right), \label{apxeq:scalar flux factor}
+\end{align}
+whose convolution generates the flux perturbation in Eqn. \ref{eq:flux at scale}. The normalization $\langle |S_k| \rangle$ in Eqn. \ref{apxeq:amplitude propto gradient normalized} is the global mean absolute value of $S_k$ over the turbulon centers. This implements the hypothesis discussed in Sect. \ref{sect:distribution of turbulon amplitudes in space} that the amplitude of a turbulon's scalar component is proportional to the amplitude of its flux component, both being set by the strength of the eddy's overturning motion. The factor is shared between $h$ and $q_t$ because a single eddy transports both scalars. Because $S_k$ is signed and centered at zero, scalar perturbations mix in both directions and inherit the skewness of the flux perturbations. Note that $S_k$ depends only on size classes larger than $k_i$, so each cascade step is fully determined by the classes preceding it.
+
+
+The weight $W$ follows the anisotropic advective form of Eqn. \ref{eq:anisotropic gradient weighing} in Sect. \ref{sect:distribution of turbulon amplitudes in space}:
+\begin{align}
+  W_{\Phi, k} =  | \nabla_h f| + \frac{k_z}{k}\left|\frac{\partial f}{\partial z}\right|; \qquad f = \langle \Phi\rangle_t + \sum_{k_i>k}\widetilde{\Phi_{k_i}}, \label{apxeq:advective weight}
+\end{align}
+where $k_z/k$ is the turbulon aspect ratio of Eqn. \ref{apxeq:vertical turbulon size class}. The normalization by the realized horizontal mean $\langle W_k \rangle_\mathbf{x}(z)$ enforces the mean absolute turbulon amplitude of Eqn. \ref{apxeq:mean turbulon amplitude} exactly at every level and size class, neglecting the bounding term $g_\Phi$. Strictly speaking, a more natural normalization convention would be to use the ensemble mean $\langle W_{\Phi,k}\rangle_i(z)$. For a sufficiently large domain containing many outer scales, $\langle W\rangle_\mathbf{x}(z)\approx \langle W_{\Phi,k}\rangle_i(z)$. Smaller domains may incur some error, particularly for larger size classes containing fewer turbulons. Note that, as described in Sect. \ref{sect:distribution of turbulon amplitudes in space}, levels for which the ensemble mean profile is constant have vanishing $W_{\Phi,k}$, and the scalar component of the turbulon amplitudes vanishes with it.
+
+The bound factor $g_\Phi$ accounts for the physical bounds on the scalar fields. Because advection simply rearranges the fluid, the value of a conserved scalar cannot exceed the minimum and maximum values set by the initial conditions. This is approximated in STEAM by forcing fluctuations to vanish as a bound is approached, using a linear taper for advective weight within a buffer distance $b_{\Phi,k}$ of either bound, computed as
+\begin{align}
+  g_\Phi = \max\left[0,\ \min\left(1,\ \frac{f - \Phi_{\min}}{b_{\Phi,k}},\ \frac{\Phi_{\max} - f}{b_{\Phi,k}}\right)\right], \label{apxeq:bound factor}
+\end{align}
+where $f$ is the same running sum of the scalar field used for the gradients. Note that when field values lie outside the buffer region, $g_\Phi = 1$ and the bound does not affect the cascade. The buffer width $b_{\Phi,k}$ is set by the expected value of fluctuations that has yet to be added by the current and all smaller size classes,
+\begin{align}
+  b_{\Phi,k}(z) = n_b \sum_{k_j \le k} C_{\Phi,j}(z), \label{apxeq:bound buffer}
+\end{align} % This seemed to be RMS effectively, and I changed to mean absolute amplitude. What was the point of squaring - sqrt?
+with $n_b = 3$, so that the amplitude tapers exactly where the remaining cascade is likely to carry the field into a bound and not before. Viewed as a stochastic process, fluctuations decelerate in proportion to the remaining distance in the same way that the fluctuations of a geometric random walk decelerate near zero, and crossings become rare rather than routine. Importantly, $g_\Phi$ is not normalized and has values $\le 1$. Global normalization of $g_\Phi$ would imply that scalar values near a bound in one part of the domain would (nonphysically) increase variance in other parts of the domain that are not close to the bound.
+
+
+
+Even with the tapered weighting via the factor $g_\Phi$, occasional large increments may still carry a scalar past its bounds, and simply clipping the field there would not preserve the mean, and wherever the mean value is small relative to the fluctuations the accumulated drift can become substantial. We therefore project each scalar field, after each size class is added, onto the set of fields that both respect the bounds and preserve the horizontal mean at every level. The projection takes a simple form,
 \begin{align}
   \Phi \rightarrow \min\left[\max\left(\Phi - \mu,\ \Phi_{\min}\right),\ \Phi_{\max}\right], \label{apxeq:bound projection}
 \end{align}
