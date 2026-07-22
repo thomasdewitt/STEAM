@@ -1180,12 +1180,12 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
     at that height's scale; N_p is the number of profile samples. N_L(z)/N_p
     makes the response independent of profile resolution (the summed response
     scales as cells-per-kernel = k_z,L/dz; the prefactor as its inverse).
-    C_{Phi,k} then follows n_c^{-1/2} (k/L)^H_h, with n_c =
-    n_scale_classes_per_dyad: classes carry fresh zero-mean signed noise, so
-    per-octave variance is proportional to the class count and the per-class
-    amplitude must shrink as n_c^{-1/2} to keep the fields statistically
-    independent of the cascade density (the scalar analogue of the flux
-    cascade's n_c^{-1/alpha} generator scaling).
+    C_{Phi,k} then follows n_c^{-1/alpha} (k/L)^H_h, with n_c =
+    n_scale_classes_per_dyad: the same density compensation as the flux
+    cascade, ASSUMED to carry over to the scalars because S_k is built from
+    the same noise (Var(e^gamma - 1) scales as s^alpha, not s^2, so summed
+    per-octave variance is invariant under s ~ n_c^{-1/alpha}). Not verified
+    for all scalar statistics; unity at the production n_c = 1.
 
     The column is a slice of the 3D-mean-subtracted envelope, so it is not itself
     zero-mean; it is made zero-mean here (the discretized-wavelet admissibility
@@ -1231,7 +1231,7 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest, domain_heigh
             * (domain_height / k_z_L_on_finest[i]) / n_p
     C_k = []
     for i, k in enumerate(k_values):
-        hurst_scale = float((k / outer_scale) ** H_h) / np.sqrt(n_scale_classes_per_dyad)
+        hurst_scale = float((k / outer_scale) ** H_h) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
         C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
         C_k.append(C_profile)
     return C_k
