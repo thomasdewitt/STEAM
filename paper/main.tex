@@ -527,23 +527,6 @@ where $\Delta v_L$ is the velocity associated with the largest scale ciculations
 
 We assume the precipitation production rate is uniform over the lifetime of a given turbulon. Once precipitation fall speeds $w_P$ are diagnosed following \citep{khairoutdinov2003}, precipitation produced at a given location $\mathbf{x}$ is distributed evenly over the column between $\mathbf{x}$ and $\mathbf{x}-\tau_k w_P \hat{z}$.
 
-\subsection{Spheroscale calculations}
-
-To determine the variation of the spheroscale as a function of location, we estimate its value at points using Haar fluctuations near the grid resolution. From Eqn. (), the fluxes $\varphi_h$ and $\varphi_v$ are estimated as estimated as
-\begin{align}
-  \varphi_h(\mathbf(x)) = \frac{\Delta \phi(\Delta x, \mathbf{x})}{\Delta x^{1/3}} \\
-  \varphi_v(\mathbf(x)) = \frac{\Delta \phi(\Delta z, \mathbf{x})}{\Delta z^{3/5}}
-\end{align}
-where $\Delta x$ and $\Delta z$ equal some even integer $n$ multiplied by the respective grid resolution $dx$ or $dz$. Here, $n=2$. We define $\Delta x$ and $\Delta z$ using Haar fluctuations
-\begin{align}
-  \Delta \phi (\mathbf{x}) = \frac{1}{n}\Bigg|\left(\sum_{i=1}^{i=n/2}\phi\left(\mathbf{x} - \left(i-\frac{1}{2}\right)dx \mathbf{\hat{x}}\right) - \sum_{i=1}^{i=n/2}\phi\left(\mathbf{x} + \left(i-\frac{1}{2}\right)dx \mathbf{\hat{x}}\right)\right)\Bigg| \\
-  \Delta \phi (\mathbf{z}) = \frac{1}{n}\Bigg|\left(\sum_{i=1}^{i=n/2}\phi\left(\mathbf{z} - \left(i-\frac{1}{2}\right)dz \mathbf{\hat{z}}\right) - \sum_{i=1}^{i=n/2}\phi\left(\mathbf{z} + \left(i-\frac{1}{2}\right)dz \mathbf{\hat{z}}\right)\right)\Bigg|
-\end{align}
-We use $n=4$. Note that, here, $\mathbf{x}$ is located at the central grid cell boundary around which the averages are computed. The spheroscale $l_s$ is defined as the scale at which $\phi(\Delta x) = \phi(\Delta z)$, implying $\varphi_h l_s^{1/3} = \varphi_v l_s^{3/5}$ and
-\begin{align}
-  l_s(\mathbf{x}) = \left(\frac{\varphi_v(\mathbf{x})}{\varphi_h(\mathbf{x})}\right)^{1/(1/3-3/5)}.
-\end{align}
-
 \section{Physical basis for the turbulon flux component} \label{sect:flux physical basis}
 
 The flux cascade introduced in Sect. () rests on three physical claims, in increasing order of subtlety: that there exists a flux that remains conserved across scales even in a cloudy atmosphere; that perturbations to this flux must be proportional to the flux at the next-larger scale \emph{at that location}; and that the proportionality constant is calibrated at the outer scale, where it sets the strength of the intermittency. This appendix presents the physical argument for each claim in turn. It also substantiates the statement in Sect. () that the horizontal component of the cascade is unaffected by buoyancy.
