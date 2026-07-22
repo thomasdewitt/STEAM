@@ -56,10 +56,15 @@ FLUX_ALPHA = 1.8
 # remaining cascade (current class and all smaller classes).
 BOUND_BUFFER_MULTIPLE = 3
 
-# Haar -> turbulon-amplitude calibration for C_{Phi,L}: equal integrated
-# squared fluctuation between a unit-amplitude Haar structure and a
-# unit-amplitude turbulon column (see _compute_normalization docstring).
-HAAR_TO_MHAT = 0.5 * (np.sqrt(np.pi) / 6.75) ** 0.5   # ~= 0.256
+# Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
+# the mean absolute vertical Haar fluctuation (at scale k_z) of a field of
+# unit-amplitude outer-class turbulons, measured from the envelope shape and
+# the s=1 packing (turbulon centers every k/2), is R = 2.005. Setting
+# lambda = 1/R makes the field's Haar fluctuation at the outer scale equal
+# the mean profile's by construction -- the crossover property checked by
+# tests/heavy/normalization_diagnostic.py. (R = 2.00 to three digits; whether
+# exactly 2 is derivable from the 3-lobe column + k/2 packing is open.)
+HAAR_TO_MHAT = 1.0 / 2.005   # ~= 0.499
 
 
 def _extremal_levy(alpha, size, rng):
@@ -1210,12 +1215,12 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     the response independent of profile resolution with no extra bookkeeping.
 
     HAAR_TO_MHAT converts the measured Haar coefficient to the cascade's
-    turbulon amplitude convention by matching power: a Haar-shaped structure
-    of unit amplitude (lobes +-1; Haar coefficient 2, hence the factor 1/2)
-    carries integrated squared fluctuation k_z,L, while a unit-amplitude
-    turbulon's vertical column (3 - u^2) exp(-u^2/2), u = z/sigma,
-    sigma = k_z,L/pi, carries (6.75/sqrt(pi)) k_z,L. Equal power gives
-    lambda = (1/2) sqrt(sqrt(pi)/6.75) ~= 0.256.
+    turbulon amplitude convention, defined operationally: lambda = 1/R with
+    R the mean absolute vertical Haar fluctuation of a unit-amplitude
+    outer-class turbulon field (R = 2.005 from the envelope shape and s=1
+    packing), so the field's Haar fluctuation at the outer scale equals the
+    profile's by construction (see the module constant and
+    tests/heavy/normalization_diagnostic.py).
 
     C_{Phi,k} then follows n_c^{-1/alpha} (k/L)^H_h, with n_c =
     n_scale_classes_per_dyad: the same density compensation as the flux
