@@ -42,10 +42,11 @@ The inputs are: horizontally uniform ensemble mean profiles $\langle h
 \rangle_t(z)$ and $\langle q_t \rangle_t(z)$ sampled at vertical spacing
 $\Delta z_p$; the spheroscale profile $l_s(z)$; the outer scale $L$; the
 horizontal domain size $L_x, L_y$ and finest grid spacing $dx, dy$; the
-domain height $L_z$; hard bounds $h_{\min}, h_{\max}, q_{t,\min},
-q_{t,\max}$; the surface pressure $p_s$; a random seed; and sparsity
-factors $s_x, s_y, s_z$ (positive integers, default 1). The outer scale
-must be a power-of-two multiple of $dx$.
+domain height $L_z$; physical bounds $[\Phi_{\min}, \Phi_{\max}]$ for
+each scalar together with the bound-buffer multiple $n_b$ (default 3);
+the surface pressure $p_s$; a random seed; and sparsity factors $s_x,
+s_y, s_z$ (positive integers, default 1). The outer scale must be a
+power-of-two multiple of $dx$.
 
 Logarithmically spaced size classes are defined as $k_i = L / 2^i$ for
 $i = 0, 1, \dots, \log_2(L/(2dx))$, proceeding from the outer scale down
@@ -81,6 +82,26 @@ $k_z/k$ and the ensemble-mean flux equal to one. Levels where the
 reference is exactly zero (a flat profile with no larger classes) are
 mapped to one; the realized weight is identically zero there.
 
+The bound-buffer widths and the ensemble-mean bound factor are computed
+from the same amplitude profiles. The buffer width is
+$b_{\Phi,k}(z) = n_b \big(\sum_{k_j \le k} C_{\Phi,j}(z)^2\big)^{1/2}$,
+summed over the current and all smaller size classes. The ensemble mean
+$\langle g_\Phi \rangle_i(z)$, which multiplies the assembled reference
+weight, is evaluated under a Gaussian closure: the running field at
+each level is treated as Gaussian with mean $\langle \Phi \rangle_t(z)$
+and standard deviation $\big(\sum_{k_j > k}
+C_{\Phi,j}(z)^2\big)^{1/2}$, the amplitudes already added by larger
+classes. For the lower ramp $r(f) = \min(1, \max(0, (f -
+\Phi_{\min})/b))$, the expectation is
+\begin{equation}
+  \langle r \rangle = \frac{1}{b} \int_{\Phi_{\min}}^{\Phi_{\min}+b}
+  P(f > t)\, dt,
+\end{equation}
+with the Gaussian exceedance probability $P$, and analogously for the
+upper ramp; since the two buffers never overlap in practice,
+$\langle g_\Phi \rangle_i = \langle r_{\mathrm{lower}} \rangle +
+\langle r_{\mathrm{upper}} \rangle - 1$.
+
 \subsection{Working grids}
 
 Turbulons of size $k$ need not be resolved at the finest grid spacing,
@@ -103,51 +124,64 @@ to a uniform grid at least as fine as the Nyquist target.
 The perturbation fields $\widetilde{h}$ and $\widetilde{q_t}$ are
 initialized to zero and the flux field $\mathcal{F}$ to one, on the
 coarsest grid. The algorithm then iterates over size classes from large
-to small. At each class:
+to small, performing the following sequence of operations at each class.
 
-\paragraph{Interpolation.} The perturbation and flux fields are
-trilinearly interpolated from the previous class's grid to the current
-one, and the mean profiles are linearly interpolated to the current
-vertical grid.
+First, the perturbation and flux fields are trilinearly interpolated
+from the previous class's grid to the current one, and the mean profiles
+are linearly interpolated to the current vertical grid.
 
-\paragraph{Flux advance.} The flux is advanced through one octave in
-$N = 4$ substeps. Each substep draws a sparse field $\gamma$ of
-independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables,
-$\alpha = 1.8$, at the turbulon centers (every $s_x, s_y, s_z$ cells,
-i.e. every $k/2$ in physical space), scaled by $c/N^{1/\alpha}$ --- by
-$\alpha$-stability the per-octave generator is invariant under the
-substep count --- and shifted by the constant that enforces $\langle
-e^\gamma \rangle = 1$ exactly (the $\alpha$-generalization of the
-lognormal $-\sigma^2/2$ shift), so the mean flux is conserved. The flux
-is updated additively as $\mathcal{F} \mathrel{+}= \mathfrak{T}_k *
-[(e^\gamma - 1)\mathcal{F}]$, clipped at zero, and renormalized to unit
-horizontal mean at each level. The signed scalar noise $S_k$ is the
-first substep's increment $(e^\gamma - 1)\mathcal{F}$ normalized to
-unit mean absolute value; it is shared between $h$ and $q_t$.
+The flux is then advanced through one octave in $N = 4$ substeps. Each
+substep draws a sparse field $\gamma$ of independent extremal ($\beta =
+-1$) L\'evy $\alpha$-stable variables, $\alpha = 1.8$, at the turbulon
+centers (every $s_x, s_y, s_z$ cells, i.e. every $k/2$ in physical
+space), scaled by $c/N^{1/\alpha}$ --- by $\alpha$-stability the
+per-octave generator is invariant under the substep count --- and
+shifted by the constant that enforces $\langle e^\gamma \rangle = 1$
+exactly (the $\alpha$-generalization of the lognormal $-\sigma^2/2$
+shift), so the mean flux is conserved. The flux is updated additively as
+$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$,
+clipped at zero, and renormalized to unit horizontal mean at each level.
+The signed scalar noise $S_k$ is the first substep's increment
+$(e^\gamma - 1)\mathcal{F}$ normalized to unit mean absolute value; it
+is shared between $h$ and $q_t$.
 
-\paragraph{Advective weight.} Gradients of the running field $f =
-\langle \Phi \rangle_t + \widetilde{\Phi}$ are computed with periodic
+Next, the scalar amplitudes are computed. Gradients of the running field
+$f = \langle \Phi \rangle_t + \widetilde{\Phi}$ are taken with periodic
 central differences in $x$ and $y$ and with one-sided differences at the
-vertical boundaries (central in the interior). The weight $W_{\Phi,k} =
-\mathcal{F}(|\nabla_h f| + (k_z/k)|\partial f/\partial z|)$ is divided
-by the precomputed ensemble mean $\langle W_{\Phi,k}\rangle_i(z)$,
-multiplied by $C_{\Phi,k}(z)$ and by $S_k$, giving the amplitude field
-$A_\Phi$.
+vertical boundaries (central in the interior), and the bound factor
+$g_\Phi$ is evaluated from the same running field with the buffer width
+$b_{\Phi,k}(z)$ above. The weight $W_{\Phi,k} = \mathcal{F} g_\Phi
+(|\nabla_h f| + (k_z/k)|\partial f/\partial z|)$ is divided by the
+precomputed ensemble mean $\langle W_{\Phi,k}\rangle_i(z)$, multiplied
+by $C_{\Phi,k}(z)$ and by $S_k$, giving the amplitude field $A_\Phi$.
 
-\paragraph{Convolution.} The 3D turbulon envelope is constructed with
-$\sigma = k/\pi$, isotropic in grid-index space (the grid's vertical
-compression realizes the stretched metric of the main-text appendix),
-truncated at five turbulon sizes from the center along each axis, and
-shifted to zero mean. If the kernel exceeds the field extent
-horizontally it is periodically folded onto the field period. $A_\Phi$
-is convolved with this kernel --- circular in $x$ and $y$, zero-padded
-in $z$ --- and the result is added to $\widetilde{\Phi}$.
+The amplitudes are then convolved with the turbulon envelope. The 3D
+envelope is constructed with $\sigma = k/\pi$, isotropic in grid-index
+space (the grid's vertical compression realizes the stretched metric of
+the main-text appendix), truncated at five turbulon sizes from the
+center along each axis, and shifted to zero mean. If the kernel exceeds
+the field extent horizontally it is periodically folded onto the field
+period. $A_\Phi$ is convolved with this kernel --- circular in $x$ and
+$y$, zero-padded in $z$ --- and the result is added to
+$\widetilde{\Phi}$.
+
+Finally, each scalar is projected onto its bounds while preserving the
+horizontal mean at every level: $\Phi \rightarrow \min(\max(\Phi - \mu,
+\Phi_{\min}), \Phi_{\max})$, with $\mu$ solved per level such that the
+horizontal mean equals its value before the projection. The projected
+mean is a continuous, piecewise-linear, monotonically decreasing
+function of $\mu$, so the root is found exactly by sorting the
+breakpoints $\Phi_i - \Phi_{\max}$ and $\Phi_i - \Phi_{\min}$, or to
+arbitrary precision by bisection. The correction is folded into the
+current class's perturbation field, so that the gradients seen by
+subsequent classes are those of the projected field.
 
 \subsection{Final fields}
 
 After the finest class ($k = 2dx$), the output fields are $h = \langle
 h \rangle_t + \widetilde{h}$ and $q_t = \langle q_t \rangle_t +
-\widetilde{q_t}$, hard-clipped to the input bounds. Temperature, water
+\widetilde{q_t}$; the per-class projection guarantees they lie within
+the input bounds, so no final clip is applied. Temperature, water
 phases, and pressure are then recovered by the saturation adjustment of
 the main-text appendix.
 
@@ -168,7 +202,7 @@ described below.
 \subsection{Comparison data}
 \label{ssect:rcemip data}
 
-\paragraph{Channel ensemble.} Nine models provide usable
+Nine models provide usable
 three-dimensional snapshot output for the 300~K channel configuration:
 SAM, CM1, three Met Office Unified Model variants (CASIM, RA1-T,
 RA1-T-nocloud), SCALE, UCLA-CRM, and two ICON variants (LEM and NWP).
@@ -188,7 +222,7 @@ water and remaining fields are physically normal --- the corruption is
 in the archived field, not the simulation, but it contaminates every
 vapor-dependent statistic used here.
 
-\paragraph{Variable handling.} All humidities are converted to mixing
+All humidities are converted to mixing
 ratios before any further computation. Most models archive specific
 quantities (mass per unit moist air, CMOR names \texttt{hus},
 \texttt{clw}, \texttt{cli}); these are converted as $r = q/(1-q)$, with
@@ -204,7 +238,7 @@ $h = c_p T + g z + L_v r_v$ with $c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$,
 $g = 9.81$~m\,s$^{-2}$, $L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's
 constants, applied identically to every model).
 
-\paragraph{Model-specific recoveries.} Two archives require special
+Two archives require special
 handling. (i)~The ICON files carry only a level \emph{index} (top-down)
 as their vertical coordinate; physical height is recovered by inverting
 the frozen moist static energy field distributed alongside them,
@@ -243,14 +277,24 @@ holds four outer-scale tiles. The simulated depth is 20~km.
 
 Each STEAM run is initialized from one host snapshot: the host's
 horizontal-mean $h(z)$ and $q_t(z)$, interpolated to a uniform 50~m
-profile grid, plus its surface pressure as above. Hard bounds are
-$h \in [\min h(z) - 10\,c_p,\ \max h(z) + 10\,c_p]$ and
-$q_t \in [0,\ \max(0.03,\ 1.5 \max q_t(z))]$~kg\,kg$^{-1}$. One
-realization is run per host snapshot (three per model), with a distinct
-seed per snapshot, so host and STEAM sample counts match by
-construction.
+profile grid, plus its surface pressure as above. The scalar bounds are
+anchored to the prescribed 300~K sea surface temperature, which every
+realization sees: $q_t \in [0,\ q_{\mathrm{sat}}(300\,\mathrm{K},
+p_s)]$, since no parcel can acquire more vapor than saturated contact
+with the sea surface provides, and $h \in [\min_z \langle h \rangle(z)
+- c_p \Delta T_{\max},\ c_p \cdot 300\,\mathrm{K} + L_v\,
+q_{\mathrm{sat}}(300\,\mathrm{K}, p_s)]$, where the upper bound is the
+saturation moist static energy at the surface and the lower bound
+allows a maximum temperature deficit of $\Delta T_{\max} = 10$~K below
+the coldest point of the mean profile. One realization is run per host
+snapshot (three per model), with a distinct seed per snapshot, so host
+and STEAM sample counts match by construction.
+% NOTE (Claude, 2026-07-22): bounds above describe the NEW anchored
+% prescription agreed today; the archived runs used the older ad hoc
+% bounds (h: min-10cp/max+10cp; qt: max(0.03, 1.5*max qt)) and must be
+% regenerated under the new algorithm before final figures anyway.
 
-\paragraph{Wide-domain ensemble.} For size distributions and
+For size distributions and
 large-domain fractal dimensions, nine additional STEAM runs use a
 $2048\times 1024$ grid at $\Delta x = 3$~km ($6144\times 3072$~km$^2$),
 one per host profile (the first snapshot of each host), with the same
