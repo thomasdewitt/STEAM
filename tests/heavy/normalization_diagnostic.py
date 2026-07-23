@@ -22,10 +22,10 @@ import tempfile
 
 def main():
     # ---- Parameters ----
-    outer_scale = 5000 * 256       # m, horizontal
-    dx = dy = 5000            # m  (L/dx = 32 = 2^5, gives 5 scale classes)
-    nx = ny = 1024            # domain = 4 * outer_scale per side = 16 tiles
-    domain_height = 20000    # m
+    outer_scale = 5000 * 2048      # m, horizontal (8x: more vertical octaves)
+    dx = dy = 5000            # m
+    nx = ny = 2048            # one outer-scale tile per side
+    domain_height = 40000    # m (k_z_L ~ 21.9 km must fit inside the domain)
     profile_dz = .6          # m
     spheroscale = 10    # m
     n_seeds = 3
@@ -83,8 +83,10 @@ def main():
             ds.close()
 
         nz = h_3d.shape[2]
-        all_h_columns.append(h_3d.reshape(-1, nz))
-        all_qt_columns.append(qt_3d.reshape(-1, nz))
+        # Subsample columns 4x: the Haar analysis allocates several float64
+        # copies of the stacked columns, and the full 2048^2 x 3 seeds OOMs.
+        all_h_columns.append(h_3d.reshape(-1, nz)[::4])
+        all_qt_columns.append(qt_3d.reshape(-1, nz)[::4])
 
     h_columns = np.concatenate(all_h_columns, axis=0)
     qt_columns = np.concatenate(all_qt_columns, axis=0)
@@ -131,8 +133,8 @@ def main():
     # Fitting ranges
     mean_fit_min = 4 * dz_out
     mean_fit_max = domain_height / 4
-    col_fit_min = 4 * dz_out
-    col_fit_max = k_z_L / 2   # stay below expected crossover
+    col_fit_min = float(phys_lags[3])
+    col_fit_max = float(phys_lags[8])   # points 4-9: above grid/finest-class contamination, below roll-over
 
     print(f"Mean fit range: [{mean_fit_min:.0f}, {mean_fit_max:.0f}] m")
     print(f"Column fit range: [{col_fit_min:.0f}, {col_fit_max:.0f}] m")
@@ -151,21 +153,31 @@ def main():
 
         r_cross = crossover_scale(int_mean, 1.0, int_col, H_v)
 
+        # Direct amplitude check at the expected crossover scale: the
+        # column and mean-profile Haar fluctuations, interpolated (in log-log)
+        # to k_z_L, should be equal there. No extrapolation involved --
+        # unlike the line-intersection "crossover scale", which divides by
+        # the slope difference (1.0 - H_v ~ 0.1) and amplifies any intercept
+        # offset tenfold in log-scale.
+        amp_col_at_kzL = 10 ** np.interp(np.log10(k_z_L), log_lags, log_col)
+        amp_mean_at_kzL = 10 ** np.interp(np.log10(k_z_L), log_lags, log_mean)
+        amp_ratio = amp_col_at_kzL / amp_mean_at_kzL
+
         results[name] = {
             'haar_mean': haar_mean,
             'haar_col': haar_col,
             'intercept_mean': int_mean,
             'intercept_col': int_col,
             'crossover': r_cross,
+            'amp_ratio_at_kzL': amp_ratio,
         }
 
-        ratio = r_cross / k_z_L if not np.isnan(r_cross) else np.nan
         print(f"{name}:")
         print(f"  Mean profile fit intercept: {int_mean:.4f}")
         print(f"  Column fit intercept (slope={H_v:.3f}): {int_col:.4f}")
-        print(f"  Crossover scale: {r_cross:.0f} m")
-        print(f"  Expected k_z_L: {k_z_L:.0f} m")
-        print(f"  Ratio (crossover / expected): {ratio:.3f}")
+        print(f"  AMPLITUDE RATIO col/mean at k_z_L: {amp_ratio:.3f}  (target 1.0)")
+        print(f"  (line-intersection crossover: {r_cross:.0f} m -- unreliable, "
+              f"slope gap {1.0 - H_v:.2f} amplifies intercept offsets)")
         print()
 
     # ---- Plot ----
@@ -193,25 +205,29 @@ def main():
         ax.loglog(phys_lags, r['haar_col'], 's', color=c_col,
                   ms=3, lw=1.5, label=f'3D columns (n={h_columns.shape[0]})', zorder=3)
 
-        # Fitted lines spanning the full range
-        fit_r = np.logspace(np.log10(phys_lags.min() * 0.8),
-                            np.log10(phys_lags.max() * 1.2), 200)
-        log_fit_r = np.log10(fit_r)
+        # Fitted lines drawn ONLY over their fit windows (a full-range line
+        # with a forced slope reads as a global fit and visually overshoots
+        # the rolled-over data). NOTE: the smallest lags sit at/below the
+        # finest class's vertical turbulon size k_z(2dx) ~ 466 m here, so
+        # they sample sub-turbulon kernel smoothness rather than cascade
+        # scaling; the guide lines are cosmetic -- the quantitative check is
+        # the amplitude ratio at k_z_L printed above.
+        fit_r_mean = np.logspace(np.log10(mean_fit_min), np.log10(mean_fit_max), 50)
+        line_mean = 10**(r['intercept_mean'] + 1.0 * np.log10(fit_r_mean))
+        fit_r_col = np.logspace(np.log10(col_fit_min), np.log10(col_fit_max), 50)
+        line_col = 10**(r['intercept_col'] + H_v * np.log10(fit_r_col))
 
-        line_mean = 10**(r['intercept_mean'] + 1.0 * log_fit_r)
-        line_col = 10**(r['intercept_col'] + H_v * log_fit_r)
-
-        ax.loglog(fit_r, line_mean, '--', color=c_fit_mean, lw=2,
+        ax.loglog(fit_r_mean, line_mean, '--', color=c_fit_mean, lw=2,
                   label='Slope = 1 (smooth)', zorder=2)
-        ax.loglog(fit_r, line_col, '--', color=c_fit_col, lw=2,
+        ax.loglog(fit_r_col, line_col, '--', color=c_fit_col, lw=2,
                   label=f'Slope = {H_v:.2f} (turbulent)', zorder=2)
 
-        # Crossover and expected outer scale
+        # Expected outer scale; the line-intersection crossover is not drawn
+        # (unreliable -- see printout).
         ax.axvline(k_z_L, color=c_expected, ls='-', lw=2, alpha=0.7,
                    label=f'Expected $k_{{z,L}}$ = {k_z_L:.0f} m')
-        if not np.isnan(r['crossover']):
-            ax.axvline(r['crossover'], color=c_measured, ls=':', lw=2,
-                       label=f'Measured crossover = {r["crossover"]:.0f} m')
+        ax.annotate(f"col/mean at $k_{{z,L}}$: {r['amp_ratio_at_kzL']:.2f}",
+                    xy=(0.03, 0.97), xycoords='axes fraction', va='top', fontsize=9)
 
         ax.set_xlabel('Vertical separation [m]')
         ax.set_ylabel('Haar fluctuation (first order)')
@@ -235,7 +251,7 @@ def main():
         for idx in sample_idx:
             ax.plot(columns[idx], z_out / 1e3, color='black', alpha=0.05, lw=0.3)
 
-        ax.plot(columns.mean(axis=0), z_out / 1e3, color=c_col, lw=2,
+        ax.plot(columns.mean(axis=0, dtype=np.float64), z_out / 1e3, color=c_col, lw=2,
                 label='Column mean', zorder=3)
         ax.plot(target_mean, z_out / 1e3, color=c_mean, lw=2, ls='--',
                 label='Target profile', zorder=4)

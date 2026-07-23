@@ -61,15 +61,16 @@ $k_i < l_s(z)$.
 
 The outer-scale amplitude profile $C_{\Phi, L}(z)$ is computed for each
 scalar $\Phi \in \{h, q_t\}$ from the mean profile, per the main-text
-appendix. Because the kernel width varies with height, the convolution
-is evaluated as an explicit per-level sum: at each profile level, the
-center column of the outer-scale turbulon envelope is resampled to a
-half-width of $5\,k_{z,L}(z)$ in profile cells (minimum one cell), where
-$k_{z,L}(z)$ uses the local spheroscale; the column is shifted to zero
-mean (the discrete admissibility criterion); the profile, edge-padded by
-the maximum half-width, is dotted with the column; and the absolute
-response is scaled by $N_L(z)/N_p$ with $N_L(z) = L_z / k_{z,L}(z)$ and
-$N_p$ the number of profile samples. The scale-dependent amplitudes
+appendix: at each profile level, the Haar fluctuation at the local
+vertical outer scale --- the mean of the profile over the upper half of
+a $k_{z,L}(z)$-wide window minus the mean over the lower half, with
+half-window width at least one profile cell and the profile edge-padded
+by the maximum half-width --- is multiplied by the calibration constant $\lambda = 1/R \approx 0.50$
+and taken in absolute value, where $R \approx 2.0$ is the mean absolute
+vertical Haar fluctuation of a field of unit-amplitude outer-scale
+turbulons, computed from the envelope shape and the turbulon packing;
+this makes the simulated Haar fluctuation at the outer scale equal that
+of the input profile by construction. The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 (density compensation per the main-text appendix) and are interpolated
 to each size class's vertical grid.
