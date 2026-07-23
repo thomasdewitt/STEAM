@@ -9,3 +9,8 @@
 !copernicus.cfg
 !copernicus.bst
 !README_copernicus_package_6_9.txt
+# Concept figures: scripts, libs, and locked PDFs (build inputs)
+!concept-figs/
+!concept-figs/**
+concept-figs/__pycache__/
+concept-figs/*_hires.png
