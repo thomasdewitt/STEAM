@@ -114,7 +114,8 @@ are linearly interpolated to the current vertical grid.
 The flux is then advanced by one size class. A sparse field $\gamma$ of
 independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables,
 $\alpha = 1.8$, is drawn at the turbulon centers (every $s_x, s_y, s_z$
-cells, i.e. every $k/2$ in physical space), scaled by
+cells, i.e. every $k/2$ in physical space; no centers lie below the
+surface or above the domain top), scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$, and shifted by the constant that
 enforces $\langle e^\gamma \rangle = 1$ exactly (the
 $\alpha$-generalization of the lognormal $-\sigma^2/2$ shift), so the
