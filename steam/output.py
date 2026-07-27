@@ -13,6 +13,7 @@ def write_netcdf(
     h_profile, qt_profile, z_profile,
     k_values, k_z_values, C_h_k, C_qt_k,
     simulation_params,
+    group=None,
     compress=None,
     flux_3d=None,
 ):
@@ -35,6 +36,10 @@ def write_netcdf(
         profile_dz, sparsity_factors, surface_pressure, seed, C_h_L,
         C_qt_L, n_large_turbulons, H_h, H_z, h_min, h_max, qt_min,
         qt_max, min_distance_to_ground.
+    group : str or None
+        If None, write to the root of a new file. If provided, open the
+        existing file in append mode and write into a NetCDF4 group of this
+        name — how refine() stores a nest alongside its parent.
     compress : bool or None
         If True, write the 3D data variables with
         zlib compression at complevel=4. None (default) uses the
@@ -51,8 +56,14 @@ def write_netcdf(
     output_path = Path(output_path)
     nx_final, ny_final, nz_final = h_3d.shape
 
-    print(f"Writing NetCDF to {output_path} ...")
-    ds = netCDF4.Dataset(output_path, "w", format="NETCDF4")
+    if group is not None:
+        print(f"Writing NetCDF group '{group}' to {output_path} ...")
+        ds_root = netCDF4.Dataset(output_path, "a", format="NETCDF4")
+        ds = ds_root.createGroup(group)
+    else:
+        print(f"Writing NetCDF to {output_path} ...")
+        ds_root = netCDF4.Dataset(output_path, "w", format="NETCDF4")
+        ds = ds_root
 
     # Dimensions
     ds.createDimension("x", nx_final)
@@ -101,7 +112,7 @@ def write_netcdf(
         )
         flux_var[:] = flux_3d
         flux_var.units = "1"
-        flux_var.long_name = "dimensionless conserved flux (horizontal mean 1)"
+        flux_var.long_name = "dimensionless conserved flux"
 
     # Profile variables
     zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))
@@ -167,6 +178,8 @@ def write_netcdf(
     ls_var.units = "m"
     ls_var.long_name = "spheroscale profile"
     ds.domain_height = np.float32(p['domain_height'])
+    if 'domain_z_min' in p:
+        ds.domain_z_min = np.float32(p['domain_z_min'])
     ds.profile_dz = np.float32(p['profile_dz'])
     ds.sparsity_factors = np.array(p['sparsity_factors'], dtype=np.int32)
     ds.surface_pressure = np.float32(p['surface_pressure'])
@@ -190,6 +203,34 @@ def write_netcdf(
     ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
     ds.flux_alpha = np.float32(p['flux_alpha'])
 
-    ds.close()
-    print(f"Written {output_path}")
+    # Refinement-specific attributes. periodic_x / periodic_y record whether
+    # the group's own x / y axis wraps: a root always does, a nest only where
+    # it spans a parent axis that itself wrapped. Absent means periodic, so
+    # root files written before nesting existed still read correctly.
+    for attr in ('parent_group', 'parent_x_slice', 'parent_y_slice',
+                 'parent_x_offset', 'parent_y_offset',
+                 'normalization_source'):
+        if attr in p:
+            val = p[attr]
+            if isinstance(val, str):
+                ds.setncattr(attr, val)
+            else:
+                ds.setncattr(attr, np.array(val))
+    for attr in ('periodic_x', 'periodic_y'):
+        if attr in p:
+            ds.setncattr(attr, np.int8(p[attr]))
+
+    # Optional 2D starting pressure for hydrostatic integration, written by
+    # refine() when the nest's bottom is elevated above the parent ground.
+    if 'p_bottom' in p:
+        pb_var = ds.createVariable(
+            "p_bottom", "f4", ("x", "y"),
+            zlib=compress, complevel=4 if compress else 0,
+        )
+        pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
+        pb_var.units = "Pa"
+        pb_var.long_name = "starting pressure at nest bottom (z=z[0])"
+
+    ds_root.close()
+    print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))
     return output_path
