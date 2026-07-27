@@ -858,11 +858,24 @@ def _advance_flux(
     carries the SIGNED multiplier noise and the entering flux, normalized to
     mean absolute value one:
     S_k = (exp(gamma)-1) * F_{k-1} / <|exp(gamma)-1|>.
+
+    After the clip at zero, the field is rescaled by a single scalar
+    restoring its volume mean from before the advance — a pure clip-bias
+    correction (ruling 2026-07-27, audit B14; replaces the per-level
+    unit-mean renorm). Restoring the ENTERING mean rather than forcing
+    unit mean makes the same rule correct in root simulations (entering
+    mean ~ 1) and in nested refinements (entering mean = the inherited
+    regional flux anomaly, which must be preserved). Realized per-level
+    mean fluctuations are left alive: they are physical layer-scale
+    intermittency; the flat-dissipation idealization is enforced in
+    expectation by the generator shift, not realization-by-realization.
     """
     s_x, s_y, s_z = sparsity_factors
     per_class_scale = flux_noise_scale / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
     shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
     per_class_scale = np.float32(per_class_scale)
+
+    entering_mean = float(flux.mean(dtype=np.float64))
 
     gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
     if zero_bottom and n_zero > 0:
@@ -886,12 +899,11 @@ def _advance_flux(
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
-    mean_flux = flux.mean(axis=(0, 1), keepdims=True)
-    empty_levels = (mean_flux <= 0).reshape(-1)
-    if np.any(empty_levels):
-        flux[:, :, empty_levels] = np.float32(1.0)
-        mean_flux[:, :, empty_levels] = np.float32(1.0)
-    flux /= np.where(mean_flux > 0, mean_flux, np.float32(1.0))
+    volume_mean = float(flux.mean(dtype=np.float64))
+    if volume_mean > 0:
+        flux *= np.float32(entering_mean / volume_mean)
+    else:
+        flux[:] = np.float32(entering_mean)
 
     diagnostics = {
         'n_clipped': n_clipped,

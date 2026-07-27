@@ -126,7 +126,12 @@ conserved.
 % closed form is 1/(alpha-1) = 1.25 exactly. Replacing the measured
 % constant with the closed form is checklist item 32 (Thomas's call). The flux is updated additively as
 $\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$,
-clipped at zero, and renormalized to unit horizontal mean at each level.
+clipped at zero, and rescaled by a single scalar restoring the volume
+mean the field had before the advance --- a clip-bias correction only
+(in a root simulation the entering mean is one). Level means are not
+individually constrained: realized layer-mean flux fluctuations are
+retained, and mean-flux flatness holds in expectation through the
+generator shift.
 The signed scalar noise $S_k$ is the increment $(e^\gamma -
 1)\mathcal{F}$ evaluated with the entering flux, normalized by the mean
 absolute value of $e^\gamma - 1$ over the turbulon centers; it is shared

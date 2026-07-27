@@ -124,7 +124,11 @@ def test_flux_only_runs_with_two_classes_per_dyad():
     )
 
     assert np.all(flux >= 0)
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=2e-6)
+    # Volume mean is restored to the entering mean (~1 for a root cascade)
+    # each class; per-level means are free to fluctuate (2026-07-27 ruling).
+    # Tolerance covers inter-class interpolation drift, which the
+    # clip-bias-only renorm deliberately does not scrub (~0.1% per class).
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, atol=0.02)
     assert diagnostics["n_scale_classes_per_dyad"] == 2
     assert len(diagnostics["steps"]) == len(k_values)
 
@@ -148,7 +152,11 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     assert diagnostics["n_clipped"] > 0
     assert diagnostics["clip_fraction"] > 0
     assert np.all(flux >= 0)
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, atol=2e-6)
+    # Entering volume mean restored despite heavy clipping; per-level
+    # means fluctuate freely (2026-07-27 ruling). Tolerance covers
+    # inter-class interpolation drift (not scrubbed by design), which is
+    # larger for the extreme spike field this absurd c produces.
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, atol=0.05)
 
 
 def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch):
