@@ -72,10 +72,21 @@ def _parent_geometry(path):
 # Per-class seeding: a split cascade must reproduce a single run
 # ---------------------------------------------------------------------------
 
-def test_split_cascade_matches_full_cascade():
+def test_split_cascade_matches_full_cascade(monkeypatch):
     """Running the first M classes then the remaining N-M, handing over the
     perturbations AND the flux, is bit-identical to running all N at once.
-    This is the invariant refine() relies on to continue a parent's cascade."""
+    This is the invariant refine() relies on to continue a parent's cascade.
+
+    The interpolation-retention compensation is neutralized here: it is
+    deliberately chain-aware (each run amplifies its classes for the
+    regrids remaining in ITS OWN chain), so a split run compensates the
+    first M classes less than the full run does. That is the intended
+    semantics — a parent's output is correct for the parent's grid, and
+    inherited content takes almost no further loss on the nest's chain
+    (dyadic linear regrids are near-idempotent after the first) — but it
+    breaks bit-identity, so the machinery invariant is tested with the
+    compensation switched off."""
+    monkeypatch.setattr(sm, "ZOOM_RETENTION", (1.0,))
     h_profile, qt_profile = _profiles()
     z_profile = np.arange(PARENT_NZ) * PARENT_PROFILE_DZ
     spheroscale_profile = np.full(PARENT_NZ, 100.0)

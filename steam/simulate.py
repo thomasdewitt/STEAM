@@ -78,6 +78,18 @@ FLUX_ALPHA = 1.8
 # remaining cascade (current class and all smaller classes).
 BOUND_BUFFER_MULTIPLE = 3
 
+# Trilinear-regrid retention of the horizontal Haar fluctuation, indexed
+# by the number of regrids a class's deposit undergoes before reaching
+# the final grid (measured against an exact band-limited x,y reference
+# carried through the identical vertical chain; see supplement S1 and
+# turbulon-analysis/archaeology/measure_zoom_retention.py). The first
+# regrid piecewise-linearizes the Nyquist-sampled deposit -- the
+# dominant, one-time loss; later dyadic regrids are near-idempotent,
+# with a slow residual decline from the coarse classes' small starting
+# grids. Index 0 (the finest class, never regridded) is exact; chains
+# longer than the table clamp to the last entry.
+ZOOM_RETENTION = (1.0, 0.626, 0.529, 0.508, 0.500, 0.491, 0.471, 0.461, 0.388)
+
 # Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
 # the mean absolute vertical Haar fluctuation (at scale k_z) of a field of
 # unit-amplitude outer-class turbulons, measured from the envelope shape and
@@ -846,14 +858,22 @@ def cascade_loop(
             W += grad_h
             del grad_h
 
-            # Realized norm: normalizing by the realized horizontal mean
-            # enforces the mean-absolute turbulon amplitude C_k exactly at
-            # every level and class (self-correcting; no deterministic
-            # reference, no compounding bias). Structureless levels
-            # (level mean zero) keep W = 0.
-            level_mean = _inner_view(W, window).mean(
-                axis=(0, 1), keepdims=True, dtype=np.float64)
-            W /= np.where(level_mean > 0, level_mean, 1.0).astype(np.float32)
+            # Joint product norm (2026-07-27 ruling): W and S_k are
+            # CORRELATED — the flux is large where past deposits (and so
+            # the running field's gradients) are large, and the correlation
+            # compounds down-cascade. Normalizing the factors separately
+            # therefore does not normalize the product: <W_hat |S_k|> grew
+            # ~9x over 7 octaves and cancelled the k^H_h ladder (audit
+            # item 35). Normalize the PRODUCT W*S_k per level by its mean
+            # absolute value over turbulon centers, which enforces the
+            # mean turbulon amplitude <|A|> = C_k exactly at every level
+            # and class. Structureless levels (no centers) keep W = 0.
+            W *= S_k            # joint pattern W*S_k (sparse at centers)
+            inner = _inner_view(W, window)
+            level_sum = np.abs(inner).sum(axis=(0, 1), dtype=np.float64)
+            level_cnt = np.count_nonzero(inner, axis=(0, 1))
+            level_mean = (level_sum / np.maximum(level_cnt, 1)).astype(np.float32)
+            W /= np.where(level_mean > 0, level_mean, np.float32(1.0))[None, None, :]
 
             # Bound taper, applied AFTER the norm: proximity of one part of
             # the field to a bound reduces that level's total variance
@@ -862,7 +882,14 @@ def cascade_loop(
             del running_sum
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
-            W *= S_k            # signed multiplier noise; W is now A
+
+            # Interpolation-retention compensation: amplify this class's
+            # deposit by the inverse of the measured retention of the
+            # regrid chain it has yet to traverse, so the FINAL grid
+            # carries the designed amplitude ladder. The finest class is
+            # never regridded (factor 1).
+            m = min(n_classes - 1 - i, len(ZOOM_RETENTION) - 1)
+            W *= np.float32(1.0 / ZOOM_RETENTION[m])
 
             # Convolve and accumulate (periodic x,y; zero-padded z)
             perturbation_field += CONVOLVE(W, kernel, device=device)

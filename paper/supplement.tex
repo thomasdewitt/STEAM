@@ -80,8 +80,9 @@ $b_{\Phi,k}(z) = n_b \sum_{k_j \le k} C_{\Phi,j}(z)$, a linear sum of
 the mean absolute amplitudes of the current and all smaller size
 classes, with each $C_{\Phi,j}$ interpolated to the current class's
 vertical grid. (No deterministic ensemble-mean weight is used: the
-advective weight is normalized by its realized horizontal mean at each
-level, computed during the cascade loop below.)
+product of the advective weight and the signed noise is normalized by
+its realized mean absolute value over turbulon centers at each level,
+computed during the cascade loop below.)
 
 \subsection{Working grids}
 
@@ -110,6 +111,26 @@ to small, performing the following sequence of operations at each class.
 First, the perturbation and flux fields are trilinearly interpolated
 from the previous class's grid to the current one, and the mean profiles
 are linearly interpolated to the current vertical grid.
+
+The trilinear regrids are not lossless: piecewise-linear interpolation
+of a class's Nyquist-sampled deposit removes a measurable fraction of
+its fluctuation. The retention was measured by carrying synthetic
+single-class deposits (envelope-convolved center noise) through the
+exact chain of regrids twice --- once with the model's trilinear
+operator and once with exact band-limited (Fourier) horizontal
+upsampling and the identical vertical chain --- and taking the ratio of
+the resulting first-order Haar fluctuations at the class scale. The
+first regrid dominates (retention $0.63$); subsequent dyadic regrids
+are near-idempotent, with retention drifting slowly from $0.53$ to
+$\sim 0.4$ for the longest chains (the coarsest classes start on grids
+of only a few cells). The measured retention, tabulated by the number
+of regrids remaining in the chain, is compensated at deposit time: each
+class's amplitude is multiplied by the inverse retention of the chain
+it has yet to traverse, so the final grid carries the designed
+amplitude ladder. The finest class, which is never regridded, is not
+compensated. In a nested refinement each run compensates for its own
+chain; content inherited from the parent has already been linearized
+once and takes almost no further loss on the nest's regrids.
 
 The flux is then advanced by one size class. A sparse field $\gamma$ of
 independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables,
@@ -175,14 +196,24 @@ Next, the scalar amplitudes are computed. Gradients of the running field
 $f = \langle \Phi \rangle_t + \widetilde{\Phi}$ are taken with periodic
 central differences in $x$ and $y$ and with one-sided differences at the
 vertical boundaries (central in the interior). The weight $W_{\Phi,k} =
-|\nabla_h f| + (k_z/k)|\partial f/\partial z|$ is divided by its
-realized horizontal mean at each level (levels where the mean is
-exactly zero are left at zero), then multiplied by the bound factor
+|\nabla_h f| + (k_z/k)|\partial f/\partial z|$ is multiplied by the
+signed noise $S_k$, and the \emph{product} $W_{\Phi,k} S_k$ is divided
+by its mean absolute value over the turbulon centers at each level
+(levels with no centers are left at zero). The normalization acts on
+the product rather than on $W_{\Phi,k}$ alone because the two factors
+are correlated --- the flux carried by $S_k$ is large where past
+deposits, and therefore the running field's gradients, are large ---
+and the correlation compounds from class to class; normalizing the
+factors separately leaves $\langle W |S_k| \rangle$ growing down the
+cascade, which cancels the $k^{H_h}$ dependence of the amplitude
+ladder. The normalized product is then multiplied by the bound factor
 $g_\Phi$, evaluated pointwise from the same running field with the
 buffer width $b_{\Phi,k}(z)$ above --- the taper is applied after the
 normalization, so that proximity to a bound reduces a level's total
 amplitude rather than redistributing it --- and finally by
-$C_{\Phi,k}(z)$ and $S_k$, giving the amplitude field $A_\Phi$.
+$C_{\Phi,k}(z)$, giving the amplitude field $A_\Phi$ with mean absolute
+turbulon amplitude $C_{\Phi,k}(z)$ at every level, class, and
+realization.
 
 The amplitudes are then convolved with the turbulon envelope. The 3D
 Mexican hat of the main-text appendix ($3 - \rho$ form) is constructed
