@@ -28,9 +28,9 @@
 \label{ssect:steam algorithm spec}
 
 This section specifies the STEAM algorithm at the level of implementation
-detail: discretization, boundary handling, and the order of operations.
+detail.
 The physical construction and its motivation are described in the main
-text and its appendices; the intent here is that the simulation could be
+text and its appendices, while the intent here is that the simulation could be
 reproduced exactly from this description together with the main-text
 equations. The reference implementation is the \texttt{turbulon-model}
 repository, and the full analysis for this paper is contained in the
@@ -38,16 +38,30 @@ companion \texttt{turbulon-analysis} repository.
 
 \subsection{Inputs and size classes}
 
-The inputs are: horizontally uniform ensemble mean profiles $\langle h
+The inputs are: 
+\begin{enumerate}
+
+\item horizontally uniform ensemble mean profiles $\langle h
 \rangle_t(z)$ and $\langle q_t \rangle_t(z)$ sampled at vertical spacing
-$\Delta z_p$; the spheroscale profile $l_s(z)$; the outer scale $L$; the
-horizontal domain size $L_x, L_y$ and finest grid spacing $dx, dy$; the
-domain height $L_z$; physical bounds $[\Phi_{\min}, \Phi_{\max}]$ for
+$\Delta z_p$; 
+\item the spheroscale profile $l_s(z)$; 
+\item the outer scale $L$; 
+\item the
+horizontal domain size $L_x, L_y$ and finest grid spacing $dx, dy$; 
+\item the
+domain height $L_z$; 
+\item physical bounds $[\Phi_{\min}, \Phi_{\max}]$ for
 each scalar together with the bound-buffer multiple $n_b$ (default 3);
-the surface pressure $p_s$; a random seed; sparsity factors $s_x,
-s_y, s_z$ (positive integers, default 1); and the cascade density $n_c$
-(size classes per octave, positive integer, default 1). The outer scale
-must be a power-of-two multiple of $dx$.
+
+\item the surface pressure $p_s$; a random seed; 
+\item sparsity factors $s_x,
+s_y, s_z$ (positive integers, default 1); 
+\item and the cascade density $n_c$
+(size classes per octave, positive integer, default 1). 
+
+\end{enumerate}
+The outer scale
+must be a power-of-two multiple of $dx$, and the implied vertical outer scale (PUT EQN HERE) must be smaller than the domain height.
 
 Logarithmically spaced size classes are defined as $k_i = L\, 2^{-i/n_c}$
 for $i = 0, 1, \dots, n_c\log_2(L/(2dx))$, proceeding from the outer
@@ -55,39 +69,37 @@ scale down to the finest class $k = 2dx$, which is Nyquist-sampled by the
 output grid. For each $k_i$ the vertical turbulon size is $k_{z,i}(z) =
 l_s(z)(k_i / l_s(z))^{H_z}$, evaluated with the local spheroscale;
 where the piecewise-isotropic option is selected, $k_{z,i} = k_i$ for
-$k_i < l_s(z)$.
+$k_i < l_s(z)$. % Please check this paragraph. It seems like the sparsity factors should play a role? In particular, unless they are one the smallest turbulon is not nyquist-sampled, right?
 
 \subsection{Normalization}
 
 The outer-scale amplitude profile $C_{\Phi, L}(z)$ is computed for each
-scalar $\Phi \in \{h, q_t\}$ from the mean profile, per the main-text
-appendix: at each profile level, the Haar fluctuation at the local
-vertical outer scale --- the mean of the profile over the upper half of
-a $k_{z,L}(z)$-wide window minus the mean over the lower half, with
-half-window width at least one profile cell and the profile edge-padded
-by the maximum half-width --- is multiplied by the calibration constant $\lambda = 1/R \approx 0.50$
+scalar $\Phi \in \{h, q_t\}$ from the mean profile as described in
+Appendix A. At each profile level, the Haar fluctuation at the local
+vertical outer scale is computed by taking the mean of the profile over the upper half of
+a $k_{z,L}(z)$-wide window minus the mean over the lower half. Half-window width 
+is required to be at least one profile cell and the profile is edge padded
+by the maximum half-width. The result is multiplied by the calibration constant $\lambda = 1/R \approx 0.50$
 and taken in absolute value, where $R \approx 2.0$ is the mean absolute
 vertical Haar fluctuation of a field of unit-amplitude outer-scale
-turbulons, computed from the envelope shape and the turbulon packing;
-this makes the simulated Haar fluctuation at the outer scale equal that
+turbulons, computed from the envelope shape and the turbulon packing.
+This makes the Haar fluctuation at the outer scale of the simulated fields equal to that
 of the input profile by construction. The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
-(density compensation per the main-text appendix) and are interpolated
+as described in Appendix A and are interpolated
 to each size class's vertical grid.
 
-The bound-buffer widths are computed from the same amplitude profiles:
+The bound buffer widths are computed from the same amplitude profiles as
 $b_{\Phi,k}(z) = n_b \sum_{k_j \le k} C_{\Phi,j}(z)$, a linear sum of
 the mean absolute amplitudes of the current and all smaller size
 classes, with each $C_{\Phi,j}$ interpolated to the current class's
-vertical grid. (No deterministic ensemble-mean weight is used: the
-advective weight is normalized by its realized horizontal mean at each
-level, computed during the cascade loop below.)
+vertical grid. 
 
 \subsection{Working grids}
 
-Turbulons of size $k$ need not be resolved at the finest grid spacing,
-so each size class works on a coarsened grid with $\Delta x_k =
-k/(2s_x)$ and $\Delta y_k = k/(2s_y)$; when $s = 1$ the spacing is half
+For computational efficiency, all size classes except the smallest
+work on a coarsened grid with $\Delta x_k =
+k/(2s_x)$ and $\Delta y_k = k/(2s_y)$. When $s = 1$, the spacing is half
 the turbulon size, Nyquist-sampling the envelope's peak-PSD wavelength.
 The horizontal dimensions $n_{x,k} = L_x/\Delta x_k$ and $n_{y,k} =
 L_y/\Delta y_k$ are exact integers provided $L_x$ and $L_y$ are integer
