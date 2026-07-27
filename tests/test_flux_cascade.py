@@ -68,11 +68,13 @@ def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     assert amplitude.ravel()[1] == 0.0                      # off-center: no turbulon
     assert diagnostics["n_clipped"] == 0                    # bounded-below: no clip here
 
-    # F += (exp(gamma)-1)*F with identity convolution, then unit-mean renorm.
+    # F += (exp(gamma)-1)*F with identity convolution, then rescaled to restore
+    # the volume mean the flux entered with (one here).
     updated = 1.0 + noise
     updated /= updated.mean()
     np.testing.assert_allclose(flux.ravel(), updated, rtol=1e-5)
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0, rtol=1e-6)
+    np.testing.assert_allclose(flux.mean(), 1.0, rtol=1e-6)
+    assert diagnostics["entering_mean"] == 1.0
 
 
 def test_advance_flux_scales_generator_by_class_density(monkeypatch):
@@ -97,10 +99,10 @@ def test_advance_flux_scales_generator_by_class_density(monkeypatch):
     np.testing.assert_allclose(amplitude, noise0 / abs(noise0))
     assert diagnostics["n_points"] == flux.size
     assert "substeps" not in diagnostics
-    np.testing.assert_allclose(flux.mean(axis=(0, 1)), 1.0)
+    np.testing.assert_allclose(flux.mean(), 1.0)
 
-    # F += (exp(gamma)-1)*F with identity convolution, then unit-mean renorm:
-    # a uniform draw renormalizes back to exactly one.
+    # F += (exp(gamma)-1)*F with identity convolution, then the entering-mean
+    # rescale: a uniform draw goes back to exactly one.
     np.testing.assert_allclose(flux, 1.0, rtol=1e-6)
 
 
@@ -124,22 +126,21 @@ def test_flux_only_runs_with_two_classes_per_dyad():
     )
 
     assert np.all(flux >= 0)
-    # Volume mean is restored to the entering mean (~1 for a root cascade)
-    # each class; per-level means are free to fluctuate (2026-07-27 ruling).
-    # Tolerance covers inter-class interpolation drift, which the
-    # clip-bias-only renorm deliberately does not scrub (~0.1% per class).
-    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, atol=0.02)
+    # Each class restores the volume mean it entered with, so the only drift
+    # from one is the trilinear regrid between classes, not the cascade
+    # (2026-07-27 ruling; the regrid drift is deliberately not scrubbed).
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=5e-3)
     assert diagnostics["n_scale_classes_per_dyad"] == 2
     assert len(diagnostics["steps"]) == len(k_values)
 
 
-def test_flux_only_starts_at_one_and_preserves_unit_horizontal_mean():
+def test_flux_only_starts_at_one_and_preserves_unit_volume_mean():
     flux, diagnostics = sm.simulate_flux_only(
         _root_grids(), seed=42, flux_noise_scale=0.0,
     )
 
     np.testing.assert_array_equal(flux, np.ones_like(flux))
-    np.testing.assert_array_equal(flux.mean(axis=(0, 1)), 1.0)
+    np.testing.assert_array_equal(flux.mean(), 1.0)
     assert diagnostics["n_clipped"] == 0
     assert diagnostics["final_zero_fraction"] == 0.0
 
@@ -152,11 +153,10 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     assert diagnostics["n_clipped"] > 0
     assert diagnostics["clip_fraction"] > 0
     assert np.all(flux >= 0)
-    # Entering volume mean restored despite heavy clipping; per-level
-    # means fluctuate freely (2026-07-27 ruling). Tolerance covers
-    # inter-class interpolation drift (not scrubbed by design), which is
-    # larger for the extreme spike field this absurd c produces.
-    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, atol=0.05)
+    # Heavy clipping plus the between-class regrid; the per-class renorm only
+    # promises to restore each class's own entering mean (larger drift for
+    # the extreme spike field this absurd c produces).
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=5e-2)
 
 
 def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch):
@@ -168,7 +168,7 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu"):
+                     device="cpu", window=None):
         return np.ones_like(flux), {"n_clipped": 0}
 
     def record_convolution(field, kernel, device="cpu"):

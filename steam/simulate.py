@@ -1,6 +1,8 @@
 """Core STEAM cascade algorithm."""
 
+import zlib
 import numpy as np
+import netCDF4
 from pathlib import Path
 from . import constants
 from .constants import (
@@ -14,6 +16,7 @@ from .utils import (
     convolve_periodic_xy_zeropad_z_oa,
     convolve_fft_xy_oa_z,
     zoom_trilinear,
+    zoom_bilinear,
     available_memory_bytes,
     fft_convolution_bytes,
     MEMORY_HEADROOM_BYTES,
@@ -22,6 +25,20 @@ from .output import write_netcdf
 
 CONVOLVE = convolve_fft_xy_oa_z
 SUPPORT_FACTOR = 5
+
+# ─── NESTED REFINEMENT ───────────────────────────────────────────────────────
+# refine() continues the cascade of a completed simulation over a subdomain,
+# at size classes below the parent's finest. The nest inherits the parent's
+# scalar perturbations AND flux over the subdomain plus a halo, and then runs
+# the IDENTICAL per-class loop. The only change is scope: every realized-mean
+# statistic that the root computes over its whole domain is computed over the
+# nest's own extent instead. Global means are no longer available; that
+# approximation, taken over the nesting domain, is deliberate.
+#
+# The halo ("pad") is context, not domain: it exists so the tails of turbulons
+# centered outside the nest reach into it, and it is discarded on output. Like
+# the ghost cells of a nested LES it is excluded from every domain statistic
+# (see _inner_view).
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. The flux is advanced exactly ONCE
@@ -36,7 +53,12 @@ SUPPORT_FACTOR = 5
 # <exp(gamma)> = 1 exactly (the alpha-generalization of the lognormal
 # -sigma^2/2 shift; see LEVY_LOG_MEAN), which conserves the flux mean under
 # the bounded-below update  F += conv(psi, (exp(gamma)-1)*F), clipped at
-# zero. Scalar turbulons inherit the signed multiplier noise, so they are
+# zero. The clip is the one thing that breaks that conservation, so after
+# each class the field is rescaled by a single scalar restoring the VOLUME
+# mean it entered the class with -- a corrector for that step's clip bias and
+# nothing more. It imposes no value on the flux, which is what lets a nest
+# carry its parent region's flux anomaly (see refine).
+# Scalar turbulons inherit the signed multiplier noise, so they are
 # skewed too; the extremal generator is heavy-tailed on the low-multiplier
 # side, giving the h'/qt' interior a convective right-skew.
 #
@@ -580,6 +602,8 @@ def cascade_loop(
     n_scale_classes_per_dyad=1,
     h_perturbation=None,
     qt_perturbation=None,
+    flux=None,
+    inner_windows=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
     zero_top=True,
@@ -634,6 +658,17 @@ def cascade_loop(
     h_perturbation, qt_perturbation : ndarray or None
         Existing perturbation fields for nested simulations. If None,
         initialized to zero at the first scale class resolution.
+    flux : ndarray or None
+        Existing dimensionless flux field for nested simulations, on the same
+        grid as h_perturbation. If None, initialized to one.
+    inner_windows : list of (x_start, x_stop, y_start, y_stop) or None
+        Per-class index window of the nest's own horizontal extent within the
+        padded working grid. None (root) means the whole grid is the domain.
+        Every realized-mean statistic — the flux volume mean and the mean
+        absolute multiplier noise inside _advance_flux, the advective weight
+        norm, and the mean-preserving projection — is taken over this window,
+        so the halo carries context into the domain without contaminating the
+        domain's statistics. See _inner_view.
     zero_bottom, zero_top : bool
         Whether to zero the bottom/top n_zero cells of the sparse noise
         at each class. True when the z-boundary corresponds to ground or
@@ -694,7 +729,6 @@ def cascade_loop(
     prev_padded_extent_y = None
     prev_padded_height = None
     prev_z_min = None
-    flux = None
 
     for i in range(n_classes):
         k = grids['k'][i]
@@ -709,6 +743,7 @@ def cascade_loop(
         padded_y_i = float(padded_extent_y[i])
         padded_h_i = float(padded_height[i])
         z_min_i = float(z_min_per_class[i])
+        window = None if inner_windows is None else tuple(inner_windows[i])
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           interpolating...', end='\r')
 
@@ -718,6 +753,8 @@ def cascade_loop(
             qt_perturbation = np.zeros((nx_k, ny_k, nz_k), dtype=np.float32)
             flux = np.ones((nx_k, ny_k, nz_k), dtype=np.float32)
         else:
+            if flux is None:
+                flux = np.ones(h_perturbation.shape, dtype=np.float32)
             # Crop-before-zoom when padded extent shrinks between classes.
             # Cropping happens in physical units at the previous class's
             # resolution, centered on the inner region.
@@ -770,7 +807,7 @@ def cascade_loop(
         S_k, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
-            device=device,
+            device=device, window=window,
         )
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
@@ -800,7 +837,8 @@ def cascade_loop(
             # every level and class (self-correcting; no deterministic
             # reference, no compounding bias). Structureless levels
             # (level mean zero) keep W = 0.
-            level_mean = W.mean(axis=(0, 1), keepdims=True, dtype=np.float64)
+            level_mean = _inner_view(W, window).mean(
+                axis=(0, 1), keepdims=True, dtype=np.float64)
             W /= np.where(level_mean > 0, level_mean, 1.0).astype(np.float32)
 
             # Bound taper, applied AFTER the norm: proximity of one part of
@@ -818,7 +856,8 @@ def cascade_loop(
 
             # Mean-preserving projection onto the bounds, so subsequent
             # classes' gradients see a field already within [φ_min, φ_max].
-            _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max)
+            _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max,
+                                 window=window)
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -840,10 +879,24 @@ def cascade_loop(
     return h_perturbation, qt_perturbation, flux, final_grid_info
 
 
+def _inner_view(field, window):
+    """The simulated domain's own horizontal extent, halo excluded.
+
+    ``window`` is (x_start, x_stop, y_start, y_stop) into the first two axes,
+    or None for a root simulation whose domain is the whole array. Works on
+    both 3D fields and single 2D levels. Returned as a view, so the caller
+    reduces over the domain while still writing back to the full array.
+    """
+    if window is None:
+        return field
+    x_start, x_stop, y_start, y_stop = window
+    return field[x_start:x_stop, y_start:y_stop]
+
+
 def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
-    device='cpu',
+    device='cpu', window=None,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -859,23 +912,31 @@ def _advance_flux(
     mean absolute value one:
     S_k = (exp(gamma)-1) * F_{k-1} / <|exp(gamma)-1|>.
 
-    After the clip at zero, the field is rescaled by a single scalar
-    restoring its volume mean from before the advance — a pure clip-bias
-    correction (ruling 2026-07-27, audit B14; replaces the per-level
-    unit-mean renorm). Restoring the ENTERING mean rather than forcing
-    unit mean makes the same rule correct in root simulations (entering
-    mean ~ 1) and in nested refinements (entering mean = the inherited
-    regional flux anomaly, which must be preserved). Realized per-level
-    mean fluctuations are left alive: they are physical layer-scale
-    intermittency; the flat-dissipation idealization is enforced in
-    expectation by the generator shift, not realization-by-realization.
+    The clip at zero biases the flux downward, so after the update the field is
+    rescaled by ONE scalar that restores the VOLUME mean it entered the class
+    with (ruling 2026-07-27, audit B14; replaces the per-level unit-mean
+    renorm). The renormalization is thereby a pure corrector for the bias of
+    the step just taken, and nothing else: it does not impose a value on the
+    flux, and it does not touch the realized horizontal-mean structure within
+    the volume. A root enters at mean one and stays there. A nest enters at the
+    flux anomaly it inherited from its parent over this region, and keeps it --
+    which is the whole point of continuing a parent's cascade rather than
+    starting a new one. Realized per-level mean fluctuations are left alive:
+    they are physical layer-scale intermittency; the flat-dissipation
+    idealization is enforced in expectation by the generator shift, not
+    realization-by-realization.
+
+    ``window`` (see _inner_view) is the simulated domain, excluding a nest's
+    halo. Both the volume means above and the mean absolute multiplier noise
+    are taken over it; None means the whole array, as for a root.
     """
     s_x, s_y, s_z = sparsity_factors
+    # Captured before the increment: this is what the renormalization restores.
+    # float64 accumulator — the finest cascade grid runs to ~1e9 cells.
+    entering_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
     per_class_scale = flux_noise_scale / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
     shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
     per_class_scale = np.float32(per_class_scale)
-
-    entering_mean = float(flux.mean(dtype=np.float64))
 
     gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
     if zero_bottom and n_zero > 0:
@@ -889,7 +950,8 @@ def _advance_flux(
     noise = np.expm1(gamma - shift)
     noise[gamma == 0.0] = np.float32(0.0)
 
-    mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
+    noise_inner = _inner_view(noise, window)
+    mean_abs = np.abs(noise_inner).sum() / max(np.count_nonzero(noise_inner), 1)
     scalar_amplitude = noise * flux
     if mean_abs > 0:
         scalar_amplitude *= np.float32(1.0 / mean_abs)
@@ -899,16 +961,20 @@ def _advance_flux(
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
-    volume_mean = float(flux.mean(dtype=np.float64))
-    if volume_mean > 0:
-        flux *= np.float32(entering_mean / volume_mean)
+    realized_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
+    if realized_mean > 0:
+        flux *= np.float32(entering_mean / realized_mean)
     else:
-        flux[:] = np.float32(entering_mean)
+        # The whole domain clipped to zero: there is no structure left to
+        # rescale, so restore the entering mean as a flat field.
+        flux[...] = np.float32(entering_mean)
 
     diagnostics = {
         'n_clipped': n_clipped,
         'n_points': int(flux.size),
         'clip_fraction': n_clipped / flux.size,
+        'entering_mean': entering_mean,
+        'realized_mean': realized_mean,
     }
     return scalar_amplitude, diagnostics
 
@@ -936,8 +1002,9 @@ def simulate_flux_only(
     Returns
     -------
     flux : float32 ndarray
-        Final dimensionless flux field, normalized to horizontal mean one at
-        every z level.
+        Final dimensionless flux field. Each class restores the volume mean
+        the flux entered it with, and the cascade starts from one, so the
+        final field has volume mean one.
     diagnostics : dict
         Per-class and aggregate pre-clip counts/fractions.
     """
@@ -1249,6 +1316,9 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
         Local vertical outer scale k_z(outer_scale, spheroscale(z)) [m].
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
+        Outer scale L of the ROOT cascade. A nest continues the same
+        (k/L)^H_h ladder below its parent's finest class, so it passes the
+        root's L here, not its own coarsest class.
     z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
 
     Returns
@@ -1350,7 +1420,7 @@ def _bound_taper(running_sum, b, phi_min, phi_max):
     return g
 
 
-def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max):
+def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=None):
     """Project onto [phi_min, phi_max] preserving each level's horizontal mean.
 
     For field = perturbation + mean, each level with any out-of-bounds value
@@ -1364,6 +1434,11 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max):
     safe bracket [-(phi_max - phi_min), +(phi_max - phi_min)]. Levels with
     no violations are untouched. Modifies perturbation_field in place,
     folding the correction into the running perturbation.
+
+    ``window`` (see _inner_view) selects the horizontal extent whose mean is
+    preserved. The bounds themselves are still enforced everywhere, halo
+    included — an out-of-bounds halo would corrupt the bound taper and the
+    gradients that the next size class reads from it.
     """
     lo = float(phi_min)
     hi = float(phi_max)
@@ -1373,11 +1448,12 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max):
         field_lev += float(mean_1d[lev])
         if field_lev.min() >= lo and field_lev.max() <= hi:
             continue
-        target = field_lev.mean()
+        field_lev_inner = _inner_view(field_lev, window)
+        target = field_lev_inner.mean()
         mu_low, mu_high = -width, width
         for _ in range(60):
             mu = 0.5 * (mu_low + mu_high)
-            if np.clip(field_lev - mu, lo, hi).mean() > target:
+            if np.clip(field_lev_inner - mu, lo, hi).mean() > target:
                 mu_low = mu
             else:
                 mu_high = mu
@@ -1387,3 +1463,562 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max):
         np.clip(field_lev - mu, lo, hi, out=field_lev)
         field_lev -= float(mean_1d[lev])
         perturbation_field[:, :, lev] = field_lev
+
+
+def refine(
+    parent_path,
+    x_start, x_stop,
+    y_start, y_stop,
+    dx, dy,
+    parent_group='/',
+    output_group=None,
+    seed=None,
+    sparsity_factors=None,
+    turbulon_shape=None,
+    z_min=None,
+    z_max=None,
+    anisotropy=None,
+    compress=None,
+    device='cpu',
+):
+    """Continue a completed simulation's cascade over a subdomain, finer.
+
+    Loads a finished STEAM simulation (or a previous nest), extracts a
+    subdomain together with a halo wide enough to hold the tails of turbulons
+    centered outside it, and runs the SAME per-class loop for the size classes
+    below the parent's finest. The nest inherits the parent's scalar
+    perturbations and its flux; nothing is re-seeded from scratch.
+
+    The one thing that changes is scope. A root normalizes the advective
+    weight, the flux level means and the mean-preserving projection over its
+    whole domain; a nest has no access to those global means, so it uses its
+    own extent instead. That approximation, confined to the nesting domain, is
+    the deliberate price of nesting. The halo is context only: it is excluded
+    from every such statistic (_inner_view) and discarded on output.
+
+    For recursive refinement, pass the group path of an existing nest as
+    parent_group (e.g. "refinements/r0").
+
+    Parameters
+    ----------
+    parent_path : str or Path
+        Path to the NetCDF file. The nest is written back into this file.
+    x_start, x_stop : int
+        Index range into the parent x-grid for the nest (halo excluded).
+    y_start, y_stop : int
+        Index range into the parent y-grid for the nest (halo excluded).
+    dx, dy : float
+        New finest horizontal resolution [m].
+    parent_group : str
+        NetCDF group to read the parent from. Default '/' (root).
+    output_group : str or None
+        NetCDF group name for output. Default: auto-generated
+        "refinements/r0", "r1", ...
+    seed : int or None
+        Random seed. If None, derived deterministically from the parent seed
+        and the output group name.
+    sparsity_factors : tuple of 3 ints or None
+        If None, inherit from the parent.
+    turbulon_shape : str or None
+        If None, inherit from the parent.
+    z_min : float or None
+        Bottom altitude of the nest [m]. If None, inherit the parent's bottom.
+    z_max : float or None
+        Top altitude of the nest [m]. If None, use the parent's top.
+    anisotropy : str or None
+        Grid-anisotropy function name (see _k_z). If None, inherit from the
+        parent group. The piecewise-isotropic option genuinely bites here:
+        deep nests reach classes with k below the spheroscale.
+    compress : bool or None
+        If True, 3D data variables in the output group are zlib-compressed at
+        complevel=4. None (default) uses ``steam.constants.output_compress``.
+    device : {'cpu', 'cuda'}
+        Where the per-class convolutions run, as in simulate().
+
+    Returns
+    -------
+    Path
+        The parent_path (with the new group written into it).
+    """
+    if compress is None:
+        compress = constants.output_compress
+    parent_path = Path(parent_path)
+
+    ds = netCDF4.Dataset(parent_path, "r")
+    grp = ds if parent_group == '/' else ds[parent_group]
+
+    h_3d = grp.variables["h"][:].astype(np.float32)
+    qt_3d = grp.variables["qt"][:].astype(np.float32)
+    if "flux" not in grp.variables:
+        ds.close()
+        raise ValueError(
+            f"Parent group {parent_group!r} has no flux field; the nest cannot "
+            f"continue the flux cascade. Regenerate the parent with the "
+            f"current version of simulate()."
+        )
+    flux_3d = grp.variables["flux"][:].astype(np.float32)
+    x_coords = grp.variables["x"][:]
+    y_coords = grp.variables["y"][:]
+    z_coords = np.asarray(grp.variables["z"][:], dtype=np.float64)
+    h_profile = grp.variables["h_profile"][:]
+    qt_profile = grp.variables["qt_profile"][:]
+    z_profile = np.asarray(grp.variables["z_profile"][:], dtype=np.float64)
+    k_values_parent = grp.variables["k_values"][:]
+    C_h_k_parent = grp.variables["C_h_k"][:]
+    C_qt_k_parent = grp.variables["C_qt_k"][:]
+    spheroscale_profile = np.asarray(
+        grp.variables["spheroscale_profile"][:], dtype=np.float64)
+
+    parent_dx = float(grp.dx)
+    parent_dy = float(grp.dy)
+    domain_height = float(grp.domain_height)
+    profile_dz = float(grp.profile_dz)
+    surface_pressure = float(grp.surface_pressure)
+    parent_seed = int(grp.seed) if int(grp.seed) != -1 else None
+    h_min = float(grp.h_min)
+    h_max = float(grp.h_max)
+    qt_min = float(grp.qt_min)
+    qt_max = float(grp.qt_max)
+    min_distance_to_ground = int(grp.min_distance_to_ground)
+    parent_n_per_dyad = int(grp.n_scale_classes_per_dyad)
+    size_class_gap_factor = 2.0 ** (1.0 / parent_n_per_dyad)
+
+    if sparsity_factors is None:
+        sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
+    if turbulon_shape is None:
+        turbulon_shape = grp.turbulon_shape
+    if anisotropy is None:
+        anisotropy = grp.anisotropy
+    if anisotropy not in VALID_ANISOTROPY:
+        raise ValueError(
+            f"anisotropy must be one of {VALID_ANISOTROPY}, got {anisotropy!r}"
+        )
+
+    parent_z_min = float(grp.domain_z_min) if hasattr(grp, 'domain_z_min') else 0.0
+    # Per-axis periodicity of the parent. A root wraps in both; a nest wraps
+    # only along an axis it spanned. Files predating the attribute are roots.
+    if hasattr(grp, 'periodic_x'):
+        parent_periodic_x = bool(grp.periodic_x)
+        parent_periodic_y = bool(grp.periodic_y)
+    else:
+        parent_periodic_x = parent_periodic_y = (parent_group == '/')
+
+    if output_group is None:
+        existing = []
+        if "refinements" in ds.groups:
+            existing = list(ds.groups["refinements"].groups.keys())
+        index = 0
+        while f"r{index}" in existing:
+            index += 1
+        output_group = f"refinements/r{index}"
+
+    ds.close()
+
+    # Vertical extent of the nest.
+    parent_z_max = parent_z_min + domain_height
+    if z_min is None:
+        z_min = parent_z_min
+    if z_max is None:
+        z_max = parent_z_max
+    if z_min < parent_z_min - 1e-6 or z_max > parent_z_max + 1e-6:
+        raise ValueError(
+            f"Requested altitude range [{z_min}, {z_max}] m exceeds parent "
+            f"range [{parent_z_min}, {parent_z_max}] m"
+        )
+    nest_height = z_max - z_min
+    if nest_height <= 0:
+        raise ValueError(f"z_max ({z_max}) must be greater than z_min ({z_min})")
+
+    # The nest's classes start one log-step BELOW the parent's finest, so no
+    # size class is ever simulated twice.
+    new_outer_scale = float(k_values_parent[-1])
+    n_classes = int(np.floor(
+        np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
+    ))
+    if n_classes < 1:
+        raise ValueError(
+            f"Refinement cannot add any classes: new_outer_scale="
+            f"{new_outer_scale}, dx={dx}, gap={size_class_gap_factor}. "
+            f"Decrease dx or use a parent with a larger finest scale."
+        )
+    k_values = new_outer_scale / size_class_gap_factor ** np.arange(1, n_classes + 1)
+
+    spheroscale_mean = float(np.mean(spheroscale_profile))
+    k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
+
+    parent_nx = h_3d.shape[0]
+    parent_ny = h_3d.shape[1]
+    inner_nx = x_stop - x_start
+    inner_ny = y_stop - y_start
+    if inner_nx < 1 or inner_ny < 1:
+        raise ValueError(
+            f"Empty nest: x=[{x_start},{x_stop}], y=[{y_start},{y_stop}]"
+        )
+    inner_extent_x = inner_nx * parent_dx
+    inner_extent_y = inner_ny * parent_dy
+
+    # Same rule as simulate(): whole tiles, or a strip narrower than one tile
+    # (whose over-wide kernels are periodized onto the extent).
+    for extent, axis_name in ((inner_extent_x, 'x'), (inner_extent_y, 'y')):
+        n_tiles = extent / new_outer_scale
+        if n_tiles < 1:
+            continue
+        if abs(n_tiles - round(n_tiles)) > 1e-9:
+            raise ValueError(
+                f"Nest {axis_name}-extent ({extent} m) must be an integer "
+                f"multiple of new_outer_scale ({new_outer_scale} m) or smaller "
+                f"than it, got ratio={n_tiles}"
+            )
+
+    spans_x = (inner_nx == parent_nx)
+    spans_y = (inner_ny == parent_ny)
+
+    # A nest spanning a NON-periodic parent axis has nowhere to put a halo and
+    # cannot borrow context by wrapping: reject rather than silently inventing
+    # a periodicity the parent never had.
+    if spans_x and not parent_periodic_x:
+        raise ValueError(
+            f"Refinement of non-periodic parent {parent_group!r} spans its "
+            f"full x extent, leaving no room for the halo; refine a subrange"
+        )
+    if spans_y and not parent_periodic_y:
+        raise ValueError(
+            f"Refinement of non-periodic parent {parent_group!r} spans its "
+            f"full y extent, leaving no room for the halo; refine a subrange"
+        )
+    periodic_x = spans_x
+    periodic_y = spans_y
+
+    # Halo width per class: SUPPORT_FACTOR * k_i in physical units, i.e. the
+    # kernel's own reach, so it shrinks with the cascade and stays a constant
+    # number of cells. A spanning axis needs none — its FFT period is already
+    # the parent's extent.
+    pad_x_per_class = np.zeros(n_classes) if spans_x else SUPPORT_FACTOR * k_values
+    pad_y_per_class = np.zeros(n_classes) if spans_y else SUPPORT_FACTOR * k_values
+
+    # z is never periodic. At the domain ground/top the parent is already
+    # zero-padded, so no halo is needed (and none exists); elsewhere the halo
+    # is the kernel's vertical reach, clipped to the room the parent has.
+    at_ground = (z_min <= parent_z_min + 1e-6)
+    at_top = (z_max >= parent_z_max - 1e-6)
+    if at_ground:
+        pad_z_below_per_class = np.zeros(n_classes)
+    else:
+        pad_z_below_per_class = np.minimum(
+            SUPPORT_FACTOR * k_z_values, z_min - parent_z_min)
+    if at_top:
+        pad_z_above_per_class = np.zeros(n_classes)
+    else:
+        pad_z_above_per_class = np.minimum(
+            SUPPORT_FACTOR * k_z_values, parent_z_max - z_max)
+
+    # An elevated nest bottom is no longer at the surface, so the scalar
+    # surface pressure does not describe it; read the parent's 3D pressure at
+    # the levels bracketing z_min for a 2D starting pressure.
+    if not at_ground:
+        with netCDF4.Dataset(parent_path, "r") as ds_pressure:
+            grp_pressure = (ds_pressure if parent_group == '/'
+                            else ds_pressure[parent_group])
+            if 'p' not in grp_pressure.variables:
+                raise ValueError(
+                    f"Refining with z_min ({z_min}) above the parent bottom "
+                    f"({parent_z_min}) requires pressure diagnostics on the "
+                    f"parent group {parent_group!r}. Run "
+                    f"steam.thermodynamics.compute_diagnostics on the parent "
+                    f"first."
+                )
+            z_index_low = int(np.searchsorted(z_coords, z_min, side='right')) - 1
+            z_index_low = max(0, min(len(z_coords) - 2, z_index_low))
+            pressure_low = grp_pressure.variables['p'][:, :, z_index_low].astype(np.float32)
+            pressure_high = grp_pressure.variables['p'][:, :, z_index_low + 1].astype(np.float32)
+        parent_z_low = float(z_coords[z_index_low])
+        parent_z_high = float(z_coords[z_index_low + 1])
+    else:
+        pressure_low = pressure_high = None
+        parent_z_low = parent_z_high = None
+
+    # Halo width in PARENT cells, needed only to slice class 0 out of the
+    # parent's grid; every later class re-derives its own from the grids.
+    pad_cells_x = 0 if spans_x else int(np.ceil(pad_x_per_class[0] / parent_dx))
+    pad_cells_y = 0 if spans_y else int(np.ceil(pad_y_per_class[0] / parent_dy))
+
+    # Non-periodic parent: the slice cannot wrap, so the nest must leave the
+    # halo room on each side. The per-class shrinking of the halo relaxes only
+    # the cascade's memory, not this class-0 extraction.
+    if not parent_periodic_x and (x_start < pad_cells_x
+                                  or x_stop > parent_nx - pad_cells_x):
+        raise ValueError(
+            f"Refinement of non-periodic parent {parent_group!r} at "
+            f"x=[{x_start},{x_stop}] is too close to the parent's x boundary; "
+            f"need at least {pad_cells_x} cells of room on each side "
+            f"(parent_nx={parent_nx})"
+        )
+    if not parent_periodic_y and (y_start < pad_cells_y
+                                  or y_stop > parent_ny - pad_cells_y):
+        raise ValueError(
+            f"Refinement of non-periodic parent {parent_group!r} at "
+            f"y=[{y_start},{y_stop}] is too close to the parent's y boundary; "
+            f"need at least {pad_cells_y} cells of room on each side "
+            f"(parent_ny={parent_ny})"
+        )
+
+    # Extraction indices at parent resolution; modular where the parent wraps.
+    if spans_x:
+        x_indices = np.arange(x_start, x_stop) % parent_nx
+    elif parent_periodic_x:
+        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x) % parent_nx
+    else:
+        x_indices = np.arange(x_start - pad_cells_x, x_stop + pad_cells_x)
+    if spans_y:
+        y_indices = np.arange(y_start, y_stop) % parent_ny
+    elif parent_periodic_y:
+        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y) % parent_ny
+    else:
+        y_indices = np.arange(y_start - pad_cells_y, y_stop + pad_cells_y)
+
+    z_range_low = z_min - pad_z_below_per_class[0]
+    z_range_high = z_max + pad_z_above_per_class[0]
+    z_indices = np.where(
+        (z_coords >= z_range_low - 1e-6) & (z_coords < z_range_high + 1e-6)
+    )[0]
+    if len(z_indices) == 0:
+        raise ValueError(
+            f"No parent z-levels found in [{z_range_low}, {z_range_high}] m. "
+            f"Parent z ranges from {z_coords[0]:.1f} to {z_coords[-1]:.1f} m"
+        )
+    z_coords_slice = z_coords[z_indices]
+
+    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
+    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
+    flux_pad = np.ascontiguousarray(flux_3d[np.ix_(x_indices, y_indices, z_indices)])
+    del h_3d, qt_3d, flux_3d
+
+    h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
+    qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
+    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
+    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
+    del h_pad, qt_pad
+
+    # Note: the nest's flux anomaly needs no explicit bookkeeping. Each class
+    # restores the volume mean the flux entered that class with (_advance_flux),
+    # so the mean this region carried in the parent simply propagates.
+
+    grids = _compute_all_grids(
+        k_values, inner_extent_x, inner_extent_y, nest_height,
+        sparsity_factors, spheroscale_profile, z_profile, z_min=z_min,
+        pad_x_per_class=pad_x_per_class,
+        pad_y_per_class=pad_y_per_class,
+        pad_z_below_per_class=pad_z_below_per_class,
+        pad_z_above_per_class=pad_z_above_per_class,
+        anisotropy=anisotropy,
+    )
+
+    # Index window of the nest proper inside each class's padded grid.
+    inner_windows = []
+    for i in range(n_classes):
+        dx_i = float(grids['dx'][i])
+        dy_i = float(grids['dy'][i])
+        nx_i = int(grids['nx'][i])
+        ny_i = int(grids['ny'][i])
+        window_x_start = min(nx_i - 1, int(round(pad_x_per_class[i] / dx_i)))
+        window_x_stop = min(nx_i, window_x_start
+                            + max(1, int(round(inner_extent_x / dx_i))))
+        window_y_start = min(ny_i - 1, int(round(pad_y_per_class[i] / dy_i)))
+        window_y_stop = min(ny_i, window_y_start
+                            + max(1, int(round(inner_extent_y / dy_i))))
+        inner_windows.append(
+            (window_x_start, window_x_stop, window_y_start, window_y_stop))
+
+    # C_{Phi,k}(z) = n_c^{-1/alpha} C_{Phi,L}(z) (k/L)^H_h is ONE ladder from
+    # the root outer scale down; the nest just extends it below the parent's
+    # finest class. The parent already committed to a C_{Phi,L}(z); its last
+    # class, scaled by (k/k_parent)^H_h, extends that same ladder with no seam
+    # at the overlap scale. This is literally "continue what the parent was
+    # doing": the parent's own loop never re-measures C_{Phi,L} per class.
+    # (A re-measured-at-nest-resolution alternative was considered and ruled
+    # out 2026-07-27 -- the mean profile is smooth and interpolatable, and
+    # re-measuring leaves a step at the overlap scale; see git history.)
+    anchor_k = float(k_values_parent[-1])
+    anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)[:len(z_coords)]
+    anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)[:len(z_coords)]
+    C_h_k = []
+    C_qt_k = []
+    for i, k in enumerate(k_values):
+        hurst_scale = float((k / anchor_k) ** H_h)
+        z_i = grids['z_arrays'][i]
+        C_h_k.append(
+            (np.interp(z_i, z_coords, anchor_C_h) * hurst_scale).astype(np.float32))
+        C_qt_k.append(
+            (np.interp(z_i, z_coords, anchor_C_qt) * hurst_scale).astype(np.float32))
+    C_h_L = float(np.mean(C_h_k[0]))
+    C_qt_L = float(np.mean(C_qt_k[0]))
+
+    aspect_k = []
+    for i, k in enumerate(k_values):
+        spheroscale_i = np.interp(grids['z_arrays'][i], z_profile, spheroscale_profile)
+        aspect_k.append((_k_z(anisotropy, k, spheroscale_i) / k).astype(np.float32))
+
+    # b_{Phi,i} sums the current class and all SMALLER ones. Every class
+    # smaller than the parent's finest lives in this nest, so the sum is whole.
+    b_h_k = _bound_buffers(C_h_k, grids['z_arrays'])
+    b_qt_k = _bound_buffers(C_qt_k, grids['z_arrays'])
+
+    if seed is None and parent_seed is not None:
+        # zlib.crc32, not hash(): str hashing is salted per process, which
+        # would make an auto-seeded nest irreproducible across runs.
+        seed = int(parent_seed + zlib.crc32(output_group.encode()) % (2 ** 31))
+    child_seeds = np.random.SeedSequence(seed).spawn(n_classes)
+
+    h_pert_refined, qt_pert_refined, flux_refined, final_grid = cascade_loop(
+        h_profile, qt_profile, z_profile,
+        grids,
+        C_h_k, C_qt_k,
+        b_h_k, b_qt_k, aspect_k,
+        h_min, h_max, qt_min, qt_max,
+        min_distance_to_ground,
+        sparsity_factors,
+        child_seeds,
+        n_scale_classes_per_dyad=parent_n_per_dyad,
+        h_perturbation=h_pert_pad,
+        qt_perturbation=qt_pert_pad,
+        flux=flux_pad,
+        inner_windows=inner_windows,
+        turbulon_shape=turbulon_shape,
+        # Turbulon centers are suppressed at the DOMAIN surface and top, not
+        # at the nest's edges: a nest floating in the interior has centers
+        # above and below it whose tails reach in.
+        zero_bottom=at_ground,
+        zero_top=at_top,
+        device=device,
+    )
+
+    # Discard the halo.
+    window_x_start, window_x_stop, window_y_start, window_y_stop = inner_windows[-1]
+    z_full = final_grid['z']
+    dz_full = final_grid['dz']
+    z_inner_indices = np.where(
+        (z_full >= z_min - 1e-6) & (z_full < z_max - 1e-6))[0]
+    if len(z_inner_indices) == 0:
+        raise ValueError(
+            f"No nest z-levels found in [{z_min}, {z_max}] m at the finest class"
+        )
+    z_trim_start = int(z_inner_indices[0])
+    z_trim_stop = int(z_inner_indices[-1]) + 1
+
+    inner = (slice(window_x_start, window_x_stop),
+             slice(window_y_start, window_y_stop),
+             slice(z_trim_start, z_trim_stop))
+    h_pert_inner = h_pert_refined[inner]
+    qt_pert_inner = qt_pert_refined[inner]
+    flux_inner = np.ascontiguousarray(flux_refined[inner])
+
+    z_final = z_full[z_trim_start:z_trim_stop].astype(np.float32)
+    dz_final = dz_full[z_trim_start:z_trim_stop].astype(np.float32)
+    h_mean_final = np.interp(z_final, z_profile, h_profile).astype(np.float32)
+    qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
+    spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
+
+    h_3d_out = np.ascontiguousarray(
+        h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
+    qt_3d_out = np.ascontiguousarray(
+        qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
+    # The per-class projection guarantees the bounds over the nest, exactly as
+    # in simulate(); no final clip.
+
+    nx_out = h_3d_out.shape[0]
+    ny_out = h_3d_out.shape[1]
+    dx_final = inner_extent_x / nx_out
+    dy_final = inner_extent_y / ny_out
+    # World-absolute coordinates: the parent's own first-cell world position
+    # plus the offset within the parent. Using x_start * parent_dx alone would
+    # skew any nest whose parent does not itself start at the world origin.
+    x_out = (np.arange(nx_out, dtype=np.float32) * dx_final
+             + x_start * parent_dx + float(x_coords[0]))
+    y_out = (np.arange(ny_out, dtype=np.float32) * dy_final
+             + y_start * parent_dy + float(y_coords[0]))
+
+    # 2D starting pressure from the parent's p, interpolated in z to the nest
+    # bottom and resampled onto the nest's horizontal grid.
+    if pressure_low is not None:
+        if parent_z_high > parent_z_low:
+            weight = float(np.clip(
+                (float(z_final[0]) - parent_z_low) / (parent_z_high - parent_z_low),
+                0.0, 1.0))
+        else:
+            weight = 0.0
+        pressure_level = (1.0 - weight) * pressure_low + weight * pressure_high
+        if parent_periodic_x:
+            inner_x_indices = np.arange(x_start, x_stop) % parent_nx
+        else:
+            inner_x_indices = np.arange(x_start, x_stop)
+        if parent_periodic_y:
+            inner_y_indices = np.arange(y_start, y_stop) % parent_ny
+        else:
+            inner_y_indices = np.arange(y_start, y_stop)
+        p_bottom_inner = pressure_level[np.ix_(inner_x_indices, inner_y_indices)]
+        if p_bottom_inner.shape == (nx_out, ny_out):
+            p_bottom_field = p_bottom_inner.astype(np.float32)
+        else:
+            p_bottom_field = zoom_bilinear(p_bottom_inner, (nx_out, ny_out))
+    else:
+        p_bottom_field = None
+
+    # Store C_k on the output z grid so descendants inherit it cleanly, with
+    # the halo levels trimmed off (see the matching block in simulate()).
+    C_h_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_h_k[i]).astype(np.float32)
+                    for i in range(n_classes)]
+    C_qt_k_stored = [np.interp(z_final, grids['z_arrays'][i], C_qt_k[i]).astype(np.float32)
+                     for i in range(n_classes)]
+
+    simulation_params = {
+        'nx': nx_out,
+        'ny': ny_out,
+        'dx': dx_final,
+        'dy': dy_final,
+        'dz': dz_final,
+        'outer_scale': new_outer_scale,
+        'spheroscale': spheroscale_final,
+        'spheroscale_profile': spheroscale_profile,
+        'domain_height': nest_height,
+        'domain_z_min': z_min,
+        'profile_dz': profile_dz,
+        'sparsity_factors': sparsity_factors,
+        'n_scale_classes_per_dyad': parent_n_per_dyad,
+        'surface_pressure': surface_pressure,
+        'seed': seed,
+        'C_h_L': C_h_L,
+        'C_qt_L': C_qt_L,
+        'n_large_turbulons': 0,   # a nest has no outer-scale turbulons of its own
+        'H_h': H_h,
+        'H_z': H_z,
+        'h_min': h_min,
+        'h_max': h_max,
+        'qt_min': qt_min,
+        'qt_max': qt_max,
+        'min_distance_to_ground': min_distance_to_ground,
+        'turbulon_shape': turbulon_shape,
+        'anisotropy': anisotropy,
+        'flux_noise_scale': FLUX_SCALE,
+        'flux_alpha': FLUX_ALPHA,
+        'parent_group': parent_group,
+        'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
+        'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),
+        'parent_x_offset': float(x_start * parent_dx),
+        'parent_y_offset': float(y_start * parent_dy),
+        'periodic_x': periodic_x,
+        'periodic_y': periodic_y,
+    }
+    if p_bottom_field is not None:
+        simulation_params['p_bottom'] = p_bottom_field
+
+    write_netcdf(
+        parent_path, h_3d_out, qt_3d_out,
+        x_out, y_out, z_final,
+        h_profile, qt_profile, z_profile.astype(np.float32),
+        k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
+        simulation_params,
+        group=output_group,
+        compress=compress,
+        flux_3d=flux_inner,
+    )
+    return parent_path
