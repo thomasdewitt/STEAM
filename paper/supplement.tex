@@ -116,16 +116,59 @@ independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables,
 $\alpha = 1.8$, is drawn at the turbulon centers (every $s_x, s_y, s_z$
 cells, i.e. every $k/2$ in physical space; no centers lie below the
 surface or above the domain top), scaled by
-$c_\mathcal{F} = c\, n_c^{-1/\alpha}$, and shifted by the constant that
-enforces $\langle e^\gamma \rangle = 1$ exactly (the
-$\alpha$-generalization of the lognormal $-\sigma^2/2$ shift), so the
-mean flux is conserved. The flux is updated additively as
+$c_\mathcal{F} = c\, n_c^{-1/\alpha}$, and shifted by the deterministic
+constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
+e^\gamma \rangle = 1$ exactly (the $\alpha$-generalization of the
+lognormal $-\sigma^2/2$ shift; derivation below), so the mean flux is
+conserved.
+% NOTE (2026-07-27): the reference implementation currently evaluates
+% this constant by a large fixed-seed Monte Carlo draw (1.2510); the
+% closed form is 1/(alpha-1) = 1.25 exactly. Replacing the measured
+% constant with the closed form is checklist item 32 (Thomas's call). The flux is updated additively as
 $\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$,
 clipped at zero, and renormalized to unit horizontal mean at each level.
 The signed scalar noise $S_k$ is the increment $(e^\gamma -
 1)\mathcal{F}$ evaluated with the entering flux, normalized by the mean
 absolute value of $e^\gamma - 1$ over the turbulon centers; it is shared
 between $h$ and $q_t$.
+
+% --- shift-constant derivation (self-contained; may move to the main
+% appendix, Thomas's call) ---
+The shift constant follows in closed form from the generator's
+normalization convention. The unit-scale draws $\gamma_0$ are generated
+by the Chambers--Mallows--Stuck algorithm in the universal-multifractal
+convention,
+\begin{equation*}
+\gamma_0 = \frac{\sin\!\big(\alpha(\phi-\phi_0)\big)}
+{\big[\,|\alpha-1|\cos\phi\,\big]^{1/\alpha}}
+\left[\frac{\cos\!\big(\phi-\alpha(\phi-\phi_0)\big)}{W}\right]^{(1-\alpha)/\alpha},
+\qquad \phi_0 = -\frac{\pi}{2}\,\frac{2-\alpha}{\alpha},
+\end{equation*}
+with $\phi$ uniform on $(-\pi/2, \pi/2)$, $W$ unit exponential, and $1 <
+\alpha \le 2$. A standard maximally skewed ($\beta=-1$) stable variable
+$X$ of unit scale satisfies $\ln\langle e^{\theta X}\rangle =
+-\theta^\alpha \sec(\pi\alpha/2)$ for $\theta \ge 0$ --- finite because
+maximal negative skew places the heavy power-law tail on the side the
+exponential suppresses. The draw above differs from $X$ only by the
+constant scale factor $\sigma = |\alpha-1|^{-1/\alpha}\,
+\big(1+\tan^2(\pi\alpha/2)\big)^{-1/(2\alpha)}$, and since
+$(1+\tan^2)^{1/2} = |\sec\,|$, the secants cancel:
+\begin{equation*}
+\ln\big\langle e^{\theta \gamma_0} \big\rangle =
+\frac{\theta^{\alpha}}{\alpha-1}, \qquad \theta \ge 0 .
+\end{equation*}
+With $\gamma = c_\mathcal{F}\gamma_0$, the shift
+$c_\mathcal{F}^\alpha/(\alpha-1)$ therefore gives $\langle
+e^{\gamma-\mathrm{shift}}\rangle = 1$ exactly. At $\alpha = 2$ this
+convention gives $\gamma_0 \sim N(0, 2)$ and the shift reduces to the
+lognormal $-\sigma^2/2$. More generally, $\ln\langle
+e^{q(\gamma-\mathrm{shift})}\rangle = (q^\alpha - q)\,
+c_\mathcal{F}^{\alpha}/(\alpha-1)$: each size class contributes a second
+characteristic function of the universal-multifractal form, and summed
+over the $n_c$ classes in an octave the coefficient is
+$c^\alpha/(\alpha-1)$ --- independent of the cascade density, consistent
+with the $n_c^{-1/\alpha}$ compensation above.
+% --- end shift-constant derivation ---
 
 Next, the scalar amplitudes are computed. Gradients of the running field
 $f = \langle \Phi \rangle_t + \widetilde{\Phi}$ are taken with periodic
