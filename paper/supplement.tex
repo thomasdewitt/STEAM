@@ -413,6 +413,36 @@ histogrammed in 150 equal-width bins spanning the pooled sample's full
 range (no percentile capping, which would truncate the tails that are
 precisely the point of the comparison), normalized to a density.
 
+\subsection{Strip-nest multifractal diagnostics}
+\label{ssect:strip diagnostics}
+
+The scaling diagnostics for the multifractal-parameter appendix are
+computed on thin nested strips refined from the square-domain runs
+(Sect.~\ref{ssect:steam algorithm spec}, nested refinement): each strip
+spans the full 6144~km $x$-extent (periodic, with the parent extent as
+period), is 48~km wide in $y$, and is refined from $\Delta x = 3$~km to
+$\Delta x = 375$~m --- three size classes below the parent's finest.
+
+The fluctuation measure is the mean absolute Haar fluctuation: at lag
+$\ell$, the mean of the field over the upper half of an $\ell$-wide
+window minus the mean over the lower half, with $\hat{M}_q(\ell) =
+\langle |\Delta\Phi_\ell|^q \rangle$ pooled over all window positions.
+Horizontal windows run along $x$ at dyadic lags from $2\Delta x$ to a
+quarter of the domain and wrap periodically; vertical windows run along
+$z$ (uniform grid for a constant spheroscale) at dyadic lags up to
+16~km, either over the full domain or with window centers restricted to
+the 4--8~km mid-level band. The normalization test overlays the
+field's vertical $\hat{M}_1(\ell)$ against the same operator applied to
+the input mean profile: by the $C_{\Phi,L}$ construction
+(Sect.~\ref{ssect:steam algorithm spec}, Normalization) the two must
+agree at the vertical outer scale. Moment-scaling exponents $\xi(q)$
+are least-squares slopes of $\ln \hat{M}_q$ against $\ln \ell$ over
+lags up to 6~km (the nest's own classes plus one inherited octave), for
+$q$ from 0.2 to 3; for the flux the moment scaling $K(q)$ is also
+computed directly from one-dimensional box means along $x$ over the
+same lags, $\langle \mathcal{F}_\lambda^q \rangle \sim
+\lambda^{-K(q)}$. All accumulations are double precision.
+
 \subsection{Optical-depth masks, correlation dimension, and size
 distributions}
 \label{ssect:rcemip fractal}
