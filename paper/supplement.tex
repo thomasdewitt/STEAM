@@ -338,9 +338,10 @@ exponent is $H_h = 0.45$ and the vertical-anisotropy exponent
 $H_z = 5/9$; turbulons use the Mexican-hat envelope; one scale class per
 octave ($n_c = 1$). The turbulon flux component is active: flux
 increments drawn from extremal ($\beta = -1$) L\'evy noise with $\alpha
-= 1.8$ and noise amplitude $c = 0.143$, targeting a realized flux
-intermittency of $C_1 \approx 0.05$ through the approximate calibration
-$C_1 = 1.674\,c^{1.8}$.
+= 1.8$ and noise amplitude $c = 0.101$, targeting a realized flux
+intermittency of $C_1 = 0.05$ through the calibration $C_1 =
+3.097\,c^{1.8}$ (box-coarse-grained $K(2)$ on the flux-only cascade,
+re-fit under the canonical algorithm; \texttt{turbulon-analysis/calibration}).
 
 For the channel comparison STEAM runs on a $2048\times 128$ grid at
 $\Delta x = 3$~km ($6144\times 384$~km$^2$, matching the host geometry
@@ -355,31 +356,34 @@ anchored to the prescribed 300~K sea surface temperature, which every
 realization sees: $q_t \in [0,\ q_{\mathrm{sat}}(300\,\mathrm{K},
 p_s)]$, since no parcel can acquire more vapor than saturated contact
 with the sea surface provides, and $h \in [\min_z \langle h \rangle(z)
-- c_p \Delta T_{\max},\ c_p \cdot 300\,\mathrm{K} + L_v\,
-q_{\mathrm{sat}}(300\,\mathrm{K}, p_s)]$, where the upper bound is the
-saturation moist static energy at the surface and the lower bound
-allows a maximum temperature deficit of $\Delta T_{\max} = 10$~K below
-the coldest point of the mean profile. One realization is run per host
+- c_p \Delta T_{\max},\ \max(c_p \cdot 300\,\mathrm{K} + L_v\,
+q_{\mathrm{sat}}(300\,\mathrm{K}, p_s),\ \max_z \langle h
+\rangle(z))]$, where the upper bound is the larger of the surface
+saturation moist static energy and the mean-profile maximum (the $gz$
+term places the stratospheric mean above any surface value), and the
+lower bound allows a maximum temperature deficit of $\Delta T_{\max} =
+10$~K below the coldest point of the mean profile. One realization is run per host
 snapshot (three per model), with a distinct seed per snapshot, so host
 and STEAM sample counts match by construction.
-% NOTE (Claude, 2026-07-22): bounds above describe the NEW anchored
-% prescription agreed today; the archived runs used the older ad hoc
-% bounds (h: min-10cp/max+10cp; qt: max(0.03, 1.5*max qt)) and must be
-% regenerated under the new algorithm before final figures anyway.
-% Ditto (later same day): archived runs also predate the removal of the
-% flux substeps (they ran 4 substeps/class), the 3D Mexican hat (3-rho)
-% envelope, the removal of flux from W, and S_k as the single per-class
-% noise; the C1 = 1.674 c^1.8 calibration was fit under the old config
-% and needs re-fitting before c is chosen for the regenerated runs.
+% NOTE (Claude, 2026-07-27, replacing the 07-22 note): the channel set
+% was regenerated today under the canonical algorithm (entering-mean
+% flux renorm, analytic tilt, re-fit c = 0.1010) with the anchored
+% bounds above now implemented in the run scripts. Still pending before
+% the FINAL set: the H_h ruling (audit C19) and the spheroscale-profile
+% ruling (Thomas leans constant 10 m); one more regeneration follows
+% those.
 
 For size distributions and
-large-domain fractal dimensions, nine additional STEAM runs use a
-$2048\times 1024$ grid at $\Delta x = 3$~km ($6144\times 3072$~km$^2$),
-one per host profile (the first snapshot of each host), with the same
-configuration otherwise and distinct seeds. These runs have no direct
+large-domain fractal dimensions, additional STEAM runs use a square
+$2048\times 2048$ grid at $\Delta x = 3$~km ($6144\times 6144$~km$^2$)
+with outer scale $L = L_x/4 = 1536$~km, initialized from ICON-LEM
+snapshot profiles with distinct seeds. These runs have no direct
 hydrodynamic counterpart; they exist because the channel geometry
 cannot constrain size-distribution exponents (Sect.~\ref{ssect:rcemip
-fractal}).
+fractal}), and the square geometry maximizes the usable lag range.
+% NOTE (Claude, 2026-07-27): member count and final configuration
+% (spheroscale, H_h) pending Thomas's rulings; the exploratory set is
+% two members at constant 10 m spheroscale.
 
 \subsection{Profile statistics and anomaly distributions}
 \label{ssect:rcemip stats}
@@ -417,7 +421,12 @@ Cloud masks are built from vertically integrated optical depth computed
 from the liquid and ice water paths with the SAM bulk-optics
 relationships (as implemented in the \texttt{cloudyview} package);
 precipitating species are excluded as above. A column is cloudy where
-$\tau > 1$. Masks are binary arrays on each case's native horizontal
+$\tau > 1$. The same masks and estimators are applied to the
+square-domain runs, with correlation lags extended to one third of the
+6144~km domain; at high $\tau>1$ cover the mask percolates into a
+single spanning component, degrading the area-distribution estimate
+(the correlation dimension is unaffected). Masks are binary arrays on
+each case's native horizontal
 grid; the three masks of a case are always analyzed together as one
 ensemble, never averaged one-at-a-time.
 
