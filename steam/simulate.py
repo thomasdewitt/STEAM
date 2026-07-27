@@ -39,11 +39,6 @@ SUPPORT_FACTOR = 5
 # centered outside the nest reach into it, and it is discarded on output. Like
 # the ghost cells of a nested LES it is excluded from every domain statistic
 # (see _inner_view).
-VALID_NORMALIZATION_SOURCE = ('inherited', 'recomputed')
-
-# Where a nest's C_{Phi,L}(z) comes from (see refine). Inheriting the parent's
-# keeps the amplitude ladder continuous across the overlap scale.
-NEST_NORMALIZATION_SOURCE = 'inherited'
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. The flux is advanced exactly ONCE
@@ -1280,7 +1275,7 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
 
 def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
                            k_values, outer_scale, z_arrays,
-                           n_scale_classes_per_dyad=1, z_reference=None):
+                           n_scale_classes_per_dyad=1):
     """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
@@ -1325,18 +1320,12 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
         (k/L)^H_h ladder below its parent's finest class, so it passes the
         root's L here, not its own coarsest class.
     z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
-    z_reference : ndarray or None
-        Heights at which profile_on_finest_grid and k_z_L_on_finest are
-        given. None (root) means the finest class's z-grid, which for a
-        root spans the whole domain. A nest whose padded z-extent shrinks
-        with the size class passes a grid spanning the WIDEST class instead,
-        so no class has to extrapolate C off the end of the response.
 
     Returns
     -------
     list of n_classes 1D float32 arrays.
     """
-    z_finest = z_arrays['z_arrays'][-1] if z_reference is None else np.asarray(z_reference)
+    z_finest = z_arrays['z_arrays'][-1]
     dz_finest = float(np.mean(np.diff(z_finest)))
     n_p = profile_on_finest_grid.size
 
@@ -1476,29 +1465,6 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=N
         perturbation_field[:, :, lev] = field_lev
 
 
-def _root_outer_scale(parent_path, parent_group):
-    """Outer scale L of the root simulation at the head of the nesting chain.
-
-    C_{Phi,k}(z) = n_c^{-1/alpha} C_{Phi,L}(z) (k/L)^{H_h} is ONE ladder,
-    running from the root outer scale all the way down to the finest class of
-    the deepest nest. A nest therefore needs the root's L, not its own parent's
-    outer_scale attribute — for a nested parent that attribute is merely that
-    parent's coarsest class. Walk the parent_group chain up to the group that
-    has no parent.
-    """
-    with netCDF4.Dataset(parent_path, "r") as ds:
-        group = parent_group
-        for _ in range(100):
-            grp = ds if group == '/' else ds[group]
-            if not hasattr(grp, 'parent_group'):
-                return float(grp.outer_scale)
-            group = str(grp.parent_group)
-    raise ValueError(
-        f"parent_group chain from {parent_group!r} in {parent_path} does not "
-        f"terminate at a root simulation"
-    )
-
-
 def refine(
     parent_path,
     x_start, x_stop,
@@ -1512,7 +1478,6 @@ def refine(
     z_min=None,
     z_max=None,
     anisotropy=None,
-    normalization_source=None,
     compress=None,
     device='cpu',
 ):
@@ -1564,11 +1529,6 @@ def refine(
         Grid-anisotropy function name (see _k_z). If None, inherit from the
         parent group. The piecewise-isotropic option genuinely bites here:
         deep nests reach classes with k below the spheroscale.
-    normalization_source : {'inherited', 'recomputed'} or None
-        Where the nest's C_{Phi,L}(z) comes from — the parent's committed
-        amplitude ladder, or a fresh measurement of the Haar fluctuation at
-        the nest's own vertical resolution. See the branch in the body.
-        None uses the module default NEST_NORMALIZATION_SOURCE.
     compress : bool or None
         If True, 3D data variables in the output group are zlib-compressed at
         complevel=4. None (default) uses ``steam.constants.output_compress``.
@@ -1582,13 +1542,6 @@ def refine(
     """
     if compress is None:
         compress = constants.output_compress
-    if normalization_source is None:
-        normalization_source = NEST_NORMALIZATION_SOURCE
-    if normalization_source not in VALID_NORMALIZATION_SOURCE:
-        raise ValueError(
-            f"normalization_source must be one of {VALID_NORMALIZATION_SOURCE}, "
-            f"got {normalization_source!r}"
-        )
     parent_path = Path(parent_path)
 
     ds = netCDF4.Dataset(parent_path, "r")
@@ -1878,63 +1831,25 @@ def refine(
 
     # C_{Phi,k}(z) = n_c^{-1/alpha} C_{Phi,L}(z) (k/L)^H_h is ONE ladder from
     # the root outer scale down; the nest just extends it below the parent's
-    # finest class. Where C_{Phi,L}(z) comes from is the policy:
-    if normalization_source == 'inherited':
-        # The parent already committed to a C_{Phi,L}(z); its last class,
-        # scaled by (k/k_parent)^H_h, extends that same ladder with no seam at
-        # the overlap scale. This is literally "continue what the parent was
-        # doing": the parent's own loop never re-measures C_{Phi,L} per class.
-        anchor_k = float(k_values_parent[-1])
-        anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)[:len(z_coords)]
-        anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)[:len(z_coords)]
-        C_h_k = []
-        C_qt_k = []
-        for i, k in enumerate(k_values):
-            hurst_scale = float((k / anchor_k) ** H_h)
-            z_i = grids['z_arrays'][i]
-            C_h_k.append(
-                (np.interp(z_i, z_coords, anchor_C_h) * hurst_scale).astype(np.float32))
-            C_qt_k.append(
-                (np.interp(z_i, z_coords, anchor_C_qt) * hurst_scale).astype(np.float32))
-    elif normalization_source == 'recomputed':
-        # Re-measure C_{Phi,L}(z) from the same mean profile at the NEST's
-        # vertical resolution, with L the root outer scale. The discrete Haar
-        # estimator has an O(1/m) grid bias (m = half-window in cells), so a
-        # finer grid is the more accurate measurement of the same quantity --
-        # but it does not match what the parent used, and the mismatch appears
-        # as a step in amplitude at the overlap scale (~9% for a doubling of
-        # vertical resolution). Use when the nest's own accuracy matters more
-        # than continuity with the parent's classes.
-        root_outer_scale = _root_outer_scale(parent_path, parent_group)
-        dz_reference = float(grids['dz'][-1])
-        z_reference_min = float(grids['z_min_per_class'][0])
-        z_reference_span = float(grids['padded_height'][0])
-        n_reference = max(2, int(round(z_reference_span / dz_reference)))
-        # Spans the WIDEST class's z-extent (class 0) at the FINEST class's
-        # spacing, so no class extrapolates C off the end of the response.
-        z_reference = (z_reference_min
-                       + np.arange(n_reference) * (z_reference_span / n_reference))
-        h_on_reference = np.interp(z_reference, z_profile, h_profile)
-        qt_on_reference = np.interp(z_reference, z_profile, qt_profile)
-        spheroscale_on_reference = np.interp(z_reference, z_profile, spheroscale_profile)
-        k_z_L_on_reference = _k_z(anisotropy, root_outer_scale, spheroscale_on_reference)
-        C_h_k = _compute_normalization(
-            h_on_reference, k_z_L_on_reference,
-            k_values, root_outer_scale, grids,
-            n_scale_classes_per_dyad=parent_n_per_dyad,
-            z_reference=z_reference,
-        )
-        C_qt_k = _compute_normalization(
-            qt_on_reference, k_z_L_on_reference,
-            k_values, root_outer_scale, grids,
-            n_scale_classes_per_dyad=parent_n_per_dyad,
-            z_reference=z_reference,
-        )
-    else:
-        raise ValueError(
-            f"normalization_source must be one of {VALID_NORMALIZATION_SOURCE}, "
-            f"got {normalization_source!r}"
-        )
+    # finest class. The parent already committed to a C_{Phi,L}(z); its last
+    # class, scaled by (k/k_parent)^H_h, extends that same ladder with no seam
+    # at the overlap scale. This is literally "continue what the parent was
+    # doing": the parent's own loop never re-measures C_{Phi,L} per class.
+    # (A re-measured-at-nest-resolution alternative was considered and ruled
+    # out 2026-07-27 -- the mean profile is smooth and interpolatable, and
+    # re-measuring leaves a step at the overlap scale; see git history.)
+    anchor_k = float(k_values_parent[-1])
+    anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)[:len(z_coords)]
+    anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)[:len(z_coords)]
+    C_h_k = []
+    C_qt_k = []
+    for i, k in enumerate(k_values):
+        hurst_scale = float((k / anchor_k) ** H_h)
+        z_i = grids['z_arrays'][i]
+        C_h_k.append(
+            (np.interp(z_i, z_coords, anchor_C_h) * hurst_scale).astype(np.float32))
+        C_qt_k.append(
+            (np.interp(z_i, z_coords, anchor_C_qt) * hurst_scale).astype(np.float32))
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
@@ -2085,7 +2000,6 @@ def refine(
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
         'flux_alpha': FLUX_ALPHA,
-        'normalization_source': normalization_source,
         'parent_group': parent_group,
         'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
         'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),

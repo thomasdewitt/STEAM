@@ -203,22 +203,24 @@ def test_refine_tiny_inner_keeps_grid_bounded(parent_nc):
 # Inheritance: the nest starts from the parent's field, not from scratch
 # ---------------------------------------------------------------------------
 
-def test_nest_with_zero_amplitude_reproduces_the_parent_field(parent_nc, monkeypatch):
+def test_nest_with_zero_amplitude_reproduces_the_parent_field(parent_nc):
     """With the turbulon amplitudes set to zero the nest adds nothing, so its
     output must be exactly the parent's field interpolated onto the nest grid.
     That isolates the inheritance path (extraction, mean removal, zoom,
     projection, trim) from the cascade itself.
 
     A doubly-spanning nest is used so there is no halo to complicate the
-    comparison; normalization_source='recomputed' routes C through
-    _compute_normalization, where HAAR_TO_MHAT can zero it.
+    comparison. The nest inherits its amplitude ladder from the parent's
+    stored C_{Phi,k}, so zeroing those stored arrays zeroes every nest class.
     """
-    monkeypatch.setattr(sm, "HAAR_TO_MHAT", 0.0)
+    with netCDF4.Dataset(parent_nc, "r+") as ds:
+        ds.variables["C_h_k"][:] = 0.0
+        ds.variables["C_qt_k"][:] = 0.0
     geometry = _parent_geometry(parent_nc)
     new_dx = geometry['k_finest'] / 4
 
     refine(parent_nc, 0, geometry['nx'], 0, geometry['ny'], new_dx, new_dx,
-           seed=1, normalization_source='recomputed')
+           seed=1)
 
     with netCDF4.Dataset(parent_nc, "r") as ds:
         parent_h = np.asarray(ds.variables["h"][:], dtype=np.float32)
