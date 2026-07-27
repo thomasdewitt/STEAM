@@ -120,11 +120,7 @@ $c_\mathcal{F} = c\, n_c^{-1/\alpha}$, and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly (the $\alpha$-generalization of the
 lognormal $-\sigma^2/2$ shift; derivation below), so the mean flux is
-conserved.
-% NOTE (2026-07-27): the reference implementation currently evaluates
-% this constant by a large fixed-seed Monte Carlo draw (1.2510); the
-% closed form is 1/(alpha-1) = 1.25 exactly. Replacing the measured
-% constant with the closed form is checklist item 32 (Thomas's call). The flux is updated additively as
+conserved. The flux is updated additively as
 $\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$,
 clipped at zero, and rescaled by a single scalar restoring the volume
 mean the field had before the advance --- a clip-bias correction only

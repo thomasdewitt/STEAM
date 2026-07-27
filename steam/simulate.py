@@ -106,7 +106,17 @@ def _extremal_levy(alpha, size, rng):
     alpha = float(alpha)
     phi0 = np.float32(-(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha)
     sign = np.float32(1.0 if alpha > 1.0 else -1.0)
-    eps = np.float32(1e-12)
+    # ~100x float32 machine epsilon, matching scaleinvariance's
+    # precision-scaled clamp. A float64-scale eps (1e-12) here DISABLES the
+    # protection: near the zero crossing of cos(phi - a(phi - phi0)) the
+    # float32 absolute error (~6e-8) swamps the true value, occasionally
+    # flips its sign into the clamp, and the negative power amplifies the
+    # garbage into impossible right-tail draws (audit item 33, 2026-07-27;
+    # spurious +64 at alpha=1.5 and +259 at alpha=1.95 in 30M draws with
+    # 1e-12; clean at 1e-6). The larger clamp also caps the legitimate
+    # far-negative tail at smaller magnitude, which is invisible through
+    # exp(gamma) -- both map to multiplier -1.
+    eps = np.float32(1e-6)
 
     phi = (rng.random(size, dtype=np.float32) - np.float32(0.5)) * np.float32(np.pi)
     R = rng.random(size, dtype=np.float32)       # -log(U) ~ Exp(1), all float32
@@ -136,13 +146,17 @@ def _extremal_levy(alpha, size, rng):
 
 # log<exp(gamma_0)> for the unit-scale extremal generator above. Subtracting
 # LEVY_LOG_MEAN * scale**alpha from a scale-times-gamma_0 draw sets the
-# multiplier to unit mean (the alpha-generalization of the lognormal -sigma^2/2;
-# it equals 1 at alpha=2). There is no closed form in this generator's scale
-# convention, so it is measured once from a large deterministic draw (in float64
-# for an accurate mean).
-LEVY_LOG_MEAN = float(np.log(np.mean(np.exp(
-    _extremal_levy(FLUX_ALPHA, 8_000_000, np.random.default_rng(0)).astype(np.float64)
-))))
+# multiplier to unit mean exactly (the alpha-generalization of the lognormal
+# -sigma^2/2; it equals 1 at alpha=2). Closed form (derivation in the
+# supplement, S1 cascade loop): relative to a standard maximally skewed
+# stable of unit scale -- for which ln<exp(theta X)> = -theta^a sec(pi a/2),
+# finite because beta=-1 puts the heavy tail on the side the exponential
+# kills -- the generator above differs by the scale factor
+# |a-1|^(-1/a) (1+tan^2(pi a/2))^(-1/(2a)), and since (1+tan^2)^(1/2) = |sec|
+# the secants cancel:  ln<exp(gamma_0)> = 1/(alpha-1)  exactly.
+# (The 8M-draw Monte Carlo this replaces measured 1.2510 vs 1.25; audit
+# item 32, applied 2026-07-27.)
+LEVY_LOG_MEAN = 1.0 / (FLUX_ALPHA - 1.0)
 
 
 def _sparse_levy(nx, ny, nz, factor_x, factor_y, factor_z, alpha, rng):
