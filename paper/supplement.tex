@@ -220,6 +220,48 @@ the input bounds, so no final clip is applied. Temperature, water
 phases, and pressure are then recovered by the saturation adjustment of
 the main-text appendix.
 
+\subsection{Nested refinement}
+
+A completed simulation (or a previous nest) can be continued over a
+subdomain to finer resolution: the nest runs the identical per-class
+loop for the size classes below its parent's finest, down to twice the
+nest's grid spacing. The nest inherits the parent's state --- the
+scalar perturbations (parent field minus its mean profile) and the flux
+field are extracted over the nest region and interpolated trilinearly
+onto the nest's grids; nothing is re-seeded from scratch. The
+amplitude ladder is likewise inherited: the parent's finest-class
+$C_{\Phi,k}(z)$, scaled by $(k/k_{\mathrm{parent}})^{H_h}$ and
+interpolated to each nest class's vertical grid, extends the single
+ladder anchored at the root outer scale with no discontinuity at the
+overlap scale. The flux requires no special handling: because the
+per-class renormalization restores the volume mean the field entered
+with, a nest keeps the regional flux anomaly it inherited.
+
+The extraction carries a halo on each non-spanning horizontal side,
+of per-class physical width equal to the turbulon support at that
+class, so that turbulons centered outside the nest still reach into it.
+The halo is context, not domain: it is excluded from every statistic
+evaluated over the simulated domain --- the advective-weight
+normalization, the mean absolute multiplier noise, the flux volume
+means, and the mean-preserving projection --- and it is discarded on
+output. (Bounds are still enforced across the halo, since the next
+class reads gradients and the bound taper from it.) Along any axis the
+nest spans entirely, the parent's periodicity (or aperiodicity) is
+preserved with the parent extent as the period and no halo; a nest
+whose halo would cross a non-periodic parent boundary is rejected. The
+vertical is always aperiodic: the halo is clipped at the ground and
+domain top, and turbulon centers may lie outside the nest's vertical
+range (anywhere between the domain surface and top), with their tails
+reaching in.
+
+Each nest's random seed is derived deterministically from the parent's
+seed and the output group name unless given explicitly, and the
+per-class seed spawning is as in a root simulation. Output is written
+as a NetCDF group inside the parent's file with world-absolute
+coordinates, recording its parent group for recursive refinement; an
+elevated nest's basal pressure is taken from the parent's
+three-dimensional pressure field.
+
 \section{Complete specification of the LES-ensemble comparison}
 \label{ssect:rcemip analysis}
 
