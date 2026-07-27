@@ -36,7 +36,12 @@ SUPPORT_FACTOR = 5
 # <exp(gamma)> = 1 exactly (the alpha-generalization of the lognormal
 # -sigma^2/2 shift; see LEVY_LOG_MEAN), which conserves the flux mean under
 # the bounded-below update  F += conv(psi, (exp(gamma)-1)*F), clipped at
-# zero. Scalar turbulons inherit the signed multiplier noise, so they are
+# zero. The clip is the one thing that breaks that conservation, so after
+# each class the field is rescaled by a single scalar restoring the VOLUME
+# mean it entered the class with -- a corrector for that step's clip bias and
+# nothing more. It imposes no value on the flux, which is what lets a nest
+# carry its parent region's flux anomaly (see refine).
+# Scalar turbulons inherit the signed multiplier noise, so they are
 # skewed too; the extremal generator is heavy-tailed on the low-multiplier
 # side, giving the h'/qt' interior a convective right-skew.
 #
@@ -840,10 +845,24 @@ def cascade_loop(
     return h_perturbation, qt_perturbation, flux, final_grid_info
 
 
+def _inner_view(field, window):
+    """The simulated domain's own horizontal extent, halo excluded.
+
+    ``window`` is (x_start, x_stop, y_start, y_stop) into the first two axes,
+    or None for a root simulation whose domain is the whole array. Works on
+    both 3D fields and single 2D levels. Returned as a view, so the caller
+    reduces over the domain while still writing back to the full array.
+    """
+    if window is None:
+        return field
+    x_start, x_stop, y_start, y_stop = window
+    return field[x_start:x_stop, y_start:y_stop]
+
+
 def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
-    device='cpu',
+    device='cpu', window=None,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -859,23 +878,31 @@ def _advance_flux(
     mean absolute value one:
     S_k = (exp(gamma)-1) * F_{k-1} / <|exp(gamma)-1|>.
 
-    After the clip at zero, the field is rescaled by a single scalar
-    restoring its volume mean from before the advance — a pure clip-bias
-    correction (ruling 2026-07-27, audit B14; replaces the per-level
-    unit-mean renorm). Restoring the ENTERING mean rather than forcing
-    unit mean makes the same rule correct in root simulations (entering
-    mean ~ 1) and in nested refinements (entering mean = the inherited
-    regional flux anomaly, which must be preserved). Realized per-level
-    mean fluctuations are left alive: they are physical layer-scale
-    intermittency; the flat-dissipation idealization is enforced in
-    expectation by the generator shift, not realization-by-realization.
+    The clip at zero biases the flux downward, so after the update the field is
+    rescaled by ONE scalar that restores the VOLUME mean it entered the class
+    with (ruling 2026-07-27, audit B14; replaces the per-level unit-mean
+    renorm). The renormalization is thereby a pure corrector for the bias of
+    the step just taken, and nothing else: it does not impose a value on the
+    flux, and it does not touch the realized horizontal-mean structure within
+    the volume. A root enters at mean one and stays there. A nest enters at the
+    flux anomaly it inherited from its parent over this region, and keeps it --
+    which is the whole point of continuing a parent's cascade rather than
+    starting a new one. Realized per-level mean fluctuations are left alive:
+    they are physical layer-scale intermittency; the flat-dissipation
+    idealization is enforced in expectation by the generator shift, not
+    realization-by-realization.
+
+    ``window`` (see _inner_view) is the simulated domain, excluding a nest's
+    halo. Both the volume means above and the mean absolute multiplier noise
+    are taken over it; None means the whole array, as for a root.
     """
     s_x, s_y, s_z = sparsity_factors
+    # Captured before the increment: this is what the renormalization restores.
+    # float64 accumulator -- the finest cascade grid runs to ~1e9 cells.
+    entering_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
     per_class_scale = flux_noise_scale / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
     shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
     per_class_scale = np.float32(per_class_scale)
-
-    entering_mean = float(flux.mean(dtype=np.float64))
 
     gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
     if zero_bottom and n_zero > 0:
@@ -889,7 +916,8 @@ def _advance_flux(
     noise = np.expm1(gamma - shift)
     noise[gamma == 0.0] = np.float32(0.0)
 
-    mean_abs = np.abs(noise).sum() / max(np.count_nonzero(noise), 1)
+    noise_inner = _inner_view(noise, window)
+    mean_abs = np.abs(noise_inner).sum() / max(np.count_nonzero(noise_inner), 1)
     scalar_amplitude = noise * flux
     if mean_abs > 0:
         scalar_amplitude *= np.float32(1.0 / mean_abs)
@@ -899,16 +927,20 @@ def _advance_flux(
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
-    volume_mean = float(flux.mean(dtype=np.float64))
-    if volume_mean > 0:
-        flux *= np.float32(entering_mean / volume_mean)
+    realized_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
+    if realized_mean > 0:
+        flux *= np.float32(entering_mean / realized_mean)
     else:
-        flux[:] = np.float32(entering_mean)
+        # The whole domain clipped to zero: there is no structure left to
+        # rescale, so restore the entering mean as a flat field.
+        flux[...] = np.float32(entering_mean)
 
     diagnostics = {
         'n_clipped': n_clipped,
         'n_points': int(flux.size),
         'clip_fraction': n_clipped / flux.size,
+        'entering_mean': entering_mean,
+        'realized_mean': realized_mean,
     }
     return scalar_amplitude, diagnostics
 
@@ -936,8 +968,9 @@ def simulate_flux_only(
     Returns
     -------
     flux : float32 ndarray
-        Final dimensionless flux field, normalized to horizontal mean one at
-        every z level.
+        Final dimensionless flux field. Each class restores the volume mean
+        the flux entered it with, and the cascade starts from one, so the
+        final field has volume mean one up to the between-class regrid.
     diagnostics : dict
         Per-class and aggregate pre-clip counts/fractions.
     """

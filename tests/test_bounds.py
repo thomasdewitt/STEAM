@@ -131,7 +131,7 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu"):
+                     device="cpu", window=None):
         return np.ones_like(flux), {"n_clipped": 0}
 
     def capture_convolution(field, kernel, device="cpu"):
