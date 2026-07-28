@@ -24,7 +24,23 @@ from .utils import (
 from .output import write_netcdf
 
 CONVOLVE = convolve_fft_xy_oa_z
-SUPPORT_FACTOR = 5
+# Kernel truncation radius in units of k, and (for nests) the halo width.
+# At 3k the envelope is 1.5e-18 of its peak -- eleven orders below float32
+# resolution, so nothing the dtype can represent is discarded -- while the
+# kernel is (3/5)^3 = 0.24x the cells of the former 5k. (2k would be 3.3e-8,
+# within a factor of 4 of float32 eps, so it is not safe.) The discrete
+# admissibility correction in _turbulon_envelope is independent of this
+# choice to 10 digits.
+#
+# Changing it does change the realized field: the convolution itself moves
+# only at roundoff (2.8e-7 relative), but the flux cascade's clip-at-zero
+# and renormalize is nonlinear and multiplicative, so a roundoff-level
+# perturbation at the coarsest class amplifies down the cascade until the
+# realization is entirely different (88% of cells differ by >1e-5). The
+# STATISTICS are preserved -- flux volume mean 0.95498 -> 0.95538 (0.04%),
+# clipped fraction 0.1491 -> 0.1476 -- but any test asserting a tight
+# tolerance on a single realization will move.
+SUPPORT_FACTOR = 3
 
 # ─── NESTED REFINEMENT ───────────────────────────────────────────────────────
 # refine() continues the cascade of a completed simulation over a subdomain,
@@ -93,12 +109,22 @@ ZOOM_RETENTION = (1.0, 0.626, 0.529, 0.508, 0.500, 0.491, 0.471, 0.461, 0.388)
 # Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
 # the mean absolute vertical Haar fluctuation (at scale k_z) of a field of
 # unit-amplitude outer-class turbulons, measured from the envelope shape and
-# the s=1 packing (turbulon centers every k/2), is R = 2.005. Setting
+# the s=1 packing (turbulon centers every k/2), is R = 1.984. Setting
 # lambda = 1/R makes the field's Haar fluctuation at the outer scale equal
 # the mean profile's by construction -- the crossover property checked by
-# tests/heavy/normalization_diagnostic.py. (R = 2.00 to three digits; whether
-# exactly 2 is derivable from the 3-lobe column + k/2 packing is open.)
-HAAR_TO_MHAT = 1.0 / 2.005   # ~= 0.499
+# tests/heavy/normalization_diagnostic.py.
+#
+# 2026-07-28: was R = 2.005, re-fit for the Gaussian-weighted admissibility
+# correction in _turbulon_envelope, which lowers the envelope peak from 3 to
+# A_opt = 2.9678. The shift is NOT the 1.07% peak ratio, because old and new
+# kernels differ by a Gaussian rather than a constant factor; it was measured
+# as a kernel-only A/B (same seeds, same packing, so the ratio is clean):
+# R_new/R_old = 0.98963 +/- 0.00001 over 8 seeds, giving 2.005 -> 1.9842.
+# Left unchanged this would have biased deposited amplitudes 1.04% low.
+# NOTE the ratio is from a standalone harness, not a full
+# normalization_diagnostic.py run (that needs the analysis repo); the
+# crossover check should be re-run on Linux before regeneration.
+HAAR_TO_MHAT = 1.0 / 1.984   # ~= 0.504
 
 
 def _extremal_levy(alpha, size, rng):
@@ -1381,7 +1407,7 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     HAAR_TO_MHAT converts the measured Haar coefficient to the cascade's
     turbulon amplitude convention, defined operationally: lambda = 1/R with
     R the mean absolute vertical Haar fluctuation of a unit-amplitude
-    outer-class turbulon field (R = 2.005 from the envelope shape and s=1
+    outer-class turbulon field (R = 1.984 from the envelope shape and s=1
     packing), so the field's Haar fluctuation at the outer scale equals the
     profile's by construction (see the module constant and
     tests/heavy/normalization_diagnostic.py).
