@@ -206,14 +206,20 @@ deposits, and therefore the running field's gradients, are large ---
 and the correlation compounds from class to class; normalizing the
 factors separately leaves $\langle W |S_k| \rangle$ growing down the
 cascade, which cancels the $k^{H_h}$ dependence of the amplitude
-ladder. The normalized product is then multiplied by the bound factor
-$g_\Phi$, evaluated pointwise from the same running field with the
-buffer width $b_{\Phi,k}(z)$ above --- the taper is applied after the
-normalization, so that proximity to a bound reduces a level's total
-amplitude rather than redistributing it --- and finally by
-$C_{\Phi,k}(z)$, giving the amplitude field $A_\Phi$ with mean absolute
-turbulon amplitude $C_{\Phi,k}(z)$ at every level, class, and
-realization.
+ladder. The bound factor $g_\Phi$, evaluated pointwise from the same
+running field with the buffer width $b_{\Phi,k}(z)$ above,
+participates in the normalized pattern: the product $W_{\Phi,k} S_k
+g_\Phi$ is what is normalized, so that proximity to a bound
+redistributes a level's amplitude toward its far-from-bound cells
+rather than reducing the level total. (Normalizing first and tapering
+after makes the delivered ladder $C_{\Phi,k}\langle g_\Phi\rangle_k$;
+because the buffers shrink down the cascade, $\langle g_\Phi\rangle_k$
+is strongly scale-dependent --- measured $0.5\to1.0$ for $h$ and
+$\approx 0.1$--$0.2$ throughout for $q_t$ at production amplitudes ---
+which bends the realized fluctuation slopes.) The normalized product
+is finally multiplied by $C_{\Phi,k}(z)$, giving the amplitude field
+$A_\Phi$ with mean absolute turbulon amplitude $C_{\Phi,k}(z)$ at
+every level, class, and realization.
 
 The amplitudes are then convolved with the turbulon envelope. The 3D
 Mexican hat of the main-text appendix ($3 - \rho$ form) is constructed
@@ -227,23 +233,38 @@ period. $A_\Phi$ is convolved with this kernel --- circular in $x$ and
 $y$, zero-padded in $z$ --- and the result is added to
 $\widetilde{\Phi}$.
 
-Finally, each scalar is projected onto its bounds while preserving the
-horizontal mean at every level: $\Phi \rightarrow \min(\max(\Phi - \mu,
-\Phi_{\min}), \Phi_{\max})$, with $\mu$ solved per level such that the
-horizontal mean equals its value before the projection. The projected
-mean is a continuous, piecewise-linear, monotonically decreasing
-function of $\mu$, so the root is found exactly by sorting the
-breakpoints $\Phi_i - \Phi_{\max}$ and $\Phi_i - \Phi_{\min}$, or to
-arbitrary precision by bisection. The correction is folded into the
-current class's perturbation field, so that the gradients seen by
-subsequent classes are those of the projected field.
+Finally, the convolved increment $\delta$ is added through a bounded,
+amplitude-preserving projection. At every level the added perturbation
+satisfies three conditions: (i) zero horizontal mean; (ii) mean
+absolute amplitude equal to the raw increment's own pre-clip value, so
+the bounding neither erodes nor double-enforces the amplitude ladder
+set by the normalization; and (iii) $\Phi_{\min} \le \Phi \le
+\Phi_{\max}$ pointwise. Candidates are drawn from the two-scalar
+family $\delta(s,\mu) = \min(\max(s\,\delta_0 - \mu,\; \Phi_{\min} -
+\Phi),\; \Phi_{\max} - \Phi)$: the level mean of $\delta(s,\mu)$ is a
+continuous, piecewise-linear, monotonically non-increasing function of
+$\mu$, solved by bisection, and the delivered amplitude increases
+monotonically in $s$, fixed by a short rescale iteration. The three
+conditions are simultaneously achievable only up to a feasibility
+ceiling: a zero-mean bounded increment obeys $\langle|\delta|\rangle
+\le 2\min(\langle\Phi\rangle - \Phi_{\min},\, \Phi_{\max} -
+\langle\Phi\rangle)$, since every unit of positive fluctuation must be
+matched below and the down-side headroom is finite. Where the design
+ladder exceeds this ceiling --- dry $q_t$ levels aloft, where
+$\sum_k C_{q_t,k}$ can reach ten times the mean --- the rescale stalls
+against the clip and the level delivers its maximum realizable
+amplitude with conditions (i) and (iii) still exact: near a bound the
+amplitude, not the scaling, absorbs the infeasibility. The added
+perturbation is folded into the running field, so the gradients seen
+by subsequent classes are those of the bounded field.
 
 \subsection{Final fields}
 
 After the finest class ($k = 2dx$), the output fields are $h = \langle
 h \rangle_t + \widetilde{h}$ and $q_t = \langle q_t \rangle_t +
-\widetilde{q_t}$; the per-class projection guarantees they lie within
-the input bounds, so no final clip is applied. Temperature, water
+\widetilde{q_t}$; the per-class bounded add guarantees they lie within
+the input bounds up to single-ulp float32 rounding of the
+perturbation-plus-mean reassembly, which is clamped. Temperature, water
 phases, and pressure are then recovered by the saturation adjustment of
 the main-text appendix.
 
@@ -270,7 +291,7 @@ class, so that turbulons centered outside the nest still reach into it.
 The halo is context, not domain: it is excluded from every statistic
 evaluated over the simulated domain --- the advective-weight
 normalization, the mean absolute multiplier noise, the flux volume
-means, and the mean-preserving projection --- and it is discarded on
+means, and the bounded amplitude-preserving add --- and it is discarded on
 output. (Bounds are still enforced across the halo, since the next
 class reads gradients and the bound taper from it.) Along any axis the
 nest spans entirely, the parent's periodicity (or aperiodicity) is

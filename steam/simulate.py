@@ -291,10 +291,10 @@ def simulate(
     seed : int or None
         Random seed for reproducibility.
     h_min, h_max : float
-        Physical bounds (taper + mean-preserving projection) on moist
+        Physical bounds (taper + bounded amplitude-preserving add) on moist
         static energy [J/kg].
     qt_min, qt_max : float
-        Physical bounds (taper + mean-preserving projection) on total
+        Physical bounds (taper + bounded amplitude-preserving add) on total
         water mixing ratio [kg/kg].
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
@@ -548,8 +548,13 @@ def simulate(
     qt_3d = np.ascontiguousarray(qt_pert)
     del h_pert, qt_pert
 
-    # No final clip: the per-class mean-preserving projection in cascade_loop
-    # guarantees h_3d in [h_min, h_max] and qt_3d in [qt_min, qt_max].
+    # The per-class bounded amplitude-preserving add guarantees the bounds
+    # up to float32 rounding of the (perturbation + mean) reassembly, which
+    # can undershoot by ~1 ulp of the field value (observed -1e-9 on qt).
+    # Clamp that rounding residue only — this moves values by at most one
+    # ulp and is not a physics clip.
+    np.clip(h_3d, np.float32(h_min), np.float32(h_max), out=h_3d)
+    np.clip(qt_3d, np.float32(qt_min), np.float32(qt_max), out=qt_3d)
 
     flux_3d = np.ascontiguousarray(flux_field)
 
@@ -661,10 +666,10 @@ def cascade_loop(
         Per-class taper buffer widths b_{Phi,i}(z), parallel to
         C_h_k/C_qt_k (see _bound_buffers).
     h_min, h_max : float
-        Physical bounds (taper + mean-preserving projection) for moist
+        Physical bounds (taper + bounded amplitude-preserving add) for moist
         static energy.
     qt_min, qt_max : float
-        Physical bounds (taper + mean-preserving projection) for total
+        Physical bounds (taper + bounded amplitude-preserving add) for total
         water mixing ratio.
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
@@ -692,7 +697,7 @@ def cascade_loop(
         padded working grid. None (root) means the whole grid is the domain.
         Every realized-mean statistic — the flux volume mean and the mean
         absolute multiplier noise inside _advance_flux, the advective weight
-        norm, and the mean-preserving projection — is taken over this window,
+        norm, and the bounded amplitude-preserving add — is taken over this window,
         so the halo carries context into the domain without contaminating the
         domain's statistics. See _inner_view.
     zero_bottom, zero_top : bool
@@ -868,18 +873,25 @@ def cascade_loop(
             # absolute value over turbulon centers, which enforces the
             # mean turbulon amplitude <|A|> = C_k exactly at every level
             # and class. Structureless levels (no centers) keep W = 0.
+            #
+            # The bound taper participates in the normalized pattern
+            # (2026-07-28 ruling, reversing 2026-07-27): proximity to a
+            # bound REDISTRIBUTES the level's amplitude toward
+            # far-from-bound cells rather than suppressing the level
+            # total. The earlier suppress-without-renorm order made the
+            # effective ladder C_k*<g_k> with <g_k> strongly
+            # scale-dependent (buffers shrink down-cascade), which
+            # flattened the production Haar slopes (h ladder bent, qt
+            # ladder inverted). With the taper inside the norm the
+            # delivered per-level amplitude stays C_k at every class.
             W *= S_k            # joint pattern W*S_k (sparse at centers)
+            W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
+            del running_sum
             inner = _inner_view(W, window)
             level_sum = np.abs(inner).sum(axis=(0, 1), dtype=np.float64)
             level_cnt = np.count_nonzero(inner, axis=(0, 1))
             level_mean = (level_sum / np.maximum(level_cnt, 1)).astype(np.float32)
             W /= np.where(level_mean > 0, level_mean, np.float32(1.0))[None, None, :]
-
-            # Bound taper, applied AFTER the norm: proximity of one part of
-            # the field to a bound reduces that level's total variance
-            # rather than redistributing it to other parts of the level.
-            W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
-            del running_sum
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
 
@@ -891,14 +903,20 @@ def cascade_loop(
             m = min(n_classes - 1 - i, len(ZOOM_RETENTION) - 1)
             W *= np.float32(1.0 / ZOOM_RETENTION[m])
 
-            # Convolve and accumulate (periodic x,y; zero-padded z)
-            perturbation_field += CONVOLVE(W, kernel, device=device)
+            # Convolve (periodic x,y; zero-padded z), then add through the
+            # amplitude-preserving bounded projection (2026-07-28 ruling):
+            # each class's added increment is (1) zero-mean per level,
+            # (2) amplitude-preserving through the bounding, and (3)
+            # bound-respecting pointwise — see _bounded_amplitude_add.
+            # This replaces the per-class mean-preserving projection,
+            # whose repeated amplitude-capping of coarse-scale excursions
+            # (9 compounding clips) was the dominant Haar-slope flattener
+            # at production amplitudes.
+            increment = CONVOLVE(W, kernel, device=device)
             del W
-
-            # Mean-preserving projection onto the bounds, so subsequent
-            # classes' gradients see a field already within [φ_min, φ_max].
-            _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max,
-                                 window=window)
+            _bounded_amplitude_add(perturbation_field, mean_1d, increment,
+                                   phi_min, phi_max, window=window)
+            del increment
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -1461,8 +1479,95 @@ def _bound_taper(running_sum, b, phi_min, phi_max):
     return g
 
 
+def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
+                           phi_min, phi_max, window=None, n_rescale=10):
+    """Add a class's increment under the three deposit conditions.
+
+    For each z-level, the added perturbation delta satisfies (ruling
+    2026-07-28):
+
+      1. zero horizontal mean (over the domain ``window``),
+      2. mean absolute amplitude preserved through the bounding —
+         <|delta|> equals the raw increment's own pre-clip amplitude A0,
+         so the amplitude ladder is set by the normalization upstream
+         and the bounding neither double-enforces nor erodes it,
+      3. the field stays in [phi_min, phi_max] pointwise.
+
+    All three are achievable iff A0 <= 2*min(<phi> - phi_min,
+    phi_max - <phi>): a zero-mean increment's negative mass is capped by
+    the level's distance to the lower bound (and vice versa), so the
+    up-side headroom cannot be spent without moving the mean. Where A0
+    exceeds that ceiling — dry qt levels aloft, where the design ladder
+    is infeasible for ANY scheme — the rescale stalls against the clip
+    and the level delivers its maximum realizable amplitude, with
+    conditions 1 and 3 still exact. Scaling near the bound breaks by
+    necessity, not by accident.
+
+    Implementation: candidates are the two-scalar family
+    clip(s*d - mu, phi_min - phi, phi_max - phi). A short
+    demean -> clip-to-caps -> rescale-to-A0 loop finds s; the exact
+    zero mean is then enforced by BISECTION on mu — the level mean of
+    clip(d - mu, ...) is continuous, piecewise-linear and monotone
+    non-increasing in mu (cf. _project_onto_bounds, the s = 1 member of
+    the family). A naive demean-clip iteration is NOT used for the
+    final polish: it converges at rate = clip-active fraction, useless
+    on levels pinned at a bound (~0.97 aloft), and the residual means
+    compound down-cascade (caught 2026-07-28: +54x qt mean at 12 km).
+
+    Modifies perturbation_field in place; consumes ``increment``.
+    ``window`` (see _inner_view) is the domain whose statistics are
+    enforced; caps are respected everywhere, halo included.
+    """
+    lo = np.float32(phi_min)
+    hi = np.float32(phi_max)
+    width = float(phi_max) - float(phi_min)
+    for lev in range(perturbation_field.shape[2]):
+        phi = perturbation_field[:, :, lev] + mean_1d[lev]
+        cap_lo = lo - phi
+        cap_hi = hi - phi
+        d = increment[:, :, lev]
+        dw = _inner_view(d, window)
+        a0 = float(np.abs(dw).mean(dtype=np.float64))
+        if a0 <= 0.0:
+            np.clip(d, cap_lo, cap_hi, out=d)   # halo may still carry mass
+            perturbation_field[:, :, lev] += d
+            continue
+        for _ in range(n_rescale):
+            d -= np.float32(dw.mean(dtype=np.float64))
+            np.clip(d, cap_lo, cap_hi, out=d)
+            m_abs = float(np.abs(dw).mean(dtype=np.float64))
+            if m_abs <= 0.0:
+                break
+            scale = min(a0 / m_abs, 2.0)
+            if abs(scale - 1.0) < 1e-4:
+                break
+            d *= np.float32(scale)
+        d -= np.float32(dw.mean(dtype=np.float64))
+        np.clip(d, cap_lo, cap_hi, out=d)
+        if abs(float(dw.mean(dtype=np.float64))) > 1e-9 * a0:
+            mu_lo, mu_hi = -width, width
+            trial = np.empty_like(d)
+            trial_w = _inner_view(trial, window)
+            for _ in range(60):
+                mu = 0.5 * (mu_lo + mu_hi)
+                np.subtract(d, np.float32(mu), out=trial)
+                np.clip(trial, cap_lo, cap_hi, out=trial)
+                if float(trial_w.mean(dtype=np.float64)) > 0.0:
+                    mu_lo = mu
+                else:
+                    mu_hi = mu
+            np.subtract(d, np.float32(0.5 * (mu_lo + mu_hi)), out=d)
+            np.clip(d, cap_lo, cap_hi, out=d)
+        perturbation_field[:, :, lev] += d
+
+
 def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=None):
     """Project onto [phi_min, phi_max] preserving each level's horizontal mean.
+
+    NOTE (2026-07-28): superseded in cascade_loop by
+    _bounded_amplitude_add — this is its s = 1 special case (bounds and
+    mean, but no amplitude preservation). Retained for diagnostics and
+    the archaeology probes.
 
     For field = perturbation + mean, each level with any out-of-bounds value
     is replaced by clip(field - mu, phi_min, phi_max) with the scalar mu
@@ -1531,7 +1636,7 @@ def refine(
     perturbations and its flux; nothing is re-seeded from scratch.
 
     The one thing that changes is scope. A root normalizes the advective
-    weight, the flux level means and the mean-preserving projection over its
+    weight, the flux level means and the bounded amplitude-preserving add over its
     whole domain; a nest has no access to those global means, so it uses its
     own extent instead. That approximation, confined to the nesting domain, is
     the deliberate price of nesting. The halo is context only: it is excluded
@@ -1963,8 +2068,11 @@ def refine(
         h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
     qt_3d_out = np.ascontiguousarray(
         qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
-    # The per-class projection guarantees the bounds over the nest, exactly as
-    # in simulate(); no final clip.
+    # The per-class bounded amplitude-preserving add guarantees the bounds
+    # over the nest exactly as in simulate(); clamp only the ~1 ulp float32
+    # rounding residue of the (perturbation + mean) reassembly.
+    np.clip(h_3d_out, np.float32(h_min), np.float32(h_max), out=h_3d_out)
+    np.clip(qt_3d_out, np.float32(qt_min), np.float32(qt_max), out=qt_3d_out)
 
     nx_out = h_3d_out.shape[0]
     ny_out = h_3d_out.shape[1]
