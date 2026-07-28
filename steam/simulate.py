@@ -1328,7 +1328,33 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
 
     r_norm_sq = X**2 + Y**2 + Z**2
     envelope = shape_fn(r_norm_sq, k).astype(np.float32)
-    envelope -= envelope.mean()
+
+    # Enforce discrete admissibility (zero sum) by subtracting a multiple of
+    # the envelope's own Gaussian factor rather than a uniform pedestal.
+    #
+    # The shapes are zero-mean over CONTINUUM 3D space by construction (the
+    # (3 - rho) leading constant is the dimension count), but the grid does
+    # not resolve that cancellation at the default sparsity: the negative
+    # shell is carried by many low-amplitude cells whose count grows as r^2,
+    # and at dx = k/2 the discrete sum is +0.131 against a peak tap of 3
+    # (1.7% of sum|T|). It falls to 2.7e-12 at dx = k/4 -- the error is a
+    # sampling artifact that vanishes super-exponentially as the grid
+    # refines, not a defect of the shape.
+    #
+    # Subtracting the flat mean removes the same DC but spreads the
+    # correction uniformly across the whole +/-support_factor*k box, leaving
+    # a small step at the truncation radius where the envelope itself is
+    # already zero. Subtracting a Gaussian-weighted mean instead keeps the
+    # correction localized with the envelope. For mexican_hat this is
+    # exactly equivalent to replacing the leading 3 by
+    #     A_opt = sum(rho * w) / sum(w),  w = exp(-rho/2)
+    # i.e. 2.96781718 at s = 1 (eps = 0.032, 1.07% of 3), and A_opt -> 3 to
+    # 12 digits once s = 2 resolves the shell. A_opt depends only on the
+    # sparsity factors, and is independent of support_factor (to 10 digits)
+    # and of the turbulon aspect ratio -- this kernel is always the
+    # isotropic one, anisotropy entering through the grid's physical dz.
+    gaussian = np.exp(-r_norm_sq / (2.0 * (k / np.pi) ** 2)).astype(np.float32)
+    envelope -= gaussian * (envelope.sum() / gaussian.sum())
     return envelope
 
 

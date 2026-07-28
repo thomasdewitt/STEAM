@@ -11,11 +11,20 @@ CUDA_MEMORY_HEADROOM_BYTES = 1 * 1024**3  # keep this much VRAM free for cuFFT p
 
 
 def available_memory_bytes():
-    """RAM currently available to allocate, from /proc/meminfo (Linux)."""
-    with open('/proc/meminfo') as meminfo:
-        for line in meminfo:
-            if line.startswith('MemAvailable:'):
-                return int(line.split()[1]) * 1024  # kB -> bytes
+    """RAM currently available to allocate, from /proc/meminfo (Linux).
+
+    Returns None where /proc/meminfo does not exist (macOS, BSD), which
+    callers already treat as "unknown, skip the preflight guard" -- the
+    production runs are Linux, but the test suite must be runnable on the
+    development machines too.
+    """
+    try:
+        with open('/proc/meminfo') as meminfo:
+            for line in meminfo:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024  # kB -> bytes
+    except FileNotFoundError:
+        return None
     return None
 
 
