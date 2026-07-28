@@ -64,7 +64,7 @@ $n_c$ & cascade density & size classes per octave, default 1 \\
 \end{table}
 
 The outer scale
-must be a power-of-two multiple of $dx$, and the implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ must be smaller than the domain height.
+must be a power-of-two multiple of $dx$. The implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ must be smaller than the domain height at every level.
 
 Logarithmically spaced size classes are defined as $k_i = L\, 2^{-i/n_c}$
 for $i = 0, 1, \dots, n_c\log_2(L/(2dx))$, proceeding from the outer
@@ -79,15 +79,6 @@ instead set how finely each class is resolved on its own working grid
 (next section): at $s = 1$ the finest class works directly on the
 output grid, while for $s > 1$ it is computed on a grid finer than the
 output and restricted to the output grid afterward.
-% CLAUDE (2026-07-28), answering the comment here: checked against
-% _compute_all_grids and the class-list construction. The class list is
-% s-independent; k = 2dx is Nyquist-sampled BY THE OUTPUT GRID for
-% every s (two cells per turbulon size — the output cannot do better).
-% What s>1 changes is the working representation: Delta x_k = k/(2s) <
-% dx for the finest log2(2s) classes, i.e. those classes are resolved
-% BETTER than Nyquist on their working grids and then down-sampled to
-% the output. So the smallest turbulon is never under-sampled relative
-% to the output; if anything it is over-resolved internally when s > 1.
 
 \subsection{Normalization}
 
@@ -98,13 +89,15 @@ vertical outer scale is computed by taking the mean of the profile over the uppe
 a $k_{z,L}(z)$-wide window minus the mean over the lower half. Half-window width 
 is required to be at least one profile cell and the profile is edge padded
 by the maximum half-width. The result is multiplied by the calibration constant $\lambda = 1/R \approx 1.30$
-and taken in absolute value, where $R \approx 0.77$ is the mean absolute
+and taken in absolute value. Here $R \approx 0.77$ is the mean absolute
 vertical Haar fluctuation of a field of unit-amplitude outer-scale
-turbulons. $R$ is measured numerically by synthesizing a field of
-outer-scale turbulons exactly as the cascade does, i.e. first on a coarse
-grid using $s_x = s_y = s_z = 1$ before being linearly interpolated to a finer resolution, delivered under the interpolation-compensation convention of
-the next section (whose choice of reference resolution $\lambda$
-absorbs; $R < 1$ reflects that convention, not a weak field). Because the same Haar wavelet is used for the computation of $C_{\Phi, L}(z)$
+turbulons. $R$ is measured numerically by synthesizing such a field
+exactly as the cascade builds one: deposited on a coarse grid with
+$s_x = s_y = s_z = 1$, linearly interpolated down to a fine grid, and
+scaled by the interpolation-compensation factor of the next section.
+Those factors are normalized to a reference resolution chosen by
+convention, and $R$ inherits that choice, so its magnitude carries no
+meaning by itself. Because the same Haar wavelet is used for the computation of $C_{\Phi, L}(z)$
 and for $R$, definitional conventions are incorporated
 into $\lambda$ and the Haar fluctuation at the outer scale of the
 simulated fields equals that of the input profile by construction. The scale-dependent amplitudes
@@ -137,9 +130,11 @@ or overshoots the domain top, with the overshooting cell retained. The resulting
 $\le 1$ so that they tile $L_z$ exactly. For a constant spheroscale this reduces
 to a uniform grid at least as fine as the Nyquist target.
 
-As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. Sampling and interpolation do not preserve the mean absolute value of the turbulon perturbations, and so small turbulons that are poorly resolved on the output grid will introduce more variability than expected by the $C_{\Phi,k}$ factors alone. To account for this, perturbation fields are multiplied by a constant factor \verb|INTERPOLATION_COMPENSATION| that compensates for the resolution dependence of the mean absolute turbulon amplitude. The factor depends on $k/\Delta x$, the turbulon size in units of the output grid spacing, and is measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations. Two effects contribute. At small $k/\Delta x$ the output samples land preferentially near the envelope peaks --- at $s=1$ the grid points coincide with the turbulon centers --- so a marginally resolved class reads up to $2.8\times$ the amplitude of a well-resolved one. At large $k/\Delta x$ a slower effect remains: each regrid resamples the piecewise-linear field at nodes that do not coincide with the previous ones, which reduces the amplitude by 1--3\% per octave out to at least $k/\Delta x = 256$. There is therefore no fully converged reference; the factors in Table \ref{tab:interpolation compensation} are normalized to $k/\Delta x = 512$, the deepest class used by any simulation in this work, and the choice of reference is a single overall constant absorbed into the calibration $\lambda$ described above. The same factor multiplies the flux increments.
+As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. Sampling and interpolation do not preserve the mean absolute value of the turbulon perturbations: a size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone implies. To account for this, each class's amplitude is multiplied by a factor \verb|INTERPOLATION_COMPENSATION| that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The same factor multiplies the flux increments. The factors are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
 
-The factors are stored as per-regrid retentions --- the fraction of the mean absolute amplitude surviving each interpolation step, a ratio of adjacent-resolution runs that is independent of any reference --- and a class's factor is composed as the product over the regrids its deposit actually undergoes. This makes the factors regime-aware: the slow per-octave decline above is a property of the anisotropic vertical grids, which refine by $2^{H_z}$ per step and never share nodes with their predecessors, while for size classes below the spheroscale (where $k_z = k$) the vertical grids refine dyadically and the per-step losses instead fall off geometrically, reaching 1 within a few octaves. The retentions were measured separately in the two regimes; each regrid step takes the retention of its own regime at each level, so a cascade that crosses the spheroscale uses the isotropic values below it and the anisotropic values above it, with the crossing step approximated by the regime of its destination grid. Within either regime the retentions are independent of the spheroscale itself, which cancels from every grid-spacing ratio.
+Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the output samples land preferentially near the envelope peaks, because at $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $2.8\times$ the amplitude of a well-resolved one. Second, at large $k/\Delta x$ a slower loss remains: each regrid resamples the piecewise-linear field at nodes that do not coincide with the previous ones, and this removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the deepest class used by any simulation in this work. The choice of reference is a single overall constant, absorbed into the calibration $\lambda$ above.
+
+The factors are stored as per-regrid retentions: the fraction of the mean absolute amplitude that survives one interpolation step. A retention is a ratio between two adjacent resolutions, so it does not depend on the reference, and a class's factor is the product of the retentions of the regrids its deposit actually undergoes. This composition is what accommodates cascades that cross the spheroscale. The slow per-octave loss above is a property of the anisotropic vertical grids, which refine by only $2^{H_z}$ per step and never place their nodes on the previous grid's. Below the spheroscale, where $k_z = k$, the vertical grids refine dyadically instead, and the per-step losses fall off geometrically within a few octaves. The retentions were therefore measured separately in the two regimes. Each regrid step takes the retention of its own regime at each height level, so a cascade crossing the spheroscale composes isotropic retentions below it and anisotropic retentions above it; the crossing step itself is approximated by the regime of its destination grid. Within either regime the spheroscale cancels from every grid-spacing ratio, so the retentions do not depend on its value.
 
 \begin{table}
 \centering
@@ -171,7 +166,7 @@ surface or above the domain top. This noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly (not shown). The flux is updated additively as
-$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$, with the increment multiplied by the same \verb|INTERPOLATION_COMPENSATION| factor as the scalar amplitudes (next section), and then clipped by setting any negative values to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
+$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$, with the increment multiplied by the \verb|INTERPOLATION_COMPENSATION| factor of the previous section. After the addition, any negative values are set to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
 mean the field had before the perturbation was added. Level means are not
 individually constrained.
 The signed scalar noise $S_k$ is defined as the increment $(e^\gamma -
@@ -203,7 +198,7 @@ Because the candidate perturbation field may cause the running sum $\sum_{k\ge k
 a bounded,
 amplitude-preserving projection is used. At every level the added perturbation
 must satisfy three conditions: (i) zero horizontal mean; (ii) mean
-absolute amplitude as close as possible to \verb|INTERPOLATION_COMPENSATION| times $C_{\Phi,l}$; and (iii) $\Phi_{\min} \le \Phi \le
+absolute amplitude as close as possible to the interpolation-compensation factor times $C_{\Phi,k}$; and (iii) $\Phi_{\min} \le \Phi \le
 \Phi_{\max}$ pointwise. These criteria are met iteratively.
 The added perturbation is taken from a two-parameter family: the
 candidate field $\delta_0$ is scaled by $s$, shifted by $\mu$, and
@@ -252,6 +247,7 @@ the envelope and anisotropy options.
 
 \begin{table}[t]
 \centering
+\small
 \begin{tabular}{llll}
 \hline
 Variable & Dimensions & Units & Description \\
@@ -275,6 +271,7 @@ Variable & Dimensions & Units & Description \\
 \texttt{dz}, \texttt{spheroscale} & $(z)$ & m & cell heights and spheroscale, output grid \\
 \hline
 \texttt{p\_bottom} & $(x,y)$ & Pa & basal pressure (elevated nests only) \\
+\texttt{class\_increments} & $(x,y,z)$ per class & --- & added increments (optional) \\
 \hline
 \end{tabular}
 \caption{Contents of a STEAM output file. $^{\ast}$Diagnostic fields
@@ -295,42 +292,56 @@ from which its hydrostatic integration starts.
 
 \subsection{Nested refinement}
 
-A completed simulation can be ``refined'' to finer resolution over a portion of the subdomain by simply continuing the cascade within the desired region. The nested simulation inherits the parent's state, including  the
+A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The nested simulation inherits the parent's state rather than re-seeding: the
 scalar perturbations (parent field minus its mean profile) and the flux
 field are extracted over the nest region and interpolated trilinearly
-onto the nest's grids; nothing is re-seeded from scratch. The
-amplitude ladder is likewise inherited: the parent's finest-class
+onto the nest's grids. The
+amplitude profiles are likewise inherited: the parent's finest-class
 $C_{\Phi,k}(z)$, scaled by $(k/k_{\mathrm{parent}})^{H_h}$ and
-interpolated to each nest class's vertical grid, extends the single
-ladder anchored at the root outer scale with no discontinuity at the
-overlap scale. The flux requires no special handling: because the
-per-class renormalization restores the volume mean the field entered
-with, a nest keeps the regional flux anomaly it inherited.
+interpolated to each nest class's vertical grid, continues the same
+scale dependence anchored at the root outer scale, with no
+discontinuity at the overlap scale. The flux requires no special
+handling: because the per-class renormalization restores the volume
+mean the field entered with, a nest keeps the regional flux anomaly it
+inherited.
+
+The interpolation-compensation factors depend on the output
+resolution, so inherited content is compensated for the parent's grid
+rather than the nest's finer one. Left uncorrected, the parent's
+finest inherited class would arrive in the nest roughly $2.2\times$
+too weak. A parent intended for refinement therefore stores, when
+requested, each class's added increments on that class's own working
+grid (the \texttt{class\_increments} group of
+Table \ref{tab:output file}; the working grids form a geometric
+pyramid, so the storage is about $1.14\times$ one output-grid field
+per scalar). When the stored increments are present, the nest
+re-scales each inherited class by the ratio of the two compensation
+factors before continuing the cascade, and then re-applies the bounds
+once. Without them, the inherited content keeps the parent's
+convention, and fluctuations at scales near the parent's finest
+classes are correspondingly weak in the nest.
 
 The extraction carries a halo on each non-spanning horizontal side,
 of per-class physical width equal to the turbulon support at that
 class, so that turbulons centered outside the nest still reach into it.
-The halo is context, not domain: it is excluded from every statistic
+The halo provides context only. It is excluded from every statistic
 evaluated over the simulated domain --- the advective-weight
 normalization, the mean absolute multiplier noise, the flux volume
-means, and the bounded amplitude-preserving add --- and it is discarded on
-output. (Bounds are still enforced across the halo, since the next
-class reads gradients and the bound taper from it.) Along any axis the
+means, and the bounded projection --- and it is discarded on output.
+Bounds are still enforced across the halo, because the next class
+reads its gradients and its bound factor. Along any axis the
 nest spans entirely, the parent's periodicity (or aperiodicity) is
-preserved with the parent extent as the period and no halo; a nest
-whose halo would cross a non-periodic parent boundary is rejected. The
-vertical is always aperiodic: the halo is clipped at the ground and
-domain top, and turbulon centers may lie outside the nest's vertical
-range (anywhere between the domain surface and top), with their tails
-reaching in.
+preserved with the parent extent as the period, and no halo is used;
+a nest whose halo would cross a non-periodic parent boundary is
+rejected. The vertical is always aperiodic: the halo is clipped at the
+ground and domain top, and turbulon centers may lie anywhere between
+the domain surface and top, with their tails reaching into the nest.
 
 Each nest's random seed is derived deterministically from the parent's
-seed and the output group name unless given explicitly, and the
-per-class seed spawning is as in a root simulation. Output is written
-as a NetCDF group inside the parent's file with world-absolute
-coordinates, recording its parent group for recursive refinement; an
-elevated nest's basal pressure is taken from the parent's
-three-dimensional pressure field.
+seed and the output group name, unless a seed is given explicitly.
+Per-class seeds are then spawned as in a root simulation. Output is
+written as a NetCDF group inside the parent's file, as described in
+the previous section.
 
 \section{Complete specification of the LES-ensemble comparison}
 \label{ssect:rcemip analysis}
