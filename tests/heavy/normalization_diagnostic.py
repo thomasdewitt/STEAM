@@ -101,12 +101,12 @@ def main():
     h_mean = np.interp(z_out, z_profile, h_profile)
     qt_mean = np.interp(z_out, z_profile, qt_profile)
 
-    lags, haar_h_mean = scaleinvariance.haar_fluctuation_analysis(h_mean, axis=0)
-    _, haar_qt_mean = scaleinvariance.haar_fluctuation_analysis(qt_mean, axis=0)
+    lags, haar_h_mean = scaleinvariance.haar_fluctuation(h_mean, order=1, axis=0)
+    _, haar_qt_mean = scaleinvariance.haar_fluctuation(qt_mean, order=1, axis=0)
 
     # All columns stacked: (n_columns, nz), analyze along axis=1
-    _, haar_h_col = scaleinvariance.haar_fluctuation_analysis(h_columns, axis=1)
-    _, haar_qt_col = scaleinvariance.haar_fluctuation_analysis(qt_columns, axis=1)
+    _, haar_h_col = scaleinvariance.haar_fluctuation(h_columns, order=1, axis=1)
+    _, haar_qt_col = scaleinvariance.haar_fluctuation(qt_columns, order=1, axis=1)
 
     phys_lags = lags * dz_out
 
@@ -273,7 +273,7 @@ def main():
     out_path = Path(__file__).parent / 'normalization_diagnostic.png'
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f"Saved: {out_path}")
-    plt.show()
+    # plt.show()  # headless
 
 
 if __name__ == '__main__':

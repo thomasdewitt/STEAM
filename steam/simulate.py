@@ -94,37 +94,102 @@ FLUX_ALPHA = 1.8
 # remaining cascade (current class and all smaller classes).
 BOUND_BUFFER_MULTIPLE = 3
 
-# Trilinear-regrid retention of the horizontal Haar fluctuation, indexed
-# by the number of regrids a class's deposit undergoes before reaching
-# the final grid (measured against an exact band-limited x,y reference
-# carried through the identical vertical chain; see supplement S1 and
-# turbulon-analysis/archaeology/measure_zoom_retention.py). The first
-# regrid piecewise-linearizes the Nyquist-sampled deposit -- the
-# dominant, one-time loss; later dyadic regrids are near-idempotent,
-# with a slow residual decline from the coarse classes' small starting
-# grids. Index 0 (the finest class, never regridded) is exact; chains
-# longer than the table clamp to the last entry.
-ZOOM_RETENTION = (1.0, 0.626, 0.529, 0.508, 0.500, 0.491, 0.471, 0.461, 0.388)
+# Interpolation compensation for the resolution dependence of the mean
+# absolute turbulon amplitude (2026-07-28 convention, Thomas; replaces
+# the hops-remaining ZOOM_RETENTION bookkeeping, whose factors were
+# defined against the run's own regrid chain and so could not survive a
+# change of output resolution).
+#
+# At s = 1 the output-grid samples of a poorly resolved class coincide
+# with the turbulon centers, so coarse sampling systematically hits the
+# envelope peaks: a class at k/dx_out = 2 reads ~2.6x the mean absolute
+# amplitude of the same deposit sampled finely. The inflation is a
+# property of the OUTPUT sampling alone: after the first trilinear
+# regrid the deposit is the chord polygon through its samples -- a
+# fixed point of later regrids (paper/concept-figs/s2) -- and
+# successively finer sampling of that fixed function converges to its
+# continuum mean absolute value. The factor f(k/dx_out) is defined
+# relative to that chain limit (f -> 1 for well-resolved classes); each
+# class's amplitude is MULTIPLIED by f so every class delivers the same
+# amplitude convention on the output grid. The one-time chord-polygon
+# loss, common to all classes, is absorbed into the lambda = 1/R
+# calibration (HAAR_TO_MHAT below).
+#
+# Measured on the production cascade path (real noise, normalization,
+# anisotropic vertical chain, crop machinery) by single-class A/B runs
+# across output resolutions: tests/heavy/interpolation_compensation.py.
+# Two effects are bundled, and both are real:
+#   (1) sampling inflation at small k/dx -- the big rise 0.36 -> 0.92
+#       over 2..32 (the isotropic toy underestimates it: the vertical
+#       working grids refine as k_z ~ k^{H_z} per octave and stay
+#       under-resolved far longer than the horizontal);
+#   (2) a slow chain leak of ~1-3% PER OCTAVE that persists to at least
+#       k/dx = 256 (per-hop ratios 0.976, 0.973, 0.974, 0.987 over
+#       16..256; the vertical regrids never node-nest, so each hop
+#       re-chords the deposit slightly). The old ZOOM_RETENTION tail
+#       drift (0.461 -> 0.388) was this leak, misread as a small-grid
+#       artifact.
+# Because of (2) there is no finite "well-resolved" plateau; the
+# reference is CHOSEN at k/dx = 512, the outer class of the production
+# square runs (entry extrapolated from the measured 256 -> 512 trend).
+# The choice of reference is a single overall constant absorbed into
+# HAAR_TO_MHAT; only the shape matters. Values 2..64: 384-km-domain
+# probe, 3 seeds (seed spread < 0.3%); 128..256: 96-km-domain deep
+# probe ratios (the two probes agree to 4 digits on their shared
+# 32->64 hop). Classes deeper than 512 clamp to 1 (slightly
+# under-compensated by the ~1%/octave residual leak -- no production
+# config goes deeper).
+#
+# NOTE (nested refinement, OPEN): f depends on the run's own output
+# resolution. A nest's inherited content was deposited by the parent
+# with f(k/dx_parent) but is re-read at the nest's finer resolution,
+# where the correct factor would be larger: the parent's finest class
+# arrives in a nest ~2.2x too weak. A single summed field cannot be
+# correct at two output resolutions at once; resolution pending
+# (per-class increment storage vs. accepting the seam bias).
+INTERPOLATION_COMPENSATION = {2: 0.358, 4: 0.600, 8: 0.800, 16: 0.894,
+                              32: 0.924, 64: 0.950, 128: 0.975,
+                              256: 0.988, 512: 1.0}
+
+
+def _interpolation_compensation(k_over_dx):
+    """f(k/dx_out): log2-linear interpolation of the measured table.
+
+    Clamps to the table ends (>= the last abscissa means well-resolved,
+    f = 1). An empty table disables compensation (used by the
+    measurement harness itself).
+    """
+    if not INTERPOLATION_COMPENSATION:
+        return 1.0
+    xs = np.array(sorted(INTERPOLATION_COMPENSATION), dtype=np.float64)
+    fs = np.array([INTERPOLATION_COMPENSATION[x] for x in xs])
+    if k_over_dx >= xs[-1]:
+        return float(fs[-1])
+    if k_over_dx <= xs[0]:
+        return float(fs[0])
+    return float(np.interp(np.log2(k_over_dx), np.log2(xs), fs))
 
 # Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
-# the mean absolute vertical Haar fluctuation (at scale k_z) of a field of
-# unit-amplitude outer-class turbulons, measured from the envelope shape and
-# the s=1 packing (turbulon centers every k/2), is R = 1.984. Setting
-# lambda = 1/R makes the field's Haar fluctuation at the outer scale equal
-# the mean profile's by construction -- the crossover property checked by
-# tests/heavy/normalization_diagnostic.py.
+# lambda = 1/R, where R is the mean absolute vertical Haar fluctuation (at
+# scale k_z) of a field of unit-amplitude outer-class turbulons synthesized
+# exactly as the cascade delivers them under the INTERPOLATION_COMPENSATION
+# convention (coarse s=1 deposit carried down the regrid chain, reference
+# k/dx = 512). Setting lambda = 1/R makes the field's Haar fluctuation at
+# the outer scale equal the mean profile's by construction -- the crossover
+# property checked by tests/heavy/normalization_diagnostic.py.
 #
-# 2026-07-28: was R = 2.005, re-fit for the Gaussian-weighted admissibility
-# correction in _turbulon_envelope, which lowers the envelope peak from 3 to
-# A_opt = 2.9678. The shift is NOT the 1.07% peak ratio, because old and new
-# kernels differ by a Gaussian rather than a constant factor; it was measured
-# as a kernel-only A/B (same seeds, same packing, so the ratio is clean):
-# R_new/R_old = 0.98963 +/- 0.00001 over 8 seeds, giving 2.005 -> 1.9842.
-# Left unchanged this would have biased deposited amplitudes 1.04% low.
-# NOTE the ratio is from a standalone harness, not a full
-# normalization_diagnostic.py run (that needs the analysis repo); the
-# crossover check should be re-run on Linux before regeneration.
-HAAR_TO_MHAT = 1.0 / 1.984   # ~= 0.504
+# History: R = 2.005 (May calibration) -> 1.9842 (2026-07-28 kernel A/B for
+# the Gaussian-weighted admissibility correction: R_new/R_old = 0.98963 +/-
+# 0.00001 over 8 seeds). 2026-07-28 (later): the INTERPOLATION_COMPENSATION
+# convention re-anchors delivery at the k/dx = 512 reference; at the
+# calibration config's outer class both the old and new conventions sit in
+# their clamp regimes, so the delivered amplitude changes by EXACTLY the
+# removed boost 1/0.388 and R rescales analytically:
+#     R = 1.9842 * 0.388 = 0.7699.
+# (R < 1 now simply reflects the weaker delivery convention; the crossover
+# is what is calibrated, not R's magnitude.) PENDING: end-to-end crossover
+# verification via normalization_diagnostic.py before regeneration.
+HAAR_TO_MHAT = 1.0 / 0.7699   # ~= 1.299
 
 
 def _extremal_levy(alpha, size, rng):
@@ -921,13 +986,14 @@ def cascade_loop(
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
 
-            # Interpolation-retention compensation: amplify this class's
-            # deposit by the inverse of the measured retention of the
-            # regrid chain it has yet to traverse, so the FINAL grid
-            # carries the designed amplitude ladder. The finest class is
-            # never regridded (factor 1).
-            m = min(n_classes - 1 - i, len(ZOOM_RETENTION) - 1)
-            W *= np.float32(1.0 / ZOOM_RETENTION[m])
+            # Interpolation compensation f(k/dx_out): damp poorly
+            # resolved classes so every class delivers the same mean
+            # absolute amplitude convention on the output grid (see
+            # INTERPOLATION_COMPENSATION). The output spacing is half
+            # the finest class by construction, for a root and a nest
+            # alike.
+            W *= np.float32(_interpolation_compensation(
+                2.0 * k / float(grids['k'][n_classes - 1])))
 
             # Convolve (periodic x,y; zero-padded z), then add through the
             # amplitude-preserving bounded projection (2026-07-28 ruling):

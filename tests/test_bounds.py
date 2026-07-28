@@ -151,13 +151,14 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
     )
 
     # With C = 1, S = 1, g = 1, the captured amplitude is the normalized
-    # product times the interpolation-retention compensation of the
-    # first class (n_classes - 1 regrids ahead of it).
+    # product times the interpolation compensation f(k/dx_out) of the
+    # first (outermost, poorly-resolved-relative-to-nothing) class.
     h_W = captured[0]      # first class, h
     qt_W = captured[1]     # first class, qt
-    m = min(len(grids["k"]) - 1, len(sm.ZOOM_RETENTION) - 1)
+    k_over_dx = 2.0 * float(grids["k"][0]) / float(grids["k"][-1])
     np.testing.assert_allclose(h_W.mean(axis=(0, 1)),
-                               1.0 / sm.ZOOM_RETENTION[m], rtol=1e-5)
+                               sm._interpolation_compensation(k_over_dx),
+                               rtol=1e-5)
     np.testing.assert_array_equal(qt_W, 0.0)
 
 
