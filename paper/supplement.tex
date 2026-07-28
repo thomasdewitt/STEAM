@@ -134,7 +134,26 @@ As described below, at each cascade step the fields are trilinearly interpolated
 
 Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the output samples land preferentially near the envelope peaks, because at $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $2.8\times$ the amplitude of a well-resolved one. Second, at large $k/\Delta x$ a slower loss remains: each regrid resamples the piecewise-linear field at nodes that do not coincide with the previous ones, and this removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the deepest class used by any simulation in this work. The choice of reference is a single overall constant, absorbed into the calibration $\lambda$ above.
 
-The factors are stored as per-regrid retentions: the fraction of the mean absolute amplitude that survives one interpolation step. A retention is a ratio between two adjacent resolutions, so it does not depend on the reference, and a class's factor is the product of the retentions of the regrids its deposit actually undergoes. This composition is what accommodates cascades that cross the spheroscale. The slow per-octave loss above is a property of the anisotropic vertical grids, which refine by only $2^{H_z}$ per step and never place their nodes on the previous grid's. Below the spheroscale, where $k_z = k$, the vertical grids refine dyadically instead, and the per-step losses fall off geometrically within a few octaves. The retentions were therefore measured separately in the two regimes. Each regrid step takes the retention of its own regime at each height level, so a cascade crossing the spheroscale composes isotropic retentions below it and anisotropic retentions above it; the crossing step itself is approximated by the regime of its destination grid. Within either regime the spheroscale cancels from every grid-spacing ratio, so the retentions do not depend on its value.
+The factors are stored as per-regrid retentions: the fraction of the mean absolute amplitude that survives one interpolation step. A retention is a ratio between two adjacent resolutions, so it does not depend on the reference, and a class's factor is the product of the retentions of the regrids its deposit actually undergoes. This composition is what accommodates cascades that cross the spheroscale. The slow per-octave loss above is a property of the anisotropic vertical grids, which refine by only $2^{H_z}$ per step and never place their nodes on the previous grid's. Below the spheroscale, where $k_z = k$, the vertical grids refine dyadically instead, and the per-step losses fall off geometrically within a few octaves. The retentions were therefore measured separately in the two regimes (Table \ref{tab:hop retention}). Each regrid step takes the retention of its own regime at each height level, so a cascade crossing the spheroscale composes isotropic retentions below it and anisotropic retentions above it; the crossing step itself is approximated by the regime of its destination grid. Within either regime the spheroscale cancels from every grid-spacing ratio, so the retentions do not depend on its value.
+
+The specific rule is as follows. Write $r(y)$ for the retention of one regrid, with $y$ the deposit's value of $k/\Delta x$ on the grid the regrid starts from; a deposit starts at $y = 2$ on its own working grid, and $y$ doubles at each subsequent regrid. Intermediate $y$ (which arise for $n_c > 1$) are interpolated linearly in $\log_2 y$, and regrids beyond the last tabulated $y$ retain 1. At each level $z$, a class about to traverse regrids $m = 1, 2, \dots$ is multiplied at deposit time by
+\begin{align}
+  f(z) = D_{512} \Big/ \prod_m r_{\rho_m(z)}(y_m), \qquad
+  D_{512} = \prod_{y = 2, 4, \dots, 256} r_{\mathrm{can}}(y) \approx 0.358,
+\end{align}
+where $\rho_m(z)$ selects the column of Table \ref{tab:hop retention} by the regime of the $m$-th regrid's destination grid at that level, and $D_{512}$ is the delivery of the reference chain. The subsequent regrids then reduce the deposit by exactly the product being divided by, so every class arrives at the output grid with the same effective normalization $D_{512}$. For a run with no classes below the spheroscale this reduces to Table \ref{tab:interpolation compensation}.
+
+\begin{table}
+\centering
+\begin{tabular}{lcccccccc}
+\hline
+$y$ & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 \\
+$r_{\mathrm{can}}(y)$ & 0.597 & 0.750 & 0.895 & 0.967 & 0.973 & 0.974 & 0.987 & 0.988 \\
+$r_{\mathrm{iso}}(y)$ & 0.512 & 0.852 & 0.942 & 0.983 & 0.991 & --- & --- & --- \\
+\hline
+\end{tabular}
+\caption{Per-regrid retentions in the anisotropic (canonical) and isotropic (sub-spheroscale) regimes. Isotropic entries beyond $y = 32$ are indistinguishable from 1 at the measurement precision.}\label{tab:hop retention}
+\end{table}
 
 \begin{table}
 \centering
