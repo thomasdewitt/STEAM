@@ -273,7 +273,10 @@ def write_class_increments(output_path, increment_dir, grids,
     for i in range(n_classes):
         sub = inc_root.createGroup(f"c{i:02d}")
         arrays = {}
-        for name in ("h", "qt"):
+        names = [("h", "J/kg"), ("qt", "kg/kg")]
+        if (increment_dir / f"c{i:02d}_flux.npy").exists():
+            names.append(("flux", "1"))
+        for name, _ in names:
             arrays[name] = np.load(increment_dir / f"c{i:02d}_{name}.npy")
         nx_i, ny_i, nz_i = arrays["h"].shape
         sub.createDimension("x", nx_i)
@@ -282,7 +285,7 @@ def write_class_increments(output_path, increment_dir, grids,
         z_var = sub.createVariable("z", "f4", ("z",))
         z_var[:] = np.asarray(grids['z_arrays'][i], dtype=np.float32)
         z_var.units = "m"
-        for name, units in (("h", "J/kg"), ("qt", "kg/kg")):
+        for name, units in names:
             v = sub.createVariable(
                 name, "f4", ("x", "y", "z"),
                 zlib=compress, complevel=4 if compress else 0,

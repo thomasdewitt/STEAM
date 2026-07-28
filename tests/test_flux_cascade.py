@@ -24,7 +24,9 @@ def _root_grids():
 
 
 def test_flux_cascade_default_scale():
-    assert sm.FLUX_SCALE == 0.21
+    # c = (0.1 / 1.681)^(1/1.8): the 2026-07-28 re-fit with the
+    # interpolation compensation applied to the flux increments.
+    assert sm.FLUX_SCALE == 0.2085
     assert sm.FLUX_ALPHA == 1.8
 
 
@@ -155,8 +157,11 @@ def test_flux_only_reports_clipping_and_keeps_flux_nonnegative():
     assert np.all(flux >= 0)
     # Heavy clipping plus the between-class regrid; the per-class renorm only
     # promises to restore each class's own entering mean (larger drift for
-    # the extreme spike field this absurd c produces).
-    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=5e-2)
+    # the extreme spike field this absurd c produces). rtol widened 5e-2 ->
+    # 1e-1 when the interpolation compensation reached the flux increments
+    # (2026-07-28): the damped realization lands at +7.3% for this seed —
+    # same between-class-regrid drift mechanism, different realization.
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=1e-1)
 
 
 def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch):
@@ -168,7 +173,7 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu", window=None):
+                     device="cpu", window=None, amplitude_factor=None):
         return np.ones_like(flux), {"n_clipped": 0}
 
     def record_convolution(field, kernel, device="cpu"):

@@ -131,7 +131,7 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu", window=None):
+                     device="cpu", window=None, amplitude_factor=None):
         return np.ones_like(flux), {"n_clipped": 0}
 
     def capture_convolution(field, kernel, device="cpu"):
@@ -188,3 +188,73 @@ def test_simulate_output_within_bounds(tmp_path):
     assert h_3d.max() <= h_max + h_tol
     assert qt_3d.min() >= qt_min - qt_tol
     assert qt_3d.max() <= qt_max + qt_tol
+
+
+# ---------------------------------------------------------------------------
+# Interpolation-compensation composition (hop-retention primitive)
+# ---------------------------------------------------------------------------
+
+def test_compensation_profiles_reduce_to_canonical_table():
+    """With every class above the spheroscale, the composed per-level
+    profiles equal the pure-canonical scalar table exactly."""
+    k_values = np.array([8000.0, 4000.0, 2000.0, 1000.0])
+    z_profile = np.arange(10, dtype=np.float64) * 100.0
+    z_arrays = [z_profile.copy() for _ in k_values]
+    ls = np.full_like(z_profile, 100.0)     # all k >= ls: canonical
+    profiles = sm._compensation_profiles(
+        k_values, z_arrays, ls, z_profile,
+        'piecewise_isotropic_below_spheroscale')
+    for i, k in enumerate(k_values):
+        expected = sm._interpolation_compensation(2.0 * k / k_values[-1])
+        np.testing.assert_allclose(profiles[i], expected, rtol=1e-6)
+
+
+def test_compensation_profiles_switch_regime_below_spheroscale():
+    """Sub-spheroscale levels compose isotropic hop retentions.
+
+    With the spheroscale between class scales, levels where the
+    destination classes sit below ls must use the isotropic per-hop
+    factors — larger early losses, faster convergence — so the composed
+    factor differs from the canonical one, and matches an explicit
+    product of HOP_RETENTION['isotropic'] entries where the whole chain
+    is isotropic.
+    """
+    k_values = np.array([8000.0, 4000.0, 2000.0, 1000.0])
+    z_profile = np.arange(10, dtype=np.float64) * 100.0
+    z_arrays = [z_profile.copy() for _ in k_values]
+    # ls huge: every destination class below ls -> fully isotropic chain
+    ls_iso = np.full_like(z_profile, 1e6)
+    profiles_iso = sm._compensation_profiles(
+        k_values, z_arrays, ls_iso, z_profile,
+        'piecewise_isotropic_below_spheroscale')
+    d_ref = sm._canonical_delivery_reference()
+    r = sm.HOP_RETENTION['isotropic']
+    # class 0 (k/dx = 16): hops at y = 2, 4, 8 in the isotropic regime
+    np.testing.assert_allclose(
+        profiles_iso[0], d_ref / (r[2] * r[4] * r[8]), rtol=1e-6)
+    # 'canonical' anisotropy option ignores the spheroscale entirely
+    profiles_can = sm._compensation_profiles(
+        k_values, z_arrays, ls_iso, z_profile, 'canonical')
+    for i, k in enumerate(k_values):
+        expected = sm._interpolation_compensation(2.0 * k / k_values[-1])
+        np.testing.assert_allclose(profiles_can[i], expected, rtol=1e-6)
+
+
+def test_simulate_smoke_with_subspheroscale_classes(tmp_path):
+    """A cascade crossing the spheroscale runs and respects bounds."""
+    nz = 50
+    z = np.arange(nz) * 30.0
+    h = 340e3 - 20e3 * (z / z.max())
+    qt = 0.018 - 0.016 * (z / z.max())
+    out = tmp_path / "subsphero.nc"
+    simulate(h, qt, nx=16, ny=16, dx=500, dy=500,
+             outer_scale=8000, spheroscale=3000.0,
+             domain_height=5200, profile_dz=30,  # > k_z_L = 5176 m (gate)
+             output_path=out, seed=11,
+             h_min=315 * 1004, h_max=355 * 1004, qt_min=0.0, qt_max=0.03,
+             anisotropy='piecewise_isotropic_below_spheroscale')
+    with netCDF4.Dataset(out) as ds:
+        h_3d = ds["h"][:]
+        qt_3d = ds["qt"][:]
+    assert np.all(np.isfinite(h_3d)) and np.all(np.isfinite(qt_3d))
+    assert qt_3d.min() >= -1e-9

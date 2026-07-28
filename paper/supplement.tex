@@ -137,7 +137,9 @@ or overshoots the domain top, with the overshooting cell retained. The resulting
 $\le 1$ so that they tile $L_z$ exactly. For a constant spheroscale this reduces
 to a uniform grid at least as fine as the Nyquist target.
 
-As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. Sampling and interpolation do not preserve the mean absolute value of the turbulon perturbations, and so small turbulons that are poorly resolved on the output grid will introduce more variability than expected by the $C_{\Phi,k}$ factors alone. To account for this, perturbation fields are multiplied by a constant factor \verb|INTERPOLATION_COMPENSATION| that compensates for the resolution dependence of the mean absolute turbulon amplitude. The factor depends on $k/\Delta x$, the turbulon size in units of the output grid spacing, and is measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations. Two effects contribute. At small $k/\Delta x$ the output samples land preferentially near the envelope peaks --- at $s=1$ the grid points coincide with the turbulon centers --- so a marginally resolved class reads up to $2.8\times$ the amplitude of a well-resolved one. At large $k/\Delta x$ a slower effect remains: each regrid resamples the piecewise-linear field at nodes that do not coincide with the previous ones, which reduces the amplitude by 1--3\% per octave out to at least $k/\Delta x = 256$. There is therefore no fully converged reference; the factors in Table \ref{tab:interpolation compensation} are normalized to $k/\Delta x = 512$, the deepest class used by any simulation in this work, and the choice of reference is a single overall constant absorbed into the calibration $\lambda$ described above.
+As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. Sampling and interpolation do not preserve the mean absolute value of the turbulon perturbations, and so small turbulons that are poorly resolved on the output grid will introduce more variability than expected by the $C_{\Phi,k}$ factors alone. To account for this, perturbation fields are multiplied by a constant factor \verb|INTERPOLATION_COMPENSATION| that compensates for the resolution dependence of the mean absolute turbulon amplitude. The factor depends on $k/\Delta x$, the turbulon size in units of the output grid spacing, and is measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations. Two effects contribute. At small $k/\Delta x$ the output samples land preferentially near the envelope peaks --- at $s=1$ the grid points coincide with the turbulon centers --- so a marginally resolved class reads up to $2.8\times$ the amplitude of a well-resolved one. At large $k/\Delta x$ a slower effect remains: each regrid resamples the piecewise-linear field at nodes that do not coincide with the previous ones, which reduces the amplitude by 1--3\% per octave out to at least $k/\Delta x = 256$. There is therefore no fully converged reference; the factors in Table \ref{tab:interpolation compensation} are normalized to $k/\Delta x = 512$, the deepest class used by any simulation in this work, and the choice of reference is a single overall constant absorbed into the calibration $\lambda$ described above. The same factor multiplies the flux increments.
+
+The factors are stored as per-regrid retentions --- the fraction of the mean absolute amplitude surviving each interpolation step, a ratio of adjacent-resolution runs that is independent of any reference --- and a class's factor is composed as the product over the regrids its deposit actually undergoes. This makes the factors regime-aware: the slow per-octave decline above is a property of the anisotropic vertical grids, which refine by $2^{H_z}$ per step and never share nodes with their predecessors, while for size classes below the spheroscale (where $k_z = k$) the vertical grids refine dyadically and the per-step losses instead fall off geometrically, reaching 1 within a few octaves. The retentions were measured separately in the two regimes; each regrid step takes the retention of its own regime at each level, so a cascade that crosses the spheroscale uses the isotropic values below it and the anisotropic values above it, with the crossing step approximated by the regime of its destination grid. Within either regime the retentions are independent of the spheroscale itself, which cancels from every grid-spacing ratio.
 
 \begin{table}
 \centering
@@ -169,7 +171,7 @@ surface or above the domain top. This noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly (not shown). The flux is updated additively as
-$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$ and then clipped by setting any negative values to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
+$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$, with the increment multiplied by the same \verb|INTERPOLATION_COMPENSATION| factor as the scalar amplitudes (next section), and then clipped by setting any negative values to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
 mean the field had before the perturbation was added. Level means are not
 individually constrained.
 The signed scalar noise $S_k$ is defined as the increment $(e^\gamma -
@@ -410,10 +412,11 @@ exponent is $H_h = 0.45$ and the vertical-anisotropy exponent
 $H_z = 5/9$; turbulons use the Mexican-hat envelope; one scale class per
 octave ($n_c = 1$). The turbulon flux component is active: flux
 increments drawn from extremal ($\beta = -1$) L\'evy noise with $\alpha
-= 1.8$ and noise amplitude $c = 0.101$, targeting a realized flux
+= 1.8$ and noise amplitude $c = 0.142$, targeting a realized flux
 intermittency of $C_1 = 0.05$ through the calibration $C_1 =
-3.097\,c^{1.8}$ (box-coarse-grained $K(2)$ on the flux-only cascade,
-re-fit under the canonical algorithm; \texttt{turbulon-analysis/calibration}).
+1.681\,c^{1.8}$ (box-coarse-grained $K(2)$ on the flux-only cascade,
+re-fit 2026-07-28 with the interpolation compensation applied to the
+flux increments; \texttt{turbulon-analysis/calibration}).
 
 For the channel comparison STEAM runs on a $2048\times 128$ grid at
 $\Delta x = 3$~km ($6144\times 384$~km$^2$, matching the host geometry

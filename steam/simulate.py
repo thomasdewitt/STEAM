@@ -82,12 +82,13 @@ SUPPORT_FACTOR = 3
 # turbulon-analysis/calibration); at alpha=2 the generator is Gaussian and the
 # whole scheme reduces to the lognormal cascade.
 # FLUX_SCALE is set so the realized flux C1 = 0.1, the measured TWPICE
-# horizontal-wind intermittency; C1 = 1.674 c^1.8 from calibration
-# (turbulon-analysis/calibration), so c = (0.1/1.674)^(1/1.8) = 0.21.
-# NOTE: that calibration was fit under the since-removed n_flux_substeps=4
-# configuration (flux advanced four times per octave); it must be re-fit for
-# the single-advance-per-class scheme.
-FLUX_SCALE = 0.21
+# horizontal-wind intermittency; C1 = 1.681 c^1.8 from calibration
+# (turbulon-analysis/calibration, re-fit 2026-07-28 with the
+# interpolation compensation applied to the flux increments; free
+# exponent 1.751 vs the alpha-stable prediction 1.8, R^2 0.998), so
+# c = (0.1/1.681)^(1/1.8) = 0.2085. Production runs targeting C1 = 0.05
+# override this with c = 0.1419.
+FLUX_SCALE = 0.2085
 FLUX_ALPHA = 1.8
 
 # Taper buffer in units of the summed mean-absolute amplitudes of the
@@ -147,17 +148,99 @@ BOUND_BUFFER_MULTIPLE = 3
 # arrives in a nest ~2.2x too weak. A single summed field cannot be
 # correct at two output resolutions at once; resolution pending
 # (per-class increment storage vs. accepting the seam bias).
-INTERPOLATION_COMPENSATION = {2: 0.358, 4: 0.600, 8: 0.800, 16: 0.894,
-                              32: 0.924, 64: 0.950, 128: 0.975,
-                              256: 0.988, 512: 1.0}
+# The PRIMITIVE the factors are built from is the per-hop retention
+# r(y): the ratio of a deposit's delivered mean absolute amplitude after
+# one regrid hop to its value before, with y the deposit's resolution
+# ratio (k/dx of the SOURCE grid) at that hop. r is a reference-free
+# measurable (a ratio of adjacent same-config runs), which is what makes
+# regimes composable: a class's total delivery is the product of its
+# chain's per-hop retentions, each hop taking the r of ITS OWN regime --
+# 'canonical' where the destination class's vertical grid follows
+# k_z ~ k^{H_z} (non-nesting 2^{5/9} vertical refinement: slow tail),
+# 'isotropic' where the piecewise option puts the destination class
+# below the local spheroscale (dyadic, node-nested vertical: fast
+# geometric convergence). Sub-spheroscale cascades (Thomas, 2026-07-28)
+# thereby get the right factors level by level, with the
+# spheroscale-crossing hop approximated by its destination regime
+# (error confined to that one octave). Zero-hop delivery is
+# regime-independent -- the discrete kernel is the same array in index
+# space and the s=1 packing is the same -- so no cross-regime constant
+# is needed.
+#
+# The compensation factor for a class is f = D_REF / D(chain), with
+# D(chain) the product of its per-hop retentions and D_REF the delivery
+# of the canonical 9-octave chain (k/dx = 512, the square-run outer
+# class) -- the reference the lambda calibration (HAAR_TO_MHAT) is
+# anchored to. Hops beyond the tables retain 1.
+HOP_RETENTION = {
+    # canonical: 384-km production probe (3 seeds, spread < 0.3%) for
+    # y = 2..32, spliced with the 96-km deep probe for 64..256 (the two
+    # agree to 4 digits on the shared 32 hop); 256 entry extrapolated
+    # from the decaying-loss trend.
+    'canonical': {2: 0.5971, 4: 0.7504, 8: 0.8949, 16: 0.9669,
+                  32: 0.9726, 64: 0.9744, 128: 0.9872, 256: 0.9880},
+    # isotropic: spheroscale >> L probe (piecewise option, k_z = k all
+    # classes); losses decay geometrically ~x0.5/hop, so the table is
+    # short. 32 entry from the k/dx = 64 tail runs (2 seeds, 0.9912 /
+    # 0.9907); truncating beyond leaves ~1% cumulative, comparable to
+    # the canonical table's own tail truncation.
+    'isotropic': {2: 0.5121, 4: 0.8517, 8: 0.9420, 16: 0.9827,
+                  32: 0.9910},
+}
+
+
+def _hop_retention(y, regime):
+    """r(y) for one regrid hop: log2-linear interpolation of the table.
+
+    y is the deposit's k/dx on the hop's source grid. Beyond the last
+    tabulated y the hop retains 1 (the deposit is well resolved).
+    """
+    table = HOP_RETENTION[regime]
+    xs = np.array(sorted(table), dtype=np.float64)
+    rs = np.array([table[x] for x in xs])
+    if y >= 2.0 * xs[-1]:
+        return 1.0
+    if y <= xs[0]:
+        return float(rs[0])
+    return float(np.interp(np.log2(y), np.log2(xs), rs))
+
+
+def _canonical_delivery_reference():
+    """D_REF: delivery of the canonical k/dx = 512 chain (8 hops)."""
+    d = 1.0
+    for y in sorted(HOP_RETENTION['canonical']):
+        d *= HOP_RETENTION['canonical'][y]
+    return d
+
+
+def _build_canonical_table():
+    """The pure-canonical f(k/dx) table, derived from HOP_RETENTION.
+
+    Kept as a module-level dict both as the master ON/OFF switch (the
+    measurement harness empties it to measure raw deliveries) and for
+    the scalar fast path _interpolation_compensation.
+    """
+    d_ref = _canonical_delivery_reference()
+    table, d = {}, 1.0
+    for y in sorted(HOP_RETENTION['canonical']):
+        table[y] = d_ref / d
+        d *= HOP_RETENTION['canonical'][y]
+    table[2 * max(HOP_RETENTION['canonical'])] = 1.0
+    return table
+
+
+INTERPOLATION_COMPENSATION = _build_canonical_table()
+# ~= {2: 0.358, 4: 0.600, 8: 0.800, 16: 0.894, 32: 0.924, 64: 0.950,
+#     128: 0.975, 256: 0.988, 512: 1.0}
 
 
 def _interpolation_compensation(k_over_dx):
-    """f(k/dx_out): log2-linear interpolation of the measured table.
+    """Pure-canonical f(k/dx_out): log2-linear interpolation.
 
-    Clamps to the table ends (>= the last abscissa means well-resolved,
-    f = 1). An empty table disables compensation (used by the
-    measurement harness itself).
+    Clamps to the table ends (>= the last abscissa means the reference
+    chain or deeper, f = 1). An empty table disables compensation (used
+    by the measurement harness itself). For height-dependent regimes use
+    _compensation_profiles.
     """
     if not INTERPOLATION_COMPENSATION:
         return 1.0
@@ -168,6 +251,65 @@ def _interpolation_compensation(k_over_dx):
     if k_over_dx <= xs[0]:
         return float(fs[0])
     return float(np.interp(np.log2(k_over_dx), np.log2(xs), fs))
+
+
+def _hop_retention_profile(y, k_dest, ls_z, anisotropy):
+    """Per-level retention of one hop, regime chosen level by level.
+
+    The hop's destination grid is class k_dest's; where the piecewise
+    option puts k_dest below the local spheroscale the vertical grid is
+    isotropic (dyadic), elsewhere canonical.
+    """
+    r_can = _hop_retention(y, 'canonical')
+    if anisotropy != 'piecewise_isotropic_below_spheroscale':
+        return np.full(np.shape(ls_z), r_can)
+    r_iso = _hop_retention(y, 'isotropic')
+    return np.where(k_dest < np.asarray(ls_z), r_iso, r_can)
+
+
+def _nest_continuation_ratio(k_j, dx_parent, k_values_nest, ls_z,
+                             anisotropy):
+    """Per-level re-scaling for inherited class-k_j content in a nest.
+
+    The parent delivered the class correctly for ITS output grid; the
+    nest's additional regrid hops (parent output grid -> nest class
+    grids) retain less, so the correction is one over the product of
+    those hops' retentions. For a pure-canonical chain this telescopes
+    to f(k_j/dx_nest) / f(k_j/dx_parent).
+    """
+    D = np.ones(np.shape(ls_z), dtype=np.float64)
+    y = float(k_j) / float(dx_parent)
+    for k_m in k_values_nest:
+        D *= _hop_retention_profile(y, float(k_m), ls_z, anisotropy)
+        y = 2.0 * float(k_j) / float(k_m)
+    return 1.0 / D
+
+
+def _compensation_profiles(k_values, z_arrays, spheroscale_profile,
+                           z_profile, anisotropy):
+    """Per-class, per-level compensation factors f_i(z) = D_REF / D_i(z).
+
+    D_i(z) composes the per-hop retentions of class i's actual regrid
+    chain, each hop in its own regime at each level. Reduces exactly to
+    the pure-canonical table when no class sits below the spheroscale.
+    Applied to the scalar amplitudes AND the flux increment (Thomas's
+    ruling, 2026-07-28: "the flux should have the same normalization").
+    """
+    n = len(k_values)
+    if not INTERPOLATION_COMPENSATION:
+        return [np.ones(len(z_arrays[i]), dtype=np.float32)
+                for i in range(n)]
+    d_ref = _canonical_delivery_reference()
+    out = []
+    for i in range(n):
+        ls_z = np.interp(z_arrays[i], z_profile, spheroscale_profile)
+        D = np.ones(ls_z.shape, dtype=np.float64)
+        for m in range(i + 1, n):
+            y = 2.0 * float(k_values[i]) / float(k_values[m - 1])
+            D *= _hop_retention_profile(y, float(k_values[m]), ls_z,
+                                        anisotropy)
+        out.append((d_ref / D).astype(np.float32))
+    return out
 
 # Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
 # lambda = 1/R, where R is the mean absolute vertical Haar fluctuation (at
@@ -634,6 +776,10 @@ def simulate(
         import tempfile
         increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_"))
 
+    comp_k = _compensation_profiles(k_values, grids['z_arrays'],
+                                    spheroscale_profile, z_profile,
+                                    anisotropy)
+
     h_pert, qt_pert, flux_field, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
@@ -647,6 +793,7 @@ def simulate(
         turbulon_shape=turbulon_shape,
         device=device,
         increment_dir=increment_dir,
+        comp_k=comp_k,
     )
 
     # Construct final 3D fields
@@ -761,6 +908,7 @@ def cascade_loop(
     zero_top=True,
     device='cpu',
     increment_dir=None,
+    comp_k=None,
 ):
     """Run the multi-scale turbulon cascade over all scale classes.
 
@@ -861,6 +1009,18 @@ def cascade_loop(
                 f"(expected adjacent-class ratio {expected_ratio})"
             )
 
+    # Interpolation-compensation profiles: per-class, per-level f(z)
+    # multiplying the scalar amplitudes and the flux increments. Callers
+    # with height-dependent regimes (simulate/refine) pass composed
+    # profiles from _compensation_profiles; the None default falls back
+    # to the pure-canonical scalar table — correct whenever no class
+    # sits below the spheroscale.
+    if comp_k is None:
+        k_fin = float(grids['k'][n_classes - 1])
+        comp_k = [np.full(int(grids['nz'][i]), np.float32(
+                      _interpolation_compensation(2.0 * grids['k'][i] / k_fin)))
+                  for i in range(n_classes)]
+
     # Determine whether we have per-class seeds or a shared Generator
     use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
 
@@ -957,11 +1117,19 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
+        if increment_dir is not None:
+            flux_before = flux.copy()
         S_k, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
-            device=device, window=window,
+            device=device, window=window, amplitude_factor=comp_k[i],
         )
+        if increment_dir is not None:
+            # Net flux change of this class (increment + clip + renorm),
+            # for the nest-side compensation re-scaling (see refine).
+            np.subtract(flux, flux_before, out=flux_before)
+            np.save(Path(increment_dir) / f"c{i:02d}_flux.npy", flux_before)
+            del flux_before
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -1017,14 +1185,13 @@ def cascade_loop(
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
 
-            # Interpolation compensation f(k/dx_out): damp poorly
+            # Interpolation compensation f(k/dx_out, z): damp poorly
             # resolved classes so every class delivers the same mean
             # absolute amplitude convention on the output grid (see
-            # INTERPOLATION_COMPENSATION). The output spacing is half
-            # the finest class by construction, for a root and a nest
-            # alike.
-            W *= np.float32(_interpolation_compensation(
-                2.0 * k / float(grids['k'][n_classes - 1])))
+            # HOP_RETENTION / _compensation_profiles). Per level, so a
+            # cascade crossing the spheroscale gets isotropic factors
+            # below it and canonical above.
+            W *= comp_k[i][np.newaxis, np.newaxis, :]
 
             # Convolve (periodic x,y; zero-padded z), then add through the
             # amplitude-preserving bounded projection (2026-07-28 ruling):
@@ -1088,7 +1255,7 @@ def _inner_view(field, window):
 def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
-    device='cpu', window=None,
+    device='cpu', window=None, amplitude_factor=None,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -1121,6 +1288,13 @@ def _advance_flux(
     ``window`` (see _inner_view) is the simulated domain, excluding a nest's
     halo. Both the volume means above and the mean absolute multiplier noise
     are taken over it; None means the whole array, as for a root.
+
+    ``amplitude_factor`` (1D per-level float32 array or None) multiplies
+    the flux increment before it is added -- the interpolation
+    compensation f(k/dx_out), applied to the flux exactly as to the
+    scalars (Thomas's ruling, 2026-07-28). The scalar noise S_k is
+    computed from the UNdamped increment; it is normalized per level
+    downstream, so a per-level factor would cancel there anyway.
     """
     s_x, s_y, s_z = sparsity_factors
     # Captured before the increment: this is what the renormalization restores.
@@ -1149,6 +1323,9 @@ def _advance_flux(
         scalar_amplitude *= np.float32(1.0 / mean_abs)
 
     noise *= flux
+    if amplitude_factor is not None:
+        noise *= np.asarray(amplitude_factor,
+                            dtype=np.float32)[np.newaxis, np.newaxis, :]
     flux += CONVOLVE(noise, kernel, device=device)
 
     n_clipped = int(np.count_nonzero(flux < 0))
@@ -1263,9 +1440,13 @@ def simulate_flux_only(
             flux = zoom_trilinear(flux, shape)
 
         rng = np.random.default_rng(seeds[i])
+        # Same interpolation compensation as the full model (canonical
+        # regime), so the c -> C1 calibration reflects production.
+        comp_i = np.full(shape[2], np.float32(_interpolation_compensation(
+            2.0 * float(k) / float(grids['k'][n_classes - 1]))))
         scalar_amplitude, advance = _advance_flux(
             flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
-            n_zero, zero_bottom, zero_top,
+            n_zero, zero_bottom, zero_top, amplitude_factor=comp_i,
         )
         del scalar_amplitude
 
@@ -2143,14 +2324,23 @@ def refine(
             inc_root = (ds_inc if parent_group == '/'
                         else ds_inc[parent_group])["class_increments"]
             n_par = len(k_values_parent)
+            ls_slice = np.interp(z_coords_slice, z_profile,
+                                 spheroscale_profile)
+            flux_mean_0 = float(flux_pad.mean(dtype=np.float64))
             for j in range(n_par):
                 k_j = float(k_values_parent[j])
-                ratio = (_interpolation_compensation(k_j / dx)
-                         / _interpolation_compensation(k_j / parent_dx))
-                if abs(ratio - 1.0) < 1e-3:
+                # Per-level ratio composed over the nest's own regrid
+                # chain, regime by regime (sub-spheroscale nest classes
+                # take isotropic hop retentions).
+                ratio_z = _nest_continuation_ratio(
+                    k_j, parent_dx, k_values, ls_slice, anisotropy)
+                if float(np.max(np.abs(ratio_z - 1.0))) < 1e-3:
                     continue
-                for name, pert_pad in (("h", h_pert_pad),
-                                       ("qt", qt_pert_pad)):
+                delta_z = (ratio_z - 1.0).astype(np.float32)
+                targets = [("h", h_pert_pad), ("qt", qt_pert_pad)]
+                if "flux" in inc_root[f"c{j:02d}"].variables:
+                    targets.append(("flux", flux_pad))
+                for name, pert_pad in targets:
                     inc = np.asarray(
                         inc_root[f"c{j:02d}"].variables[name][:],
                         dtype=np.float32)
@@ -2159,15 +2349,23 @@ def refine(
                             inc, (int(parent_grids['nx'][m]),
                                   int(parent_grids['ny'][m]),
                                   int(parent_grids['nz'][m])))
-                    pert_pad += (np.float32(ratio - 1.0)
+                    pert_pad += (delta_z[np.newaxis, np.newaxis, :]
                                  * inc[np.ix_(x_indices, y_indices,
                                               z_indices)])
                     del inc
             ds_inc.close()
-            # Scaling content up can push the field past a bound; restore
-            # pointwise bounds with the mean-preserving projection once.
+            # Scaling content up can push the fields past their limits;
+            # restore the scalar bounds with the mean-preserving
+            # projection once, and the flux's positivity with a clip
+            # whose bias is corrected by restoring the volume mean the
+            # region carried before the correction (the same corrector
+            # philosophy as _advance_flux).
             _project_onto_bounds(h_pert_pad, h_mean_1d, h_min, h_max)
             _project_onto_bounds(qt_pert_pad, qt_mean_1d, qt_min, qt_max)
+            np.maximum(flux_pad, np.float32(0.0), out=flux_pad)
+            flux_mean_1 = float(flux_pad.mean(dtype=np.float64))
+            if flux_mean_1 > 0:
+                flux_pad *= np.float32(flux_mean_0 / flux_mean_1)
     elif INTERPOLATION_COMPENSATION and not parent_has_increments:
         print("NOTE: parent stored no class_increments; inherited content "
               "keeps the parent's interpolation-compensation reference "
@@ -2266,6 +2464,9 @@ def refine(
         zero_bottom=at_ground,
         zero_top=at_top,
         device=device,
+        comp_k=_compensation_profiles(k_values, grids['z_arrays'],
+                                      spheroscale_profile, z_profile,
+                                      anisotropy),
     )
 
     # Discard the halo.
