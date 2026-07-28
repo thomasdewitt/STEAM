@@ -150,10 +150,14 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
         0, (1, 1, 1), np.random.SeedSequence(4).spawn(len(grids["k"])),
     )
 
-    # With C = 1, S = 1, g = 1, the captured amplitude is the normalized W.
+    # With C = 1, S = 1, g = 1, the captured amplitude is the normalized
+    # product times the interpolation-retention compensation of the
+    # first class (n_classes - 1 regrids ahead of it).
     h_W = captured[0]      # first class, h
     qt_W = captured[1]     # first class, qt
-    np.testing.assert_allclose(h_W.mean(axis=(0, 1)), 1.0, rtol=1e-5)
+    m = min(len(grids["k"]) - 1, len(sm.ZOOM_RETENTION) - 1)
+    np.testing.assert_allclose(h_W.mean(axis=(0, 1)),
+                               1.0 / sm.ZOOM_RETENTION[m], rtol=1e-5)
     np.testing.assert_array_equal(qt_W, 0.0)
 
 
