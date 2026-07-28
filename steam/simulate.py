@@ -332,6 +332,7 @@ def simulate(
     anisotropy='canonical',
     compress=None,
     device='cpu',
+    save_class_increments=False,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -399,6 +400,16 @@ def simulate(
         working set off the host — the host holds only its persistent float32
         fields. A 'cuda' request with no usable GPU is an error, never a silent
         CPU fall back.
+    save_class_increments : bool
+        If True, store each class's actually-added h and qt increments, on
+        that class's own working grid, in a ``class_increments`` group of
+        the output file (~1.14x one output-grid field per scalar; the
+        working grids form a geometric pyramid). Opt in for runs intended
+        as refinement parents: refine() uses the stored increments to
+        re-scale inherited content from the parent's
+        INTERPOLATION_COMPENSATION reference to the nest's own (Thomas's
+        ruling, 2026-07-28) — without them a nest inherits the parent's
+        finest classes ~2.2x too weak in the seam octaves.
 
     Returns
     -------
@@ -528,12 +539,19 @@ def simulate(
             f"scale k_z_L ({k_z_L_mean:.1f} m); use a finer profile resolution"
         )
 
+    # Domain-height gate (strengthened 2026-07-28, Thomas): the implied
+    # vertical outer scale k_z,L(z) = l_s(z) (L/l_s(z))^{H_z} must fit
+    # inside the domain at EVERY level (max over the profile, not the
+    # mean), or the outer-scale normalization window has no room for the
+    # crossover. All production configs pass comfortably: square 7.6 km,
+    # channel <= 4.5 km (both against 20 km), diagnostic 21.9 km / 40 km.
+    k_z_L_max = float(np.max(_k_z(anisotropy, outer_scale, spheroscale_profile)))
     n_large_turbulons = int(domain_height / k_z_L_mean)
-    if n_large_turbulons < 1:
+    if k_z_L_max >= domain_height:
         raise ValueError(
             f"domain_height ({domain_height} m) is shorter than the vertical scale of the "
-            f"outer-scale turbulons ({k_z_L_mean:.1f} m); increase domain_height or "
-            f"decrease outer_scale"
+            f"outer-scale turbulons (max k_z,L = {k_z_L_max:.1f} m over the "
+            f"spheroscale profile); increase domain_height or decrease outer_scale"
         )
 
     grids = _compute_all_grids(
@@ -611,6 +629,11 @@ def simulate(
 
     child_seeds = seed_sequence.spawn(n_classes)
 
+    increment_dir = None
+    if save_class_increments:
+        import tempfile
+        increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_"))
+
     h_pert, qt_pert, flux_field, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
@@ -623,6 +646,7 @@ def simulate(
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
         turbulon_shape=turbulon_shape,
         device=device,
+        increment_dir=increment_dir,
     )
 
     # Construct final 3D fields
@@ -709,6 +733,12 @@ def simulate(
         compress=compress,
         flux_3d=flux_3d,
     )
+    if increment_dir is not None:
+        from .output import write_class_increments
+        import shutil
+        write_class_increments(output_path, increment_dir, grids,
+                               compress=compress)
+        shutil.rmtree(increment_dir, ignore_errors=True)
     return output_path
 
 
@@ -730,6 +760,7 @@ def cascade_loop(
     zero_bottom=True,
     zero_top=True,
     device='cpu',
+    increment_dir=None,
 ):
     """Run the multi-scale turbulon cascade over all scale classes.
 
@@ -935,9 +966,9 @@ def cascade_loop(
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
         # Process h and qt sequentially to halve peak memory
-        for (perturbation_field, mean_1d, C_k_i, b_i, phi_min, phi_max) in (
-            (h_perturbation,  h_mean_1d,  C_h_k[i],  b_h_k[i],  h_min,  h_max),
-            (qt_perturbation, qt_mean_1d, C_qt_k[i], b_qt_k[i], qt_min, qt_max),
+        for (name, perturbation_field, mean_1d, C_k_i, b_i, phi_min, phi_max) in (
+            ('h',  h_perturbation,  h_mean_1d,  C_h_k[i],  b_h_k[i],  h_min,  h_max),
+            ('qt', qt_perturbation, qt_mean_1d, C_qt_k[i], b_qt_k[i], qt_min, qt_max),
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
@@ -1006,9 +1037,19 @@ def cascade_loop(
             # at production amplitudes.
             increment = CONVOLVE(W, kernel, device=device)
             del W
+            if increment_dir is not None:
+                before = perturbation_field.copy()
             _bounded_amplitude_add(perturbation_field, mean_1d, increment,
                                    phi_min, phi_max, window=window)
             del increment
+            if increment_dir is not None:
+                # The ACTUALLY-ADDED increment (post bounded add), on this
+                # class's own working grid — the per-class record that lets
+                # a nest re-scale inherited content to its own
+                # INTERPOLATION_COMPENSATION reference (see refine).
+                np.subtract(perturbation_field, before, out=before)
+                np.save(Path(increment_dir) / f"c{i:02d}_{name}.npy", before)
+                del before
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -1876,6 +1917,15 @@ def refine(
             index += 1
         output_group = f"refinements/r{index}"
 
+    # For the inherited-content compensation re-scaling below: whether the
+    # parent stored per-class increments, and the PARENT's own grid
+    # parameters (the nest may override sparsity/anisotropy for itself,
+    # but the replay must reconstruct the parent's grids exactly).
+    parent_has_increments = "class_increments" in grp.groups
+    parent_is_nest = hasattr(grp, "parent_group")
+    parent_sparsity = tuple(int(v) for v in grp.sparsity_factors)
+    parent_anisotropy = grp.anisotropy if hasattr(grp, "anisotropy") else anisotropy
+
     ds.close()
 
     # Vertical extent of the nest.
@@ -2062,6 +2112,68 @@ def refine(
     h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
     qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
     del h_pad, qt_pad
+
+    # Re-scale inherited per-class content to the NEST's interpolation-
+    # compensation reference (Thomas's ruling, 2026-07-28). f(k/dx) is a
+    # property of the run's own output resolution, so content the parent
+    # deposited with f(k/dx_parent) is too weak when re-read at the nest's
+    # finer dx: without correction the parent's finest class arrives
+    # ~2.2x low, right in the parent-nest seam octaves. When the parent
+    # stored its per-class increments (simulate(save_class_increments=
+    # True)), add the delta (f_nest/f_parent - 1) * increment per class,
+    # replaying each increment down the parent's own regrid chain exactly
+    # as the cascade carried it. Classes with ratio ~ 1 (all the
+    # well-resolved ones) are skipped, so only the parent's finest few
+    # classes are replayed.
+    if parent_has_increments and INTERPOLATION_COMPENSATION:
+        if parent_is_nest:
+            print("WARNING: parent is itself a nest; its stored class "
+                  "increments cover only its own classes, not content it "
+                  "inherited in turn. Skipping the compensation "
+                  "re-scaling of inherited content.")
+        else:
+            parent_grids = _compute_all_grids(
+                np.asarray(k_values_parent, dtype=np.float64),
+                parent_nx * parent_dx, parent_ny * parent_dy,
+                domain_height, parent_sparsity,
+                spheroscale_profile, z_profile, z_min=parent_z_min,
+                anisotropy=parent_anisotropy,
+            )
+            ds_inc = netCDF4.Dataset(parent_path, "r")
+            inc_root = (ds_inc if parent_group == '/'
+                        else ds_inc[parent_group])["class_increments"]
+            n_par = len(k_values_parent)
+            for j in range(n_par):
+                k_j = float(k_values_parent[j])
+                ratio = (_interpolation_compensation(k_j / dx)
+                         / _interpolation_compensation(k_j / parent_dx))
+                if abs(ratio - 1.0) < 1e-3:
+                    continue
+                for name, pert_pad in (("h", h_pert_pad),
+                                       ("qt", qt_pert_pad)):
+                    inc = np.asarray(
+                        inc_root[f"c{j:02d}"].variables[name][:],
+                        dtype=np.float32)
+                    for m in range(j + 1, n_par):
+                        inc = zoom_trilinear(
+                            inc, (int(parent_grids['nx'][m]),
+                                  int(parent_grids['ny'][m]),
+                                  int(parent_grids['nz'][m])))
+                    pert_pad += (np.float32(ratio - 1.0)
+                                 * inc[np.ix_(x_indices, y_indices,
+                                              z_indices)])
+                    del inc
+            ds_inc.close()
+            # Scaling content up can push the field past a bound; restore
+            # pointwise bounds with the mean-preserving projection once.
+            _project_onto_bounds(h_pert_pad, h_mean_1d, h_min, h_max)
+            _project_onto_bounds(qt_pert_pad, qt_mean_1d, qt_min, qt_max)
+    elif INTERPOLATION_COMPENSATION and not parent_has_increments:
+        print("NOTE: parent stored no class_increments; inherited content "
+              "keeps the parent's interpolation-compensation reference "
+              "(finest inherited class ~2.2x weak at the nest's "
+              "resolution). Rerun the parent with "
+              "save_class_increments=True to enable the re-scaling.")
 
     # Note: the nest's flux anomaly needs no explicit bookkeeping. Each class
     # restores the volume mean the flux entered that class with (_advance_flux),

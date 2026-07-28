@@ -65,14 +65,6 @@ $n_c$ & cascade density & size classes per octave, default 1 \\
 
 The outer scale
 must be a power-of-two multiple of $dx$, and the implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ must be smaller than the domain height.
-% CLAUDE (2026-07-28): equation inserted, but flagging before this
-% becomes a requirement: the code does not enforce it, and the SQUARE
-% production runs violate it — L = 1536 km with l_s = 10 m gives
-% k_z,L ~ 98 km against a 20 km domain. Outer-class turbulons there are
-% vertically truncated by design ("cut off" in the boundary paragraph),
-% and the C_{Phi,L} window saturates on the edge-padded profile. Either
-% this sentence should be softened to a caveat, or the square config is
-% inconsistent with your intent — your call.
 
 Logarithmically spaced size classes are defined as $k_i = L\, 2^{-i/n_c}$
 for $i = 0, 1, \dots, n_c\log_2(L/(2dx))$, proceeding from the outer

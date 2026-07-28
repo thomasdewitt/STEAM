@@ -234,3 +234,67 @@ def write_netcdf(
     ds_root.close()
     print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))
     return output_path
+
+
+def write_class_increments(output_path, increment_dir, grids,
+                           group=None, compress=None):
+    """Append per-class added increments to an existing STEAM output file.
+
+    Stores, for each size class i, the h and qt increments the cascade
+    actually added (post bounded add) on that class's own working grid,
+    under ``class_increments/c{i:02d}``. Each class subgroup carries its
+    own (x, y, z) dimensions, its z-coordinate array, and attributes k,
+    dx, dy. Total size is a geometric pyramid, ~1.14x one output-grid
+    field per scalar before compression.
+
+    Parameters
+    ----------
+    output_path : str or Path
+        Existing NetCDF file written by write_netcdf.
+    increment_dir : str or Path
+        Directory of ``c{i:02d}_{h,qt}.npy`` files saved by cascade_loop.
+    grids : dict
+        The per-class grid dict from _compute_all_grids (keys k, dx, dy,
+        z_arrays).
+    group : str or None
+        Parent group to place ``class_increments`` under (None = root).
+    compress : bool or None
+        zlib compression as in write_netcdf.
+    """
+    if compress is None:
+        compress = constants.output_compress
+
+    increment_dir = Path(increment_dir)
+    ds_root = netCDF4.Dataset(output_path, "a", format="NETCDF4")
+    base = ds_root if group is None else ds_root[group]
+    inc_root = base.createGroup("class_increments")
+
+    n_classes = len(grids['k'])
+    for i in range(n_classes):
+        sub = inc_root.createGroup(f"c{i:02d}")
+        arrays = {}
+        for name in ("h", "qt"):
+            arrays[name] = np.load(increment_dir / f"c{i:02d}_{name}.npy")
+        nx_i, ny_i, nz_i = arrays["h"].shape
+        sub.createDimension("x", nx_i)
+        sub.createDimension("y", ny_i)
+        sub.createDimension("z", nz_i)
+        z_var = sub.createVariable("z", "f4", ("z",))
+        z_var[:] = np.asarray(grids['z_arrays'][i], dtype=np.float32)
+        z_var.units = "m"
+        for name, units in (("h", "J/kg"), ("qt", "kg/kg")):
+            v = sub.createVariable(
+                name, "f4", ("x", "y", "z"),
+                zlib=compress, complevel=4 if compress else 0,
+                chunksizes=(min(64, nx_i), min(64, ny_i), nz_i),
+            )
+            v[:] = arrays[name]
+            v.units = units
+            v.long_name = f"class {i} added {name} increment (working grid)"
+        sub.k = np.float32(grids['k'][i])
+        sub.dx = np.float32(grids['dx'][i])
+        sub.dy = np.float32(grids['dy'][i])
+
+    ds_root.close()
+    print(f"Written class_increments ({n_classes} classes) to {output_path}")
+    return output_path

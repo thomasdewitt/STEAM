@@ -626,3 +626,104 @@ def test_nest_inherits_and_can_override_anisotropy(parent_nc):
         below = k_values < 100.0
         assert below.any()
         np.testing.assert_allclose(k_z_values[below], k_values[below], rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Per-class increment storage + nest compensation re-scaling (2026-07-28)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def parent_with_increments(tmp_path_factory):
+    h, qt = _profiles()
+    out = tmp_path_factory.mktemp("parent_inc") / "parent.nc"
+    simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
+             outer_scale=8000, spheroscale=100,
+             domain_height=PARENT_DOMAIN_HEIGHT, profile_dz=PARENT_PROFILE_DZ,
+             output_path=out, seed=42, save_class_increments=True)
+    compute_diagnostics(out)
+    return out
+
+
+def test_class_increments_replay_to_final_perturbation(parent_with_increments):
+    """Sum of stored increments, replayed down the regrid chain, is the field.
+
+    The cascade adds each class's increment on its own working grid and
+    the between-class regrids are linear, so replaying every stored
+    increment through the same chain and summing must reproduce the final
+    perturbation (up to float32 accumulation order and the single-ulp
+    output clamp).
+    """
+    with netCDF4.Dataset(parent_with_increments) as ds:
+        h_3d = np.asarray(ds.variables["h"][:], dtype=np.float64)
+        z_out = np.asarray(ds.variables["z"][:], dtype=np.float64)
+        z_profile = np.asarray(ds.variables["z_profile"][:], dtype=np.float64)
+        h_profile = np.asarray(ds.variables["h_profile"][:], dtype=np.float64)
+        ls_profile = np.asarray(ds.variables["spheroscale_profile"][:],
+                                dtype=np.float64)
+        k_values = np.asarray(ds.variables["k_values"][:], dtype=np.float64)
+        nx, ny = int(ds.nx), int(ds.ny)
+        dx, dy = float(ds.dx), float(ds.dy)
+        height = float(ds.domain_height)
+        sparsity = tuple(int(v) for v in ds.sparsity_factors)
+        anisotropy = ds.anisotropy
+        n_par = len(k_values)
+        incs = [np.asarray(ds["class_increments"][f"c{j:02d}"]
+                           .variables["h"][:], dtype=np.float32)
+                for j in range(n_par)]
+
+    grids = _compute_all_grids(k_values, nx * dx, ny * dy, height,
+                               sparsity, ls_profile, z_profile,
+                               anisotropy=anisotropy)
+    total = np.zeros_like(incs[-1], dtype=np.float64)
+    for j, inc in enumerate(incs):
+        cur = inc
+        for m in range(j + 1, n_par):
+            cur = zoom_trilinear(cur, (int(grids['nx'][m]),
+                                       int(grids['ny'][m]),
+                                       int(grids['nz'][m])))
+        total += cur
+    pert = h_3d - np.interp(z_out, z_profile, h_profile)[None, None, :]
+
+    scale = np.abs(pert).mean()
+    assert scale > 0
+    err = np.abs(total - pert).max()
+    assert err < 5e-3 * scale + 1e-2
+
+
+def test_refine_rescales_inherited_content(parent_with_increments, tmp_path):
+    """A nest of an increments-parent boosts the under-compensated classes.
+
+    The correction adds (f_nest/f_parent - 1) * increment for the parent's
+    poorly resolved classes (ratio > 1), so the corrected nest's inherited
+    field must carry MORE variance than a nest of the same parent with its
+    stored increments hidden — and both must respect the bounds.
+    """
+    src = tmp_path / "parent_inc.nc"
+    shutil.copy(parent_with_increments, src)
+    refine(src, x_start=8, x_stop=24, y_start=8, y_stop=24, dx=125, dy=125,
+           seed=7)
+
+    bare = tmp_path / "parent_bare.nc"
+    shutil.copy(parent_with_increments, bare)
+    with netCDF4.Dataset(bare, "a") as ds:
+        ds.renameGroup("class_increments", "class_increments_hidden")
+    refine(bare, x_start=8, x_stop=24, y_start=8, y_stop=24, dx=125, dy=125,
+           seed=7)
+
+    def nest_stats(path):
+        with netCDF4.Dataset(path) as ds:
+            grp = ds["refinements/r0"]
+            h = np.asarray(grp.variables["h"][:], dtype=np.float64)
+            qt = np.asarray(grp.variables["qt"][:], dtype=np.float64)
+            qt_min, qt_max = float(grp.qt_min), float(grp.qt_max)
+            h_min, h_max = float(grp.h_min), float(grp.h_max)
+        pert = h - h.mean(axis=(0, 1))[None, None, :]
+        return float(np.std(pert)), (h, h_min, h_max, qt, qt_min, qt_max)
+
+    std_corrected, fields_c = nest_stats(src)
+    std_bare, fields_b = nest_stats(bare)
+
+    assert std_corrected > std_bare
+    for h, h_min, h_max, qt, qt_min, qt_max in (fields_c, fields_b):
+        assert h.min() >= h_min - 1e-3 and h.max() <= h_max + 1e-3
+        assert qt.min() >= qt_min - 1e-9 and qt.max() <= qt_max + 1e-9

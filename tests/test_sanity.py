@@ -109,6 +109,21 @@ def test_rejects_domain_shorter_than_vertical_outer_scale(tmp_path, simple_profi
         simulate(h, qt, 16, 16, 500, 500, 8000, 100, 100, 30, tmp_path / "x.nc")
 
 
+def test_domain_height_gate_uses_max_over_spheroscale_profile(tmp_path, simple_profiles):
+    """The gate is the MAX of k_z,L(z), not the profile-mean (2026-07-28).
+
+    Spheroscale 400 m near the surface gives k_z,L ~ 2114 m there, taller
+    than the 1500 m domain, even though the profile-mean spheroscale
+    (~106 m) implies k_z,L ~ 1500 m and would squeak past a mean-based
+    check.
+    """
+    h, qt = simple_profiles
+    ls = np.full(len(h), 100.0)
+    ls[:2] = 400.0
+    with pytest.raises(ValueError, match="shorter than the vertical"):
+        simulate(h, qt, 16, 16, 500, 500, 8000, ls, 1500, 30, tmp_path / "x.nc")
+
+
 def test_rejects_profile_dz_too_coarse(tmp_path):
     # spheroscale=100, outer_scale=8000 => k_z_L ~ 1467 m
     # profile_dz=2000 >= k_z_L => should raise
