@@ -31,6 +31,17 @@ Supplement figures:
   to zero, because the negative shell lives off-axis where the r^2
   volume element gives it the multiplicity to cancel the core.
 
+- **s2_interpolation_retention** — why the trilinear-regrid loss is a
+  one-time factor and not something that accumulates down the chain. Same
+  envelope and same A_opt as s1, but against the *linear interpolant*
+  through the k/2 samples rather than the piecewise-constant
+  representation. The first regrid replaces the envelope by the chord
+  polygon through its samples; the second shortcuts that polygon's own
+  kinks; from the third regrid on the field is an exact fixed point of the
+  interpolation operator (verified: peak frozen at 2.6152 for m >= 2 at
+  every grid size tried, 7 to 513 cells). This is the figure for the
+  "interpolation does not preserve the mean absolute value" paragraph.
+
 Notes:
 - Envelope drawn with the 1D-form Mexican hat 2(1-a)e^(-a/2)
   (deeper negative lobe than the true 2D form — a deliberate
