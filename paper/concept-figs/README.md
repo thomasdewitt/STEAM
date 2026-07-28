@@ -17,12 +17,10 @@ Three figures explaining the turbulon concept (locked 2026-07-23):
 
 Supplement figures:
 
-- **s1_working_grid_resolution** — supplement S1 "Working grids". Upper
-  panel: the continuum turbulon envelope against its piecewise-constant
+- **s1_working_grid_resolution** — main-text appendix (sparsity factors):
+  the continuum turbulon envelope against its piecewise-constant
   representation on the class's own working grid at Delta x_k = k/2
-  (s_x = 1). Lower panel: the same envelope on log axes out to the
-  truncation radius, with the current (5k) and candidate (3k)
-  support_factor marked against the float32 resolution floor.
+  (s_x = 1).
 
   Unlike the three concept figures above, this one uses the *true* 3D
   envelope sampled at the cell centers `simulate._turbulon_envelope`

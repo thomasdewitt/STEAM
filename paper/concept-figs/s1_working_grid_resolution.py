@@ -6,9 +6,8 @@ size, so the envelope is carried by only five nonzero cells along the
 center line: the center, the two flanks at +/- k/2, and the two negative
 cells at +/- k.
 
-Upper panel: the continuum envelope against that piecewise-constant grid
-representation. Lower panel: the same envelope on log axes out to the
-truncation radius, showing where support_factor may be cut.
+The figure shows the continuum envelope against that piecewise-constant
+grid representation.
 
 Envelope is the paper's 3D Mexican hat (Apxeq:turbulon shape) evaluated
 along a line through the center:
@@ -34,10 +33,8 @@ from turblib import INK, RULE, LABEL, PALETTE, save
 
 EXACT = INK                 # continuum envelope
 COARSE = PALETTE['h']       # ochre — the grid representation
-MARK = PALETTE['qt']        # teal — support-factor annotations
 HALF_WIDTH = 1.75           # upper-panel x range, in units of k
 SIGMA = 1.0 / np.pi         # k = 1 throughout
-FLOAT32_EPS = 1.2e-7
 
 
 def leading_constant(sparsity, support=5.0):
@@ -60,10 +57,8 @@ def envelope_1d(x, leading=A_OPT):
     return (leading - rho) * np.exp(-rho / 2.0)
 
 
-fig, (ax, axl) = plt.subplots(
-    2, 1, figsize=(7.2, 5.4), gridspec_kw=dict(height_ratios=[3, 2], hspace=0.55))
+fig, ax = plt.subplots(figsize=(7.2, 3.6))
 
-# ======================= upper panel: the grid representation ============
 x_fine = np.linspace(-HALF_WIDTH, HALF_WIDTH, 2001)
 ax.plot(x_fine, envelope_1d(x_fine), color=EXACT, lw=1.5, zorder=4,
         label='turbulon envelope $\\mathfrak{T}_k(x)$')
@@ -113,41 +108,7 @@ ax.set_xticklabels(['$-3k/2$', '$-k$', '$-k/2$', '$0$', '$k/2$', '$k$',
 ax.set_yticks([0, 1, 2, 3])
 ax.set_ylabel('envelope amplitude')
 
-# ======================= lower panel: support factor =====================
-x_log = np.linspace(0.0, 5.4, 4001)
-axl.semilogy(x_log, np.abs(envelope_1d(x_log)), color=EXACT, lw=1.3,
-             zorder=4)
-
-peak = A_OPT
-axl.axhline(peak, color=RULE, lw=0.8, zorder=0)
-# (the notch near 0.55k is the envelope's zero crossing, where |T| -> 0)
-axl.text(2.4, peak * 1.8, 'peak $\\mathfrak{T}_k(0)$', color=LABEL,
-         fontsize=7.5, ha='left', va='bottom')
-
-# float32 resolution relative to the peak — below this the kernel is
-# numerically indistinguishable from zero.
-axl.axhline(peak * FLOAT32_EPS, color=LABEL, lw=0.8, ls=(0, (4, 3)),
-            zorder=1)
-axl.text(4.15, peak * FLOAT32_EPS * 2.2, 'float32 resolution',
-         color=LABEL, fontsize=7.5, ha='left', va='bottom')
-
-for support, style, note in [(3.0, (0, (2, 2)), 'proposed'),
-                             (5.0, 'solid', 'current')]:
-    axl.axvline(support, color=MARK, lw=1.1, ls=style, zorder=3)
-    axl.text(support - 0.08, 1e-38,
-             f'support $= {support:.0f}k$\n({note})', color=MARK,
-             fontsize=7.5, ha='right', va='bottom', linespacing=1.4)
-
-axl.set_xlim(0, 5.4)
-axl.set_ylim(1e-45, 30)
-axl.set_yticks([1e-40, 1e-30, 1e-20, 1e-10, 1e0])
-axl.set_xticks([0, 1, 2, 3, 4, 5])
-axl.set_xticklabels(['$0$', '$k$', '$2k$', '$3k$', '$4k$', '$5k$'])
-axl.set_ylabel('$|\\mathfrak{T}_k|$')
-axl.set_xlabel('distance from turbulon center')
-
-# ======================= shared styling ==================================
-for a in (ax, axl):
+for a in (ax,):
     a.tick_params(colors=LABEL, labelsize=8, length=3, width=0.8)
     a.xaxis.label.set_color(LABEL)
     a.yaxis.label.set_color(LABEL)
