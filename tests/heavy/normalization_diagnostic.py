@@ -22,9 +22,11 @@ import tempfile
 
 def main():
     # ---- Parameters ----
-    outer_scale = 5000 * 2048      # m, horizontal (8x: more vertical octaves)
+    # 2026-07-29: 2048 -> 1024 (Thomas: "not too too large"); k_z_L drops
+    # 21.8 -> 14.9 km, still well inside the 40 km domain top.
+    outer_scale = 5000 * 1024      # m, horizontal (more vertical octaves)
     dx = dy = 5000            # m
-    nx = ny = 2048            # one outer-scale tile per side
+    nx = ny = 1024            # one outer-scale tile per side
     domain_height = 40000    # m (k_z_L ~ 21.9 km must fit inside the domain)
     profile_dz = .6          # m
     spheroscale = 10    # m
