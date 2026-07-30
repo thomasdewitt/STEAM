@@ -8,6 +8,7 @@ from . import constants
 from .constants import (
     hurst_horizontal as H_h,
     hurst_vertical_anisotropy as H_z,
+    haar_to_mhat as HAAR_TO_MHAT,
 )
 from . import turbulons as _turbulons
 from .utils import (
@@ -311,27 +312,17 @@ def _compensation_profiles(k_values, z_arrays, spheroscale_profile,
         out.append((d_ref / D).astype(np.float32))
     return out
 
-# Haar -> turbulon-amplitude calibration for C_{Phi,L}, defined operationally:
-# lambda = 1/R, where R is the mean absolute vertical Haar fluctuation (at
-# scale k_z) of a field of unit-amplitude outer-class turbulons synthesized
-# exactly as the cascade delivers them under the INTERPOLATION_COMPENSATION
-# convention (coarse s=1 deposit carried down the regrid chain, reference
-# k/dx = 512). Setting lambda = 1/R makes the field's Haar fluctuation at
-# the outer scale equal the mean profile's by construction -- the crossover
-# property checked by tests/heavy/normalization_diagnostic.py.
+# HAAR_TO_MHAT (the paper's lambda) now lives in steam/constants.py, paired
+# with the hurst_horizontal it was calibrated at -- see the provenance block
+# there. It is imported above and used only in _compute_normalization, where
+# the haar_to_mhat= kwarg on simulate() can override it per run.
 #
-# History: R = 2.005 (May calibration) -> 1.9842 (2026-07-28 kernel A/B for
-# the Gaussian-weighted admissibility correction: R_new/R_old = 0.98963 +/-
-# 0.00001 over 8 seeds). 2026-07-28 (later): the INTERPOLATION_COMPENSATION
-# convention re-anchors delivery at the k/dx = 512 reference; at the
-# calibration config's outer class both the old and new conventions sit in
-# their clamp regimes, so the delivered amplitude changes by EXACTLY the
-# removed boost 1/0.388 and R rescales analytically:
-#     R = 1.9842 * 0.388 = 0.7699.
-# (R < 1 now simply reflects the weaker delivery convention; the crossover
-# is what is calibrated, not R's magnitude.) PENDING: end-to-end crossover
-# verification via normalization_diagnostic.py before regeneration.
-HAAR_TO_MHAT = 1.0 / 0.7699   # ~= 1.299
+# Superseded (2026-07-30): lambda used to be defined as 1/R with R the mean
+# absolute Haar fluctuation of a synthesized unit-amplitude outer-class
+# turbulon field (R = 2.005 -> 1.9842 -> 0.7699 by analytic rescaling under
+# INTERPOLATION_COMPENSATION). That measured the delivery chain in isolation
+# and failed its end-to-end check; lambda is now fitted from the crossover
+# criterion on full runs instead, which needs no model of the chain.
 
 
 def _extremal_levy(alpha, size, rng):
@@ -475,6 +466,8 @@ def simulate(
     compress=None,
     device='cpu',
     save_class_increments=False,
+    hurst_horizontal=None,
+    haar_to_mhat=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -552,6 +545,15 @@ def simulate(
         INTERPOLATION_COMPENSATION reference to the nest's own (Thomas's
         ruling, 2026-07-28) — without them a nest inherits the parent's
         finest classes ~2.2x too weak in the seam octaves.
+    hurst_horizontal : float or None
+        Override for the module constant H_h (steam.constants). None uses
+        the constant. Enters only through _compute_normalization's
+        (k/L)^H_h amplitude ladder, and is recorded in the output metadata.
+    haar_to_mhat : float or None
+        Override for the module constant HAAR_TO_MHAT (lambda). None uses
+        the constant. Both overrides exist for the lambda calibration in
+        turbulon-analysis/lambda_calibration/, which needs lambda = 1 runs
+        at two H_h values without editing the model.
 
     Returns
     -------
@@ -746,11 +748,13 @@ def simulate(
         h_on_finest, k_z_L_on_finest,
         k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
+        hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
     )
     C_qt_k = _compute_normalization(
         qt_on_finest, k_z_L_on_finest,
         k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
+        hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
     )
     # Scalar C_L for NetCDF attribute: mean of outer-scale C profile
     C_h_L = float(np.mean(C_h_k[0]))
@@ -858,8 +862,10 @@ def simulate(
         'C_h_L': C_h_L,
         'C_qt_L': C_qt_L,
         'n_large_turbulons': n_large_turbulons,
-        'H_h': H_h,
+        'H_h': H_h if hurst_horizontal is None else float(hurst_horizontal),
         'H_z': H_z,
+        'lambda_haar_to_mhat': (HAAR_TO_MHAT if haar_to_mhat is None
+                                else float(haar_to_mhat)),
         'h_min': h_min,
         'h_max': h_max,
         'qt_min': qt_min,
@@ -1674,7 +1680,8 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
 
 def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
                            k_values, outer_scale, z_arrays,
-                           n_scale_classes_per_dyad=1):
+                           n_scale_classes_per_dyad=1,
+                           hurst_horizontal=None, haar_to_mhat=None):
     """Scale- and height-dependent amplitude arrays C_{Phi,k}.
 
     (Apxeq:norm factor computation)
@@ -1719,11 +1726,22 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
         (k/L)^H_h ladder below its parent's finest class, so it passes the
         root's L here, not its own coarsest class.
     z_arrays : dict with 'z_arrays' — list of per-class z-coordinate arrays.
+    hurst_horizontal : float or None
+        Override for the module constant H_h. None uses the constant.
+        Exists so the lambda calibration can sweep H_h without editing
+        steam.constants (turbulon-analysis/lambda_calibration/).
+    haar_to_mhat : float or None
+        Override for the module constant HAAR_TO_MHAT (lambda). None uses
+        the constant. Same purpose: the calibration runs at lambda = 1.
 
     Returns
     -------
     list of n_classes 1D float32 arrays.
     """
+    H_h_used = H_h if hurst_horizontal is None else float(hurst_horizontal)
+    lambda_used = (HAAR_TO_MHAT if haar_to_mhat is None
+                   else float(haar_to_mhat))
+
     z_finest = z_arrays['z_arrays'][-1]
     dz_finest = float(np.mean(np.diff(z_finest)))
     n_p = profile_on_finest_grid.size
@@ -1741,10 +1759,10 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
         center = i + n_max
         upper = padded[center + 1: center + m + 1].mean()
         lower = padded[center - m: center].mean()
-        response[i] = HAAR_TO_MHAT * abs(upper - lower)
+        response[i] = lambda_used * abs(upper - lower)
     C_k = []
     for i, k in enumerate(k_values):
-        hurst_scale = float((k / outer_scale) ** H_h) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
+        hurst_scale = float((k / outer_scale) ** H_h_used) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
         C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
         C_k.append(C_profile)
     return C_k

@@ -189,6 +189,8 @@ def write_netcdf(
     ds.n_large_turbulons = np.int32(p['n_large_turbulons'])
     ds.H_h = np.float32(p['H_h'])
     ds.H_z = np.float32(p['H_z'])
+    if 'lambda_haar_to_mhat' in p:
+        ds.lambda_haar_to_mhat = np.float32(p['lambda_haar_to_mhat'])
     ds.h_min = np.float32(p['h_min'])
     ds.h_max = np.float32(p['h_max'])
     ds.qt_min = np.float32(p['qt_min'])
