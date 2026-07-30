@@ -3,6 +3,7 @@
 import zlib
 import numpy as np
 import netCDF4
+import torch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from . import constants
@@ -326,6 +327,75 @@ def _compensation_profiles(k_values, z_arrays, spheroscale_profile,
 # criterion on full runs instead, which needs no model of the chain.
 
 
+LEVY_CHUNK_ELEMENTS = 1 << 22   # 4 M draws (~16 MB, even; see _extremal_levy)
+LEVY_WORKERS = 8
+
+
+def _parallel_uniform_float32(rng, size):
+    """``rng.random(size, dtype=float32)``, drawn on a thread pool.
+
+    A float32 draw consumes one uint32, and PCG64 yields two of those per
+    64-bit state and caches the unused half (``has_uint32``). So a chunk that
+    starts on a whole state consumes exactly ``len // 2`` states, and a clone
+    of the bit generator positioned with ``advance(offset // 2)`` reproduces
+    that chunk of the stream exactly. Chunk boundaries are therefore placed on
+    even offsets past whatever half-state the caller's generator already has
+    cached. The caller's generator is left precisely where a serial draw would
+    have left it by copying the last chunk's state back -- which is also what
+    makes an odd ``size`` (one leftover cached half) come out right.
+    """
+    state = rng.bit_generator.state
+    starts = [0] + list(range(state['has_uint32'] + LEVY_CHUNK_ELEMENTS,
+                              size, LEVY_CHUNK_ELEMENTS))
+    out = np.empty(size, dtype=np.float32)
+    generators = []
+    for start in starts:
+        bit_generator = np.random.PCG64()
+        bit_generator.state = state
+        if start > 0:
+            bit_generator.advance((start - state['has_uint32']) // 2)
+        generators.append(bit_generator)
+
+    def draw(index):
+        start = starts[index]
+        stop = starts[index + 1] if index + 1 < len(starts) else size
+        np.random.Generator(generators[index]).random(
+            stop - start, dtype=np.float32, out=out[start:stop])
+
+    with ThreadPoolExecutor(LEVY_WORKERS) as pool:
+        list(pool.map(draw, range(len(starts))))
+    rng.bit_generator.state = generators[-1].state
+    return out
+
+
+def _levy_chunk(alpha, phi, R, phi0, sign, eps):
+    """The CMS expression on one chunk, in place on exclusive views of the two
+    uniform draws (both are consumed). Returns the chunk's draws."""
+    phi -= np.float32(0.5)
+    phi *= np.float32(np.pi)
+    np.clip(R, eps, None, out=R)
+    np.log(R, out=R)
+    R *= np.float32(-1.0)
+
+    factor = np.clip(np.cos(phi), eps, None)     # (|a-1| cos phi) ** (-1/a)
+    factor *= np.float32(abs(alpha - 1.0))
+    factor **= np.float32(-1.0 / alpha)
+
+    shifted = phi - phi0
+    shifted *= np.float32(alpha)                 # a (phi - phi0)
+    phi -= shifted                               # phi - a(phi - phi0); reuse phi
+    np.cos(phi, out=phi)
+    np.clip(phi, eps, None, out=phi)
+    phi /= R                                     # cos(...)/R
+    phi **= np.float32((1.0 - alpha) / alpha)    # -> tail factor
+
+    np.sin(shifted, out=shifted)                 # sin(a(phi - phi0))
+    shifted *= sign
+    shifted *= factor
+    shifted *= phi
+    return shifted
+
+
 def _extremal_levy(alpha, size, rng):
     """Extremal (maximally skewed, beta=-1) Levy alpha-stable draws.
 
@@ -339,6 +409,14 @@ def _extremal_levy(alpha, size, rng):
     Assembled with in-place float32 ops (commutative reorderings of the single
     CMS expression) so only a few field-sized buffers are ever live -- the
     generator is drawn at the flux cascade's finest resolution.
+
+    Both the draw and the arithmetic run on a thread pool over 4 M-element
+    chunks (3.4x at the production size, 5.60 -> 1.66 s). This is BIT-IDENTICAL
+    to the serial version: the arithmetic is purely elementwise, so a chunk of
+    it is the same numbers, and the RNG stream is split exactly rather than
+    reseeded (see _parallel_uniform_float32). Chunking also helps a single
+    thread, because a 16 MB chunk stays in L3 across the ten elementwise passes
+    instead of streaming the whole 1.8 GiB array from DRAM ten times.
     """
     alpha = float(alpha)
     phi0 = np.float32(-(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha)
@@ -355,30 +433,17 @@ def _extremal_levy(alpha, size, rng):
     # exp(gamma) -- both map to multiplier -1.
     eps = np.float32(1e-6)
 
-    phi = (rng.random(size, dtype=np.float32) - np.float32(0.5)) * np.float32(np.pi)
-    R = rng.random(size, dtype=np.float32)       # -log(U) ~ Exp(1), all float32
-    np.clip(R, eps, None, out=R)
-    np.log(R, out=R)
-    R *= np.float32(-1.0)
+    phi = _parallel_uniform_float32(rng, size)
+    R = _parallel_uniform_float32(rng, size)     # -log(U) ~ Exp(1), all float32
 
-    factor = np.clip(np.cos(phi), eps, None)     # (|a-1| cos phi) ** (-1/a)
-    factor *= np.float32(abs(alpha - 1.0))
-    factor **= np.float32(-1.0 / alpha)
+    def compute(start):
+        stop = min(start + LEVY_CHUNK_ELEMENTS, size)
+        phi[start:stop] = _levy_chunk(alpha, phi[start:stop], R[start:stop],
+                                      phi0, sign, eps)
 
-    shifted = phi - phi0
-    shifted *= np.float32(alpha)                 # a (phi - phi0)
-    phi -= shifted                               # phi - a(phi - phi0); reuse phi
-    np.cos(phi, out=phi)
-    np.clip(phi, eps, None, out=phi)
-    phi /= R                                     # cos(...)/R
-    phi **= np.float32((1.0 - alpha) / alpha)    # -> tail factor
-    del R
-
-    np.sin(shifted, out=shifted)                 # sin(a(phi - phi0))
-    shifted *= sign
-    shifted *= factor
-    shifted *= phi
-    return shifted
+    with ThreadPoolExecutor(LEVY_WORKERS) as pool:
+        list(pool.map(compute, range(0, size, LEVY_CHUNK_ELEMENTS)))
+    return phi
 
 
 # log<exp(gamma_0)> for the unit-scale extremal generator above. Subtracting
@@ -1214,7 +1279,7 @@ def cascade_loop(
             if increment_dir is not None:
                 before = perturbation_field.copy()
             _bounded_amplitude_add(perturbation_field, mean_1d, increment,
-                                   phi_min, phi_max, window=window)
+                                   phi_min, phi_max, window=window, device=device)
             del increment
             if increment_dir is not None:
                 # The ACTUALLY-ADDED increment (post bounded add), on this
@@ -1838,8 +1903,103 @@ def _bound_taper(running_sum, b, phi_min, phi_max):
     return g
 
 
+def _level_mean(field, n_points):
+    """Per-level horizontal mean of a device tensor, reduced over dims (0, 1).
+
+    In TWO stages -- a float32 tree-sum over x, then an exact float64 sum of
+    the nx partials. torch's one-shot ``sum(dim=(0, 1), dtype=torch.float64)``
+    instead upcasts the WHOLE field, which costs another two field-sized
+    buffers and is slower, for no accuracy.
+    """
+    return field.sum(dim=0).sum(dim=0, dtype=torch.float64) / n_points
+
+
+def _level_mean_abs(field, n_points):
+    """Per-level horizontal mean absolute value; staged as in _level_mean."""
+    return (torch.linalg.vector_norm(field, ord=1, dim=0)
+            .sum(dim=0, dtype=torch.float64) / n_points)
+
+
+def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
+                                phi_min, phi_max, window, n_rescale):
+    """_bounded_amplitude_add on the GPU, all levels solved simultaneously.
+
+    The same algorithm as the CPU path, with every per-level scalar (the
+    target amplitude A0, the rescale factor, the bisection bracket) a (nz,)
+    float64 device vector and the per-level early exits masks, so the whole
+    call synchronizes with the host only once per rescale iteration
+    (``done.all()``). This is where the GPU pays: the bisection is 60 passes
+    over the field, ~320 GiB of memory traffic per call at the production
+    class, and the card has ~12x the CPU's bandwidth (measured 16-18 s -> 1.5 s
+    at 2048^2 x 115, including the host round trip).
+
+    Three field-sized device buffers are live -- the field, the increment and
+    one scratch (5.4 GiB at 2048^2 x 115) -- because the clip caps are never
+    materialized: clip(d, phi_min - phi, phi_max - phi) is computed as
+    clamp(d + phi, phi_min, phi_max) - phi, and the bisection runs entirely in
+    that shifted space.
+
+    REALIZATION-CHANGING, not bit-identical: the GPU's reduction order differs
+    from numpy's pairwise sum and the level means feed the bisection. The
+    delivered per-level amplitudes agree with the CPU path to ~1e-7 relative
+    and the three deposit conditions hold to the same tolerance.
+    """
+    lo = float(phi_min)
+    hi = float(phi_max)
+    width = hi - lo
+    nz = perturbation_field.shape[2]
+
+    mean_column = torch.from_numpy(
+        np.ascontiguousarray(mean_1d, dtype=np.float32)).to('cuda')
+    phi = torch.from_numpy(perturbation_field).to('cuda')
+    phi += mean_column
+    d = torch.from_numpy(increment).to('cuda')
+    scratch = torch.empty_like(d)
+
+    d_inner = _inner_view(d, window)
+    scratch_inner = _inner_view(scratch, window)
+    n_points = float(d_inner.shape[0] * d_inner.shape[1])
+    mean_phi = _level_mean(_inner_view(phi, window), n_points)
+
+    a0 = _level_mean_abs(d_inner, n_points)
+    done = a0 <= 0.0            # a level with no amplitude only gets clipped
+    for _ in range(n_rescale):
+        d.sub_(torch.where(done, 0.0, _level_mean(d_inner, n_points)).to(torch.float32))
+        torch.add(d, phi, out=scratch).clamp_(lo, hi)
+        torch.sub(scratch, phi, out=d)
+        m_abs = _level_mean_abs(d_inner, n_points)
+        scale = torch.clamp(a0 / m_abs.clamp(min=1e-300), max=2.0)
+        done |= (m_abs <= 0.0) | ((scale - 1.0).abs() < 1e-4)
+        if bool(done.all()):
+            break
+        d.mul_(torch.where(done, 1.0, scale).to(torch.float32))
+
+    d.sub_(_level_mean(d_inner, n_points).to(torch.float32))
+    torch.add(d, phi, out=scratch).clamp_(lo, hi)
+    torch.sub(scratch, phi, out=d)
+
+    # Bisect mu in shifted space: e = d + phi, and
+    # clip(d - mu, phi_min - phi, phi_max - phi) + phi == clamp(e - mu, phi_min, phi_max),
+    # so the level mean of the trial increment is that of the trial field minus
+    # the level mean of phi, and no cap arrays are needed.
+    e = d.add_(phi)
+    mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
+    mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
+    for _ in range(60):
+        mu = 0.5 * (mu_lo + mu_hi)
+        torch.sub(e, mu.to(torch.float32), out=scratch).clamp_(lo, hi)
+        positive = _level_mean(scratch_inner, n_points) - mean_phi > 0.0
+        mu_lo = torch.where(positive, mu, mu_lo)
+        mu_hi = torch.where(positive, mu_hi, mu)
+
+    torch.sub(e, (0.5 * (mu_lo + mu_hi)).to(torch.float32), out=scratch).clamp_(lo, hi)
+    scratch.sub_(mean_column)   # the bounded field, back to a perturbation
+    torch.from_numpy(perturbation_field).copy_(scratch)
+
+
 def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
-                           phi_min, phi_max, window=None, n_rescale=10):
+                           phi_min, phi_max, window=None, n_rescale=10,
+                           device='cpu'):
     """Add a class's increment under the three deposit conditions.
 
     For each z-level, the added perturbation delta satisfies (ruling
@@ -1889,7 +2049,17 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     is elementwise and numpy's pairwise mean follows index order, not
     memory order, so the float64 level means are bit-for-bit the same as
     the strided ones.
+
+    ``device`` is the cascade's own device. On 'cuda' the solve runs on the
+    GPU (see _bounded_amplitude_add_cuda), transfers included; on 'cpu' it
+    runs here. That is a real dispatch, not a fallback: the nest legitimately
+    runs on the host.
     """
+    if device == 'cuda':
+        _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
+                                    phi_min, phi_max, window, n_rescale)
+        return
+
     lo = np.float32(phi_min)
     hi = np.float32(phi_max)
     width = float(phi_max) - float(phi_min)

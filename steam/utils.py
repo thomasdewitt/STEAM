@@ -8,6 +8,7 @@ from scipy.signal import oaconvolve
 
 MEMORY_HEADROOM_BYTES = 2 * 1024**3  # keep this much RAM free; OOM swap-thrashes the host
 CUDA_MEMORY_HEADROOM_BYTES = 1 * 1024**3  # keep this much VRAM free for cuFFT plan caches / fragmentation
+CUDA_MAX_BLOCK_FFT = 32                   # z-planes per overlap-add block; see cuda_block_fft_size
 
 
 def available_memory_bytes():
@@ -61,17 +62,25 @@ def cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize):
 
 
 def cuda_block_fft_size(nx, ny, nz, kz, itemsize):
-    """Largest power-of-two overlap-add FFT length along z that fits free VRAM.
+    """Overlap-add FFT length along z: at most CUDA_MAX_BLOCK_FFT, less if VRAM is short.
 
-    A single block covers the whole padded array when that fits; otherwise the
-    length shrinks toward the kernel length (block_len = n_fft - kz + 1 >= 1).
-    Raises MemoryError if even the minimal block will not fit, mirroring the
-    host guard in :func:`convolve_fft_xy_oa_z`.
+    A longer block is worth almost nothing -- covering the whole padded array
+    in one block instead of 32-plane blocks is 0.02 s out of 0.64 on the
+    production 2048^2 x 115 class -- but it holds the entire spectral set
+    resident, 11.88 GiB against 5.88. The point of the cap is not to save
+    memory for its own sake: it is to leave the card room for
+    _bounded_amplitude_add's offloaded solve (three field-sized buffers) and
+    for the cascade state, so both can run at grids larger than today's.
+    Below the cap the length still shrinks toward the kernel length
+    (block_len = n_fft - kz + 1 >= 1) as free VRAM demands, and raises
+    MemoryError if even the minimal block will not fit, mirroring the host
+    guard in :func:`convolve_fft_xy_oa_z`.
     """
     free, _ = torch.cuda.mem_get_info()
     budget = free - CUDA_MEMORY_HEADROOM_BYTES
-    n_fft = 1 << (nz + kz - 2).bit_length()   # whole padded array in one block
     n_fft_min = 1 << (kz - 1).bit_length()    # smallest power of two >= kz
+    n_fft = 1 << (nz + kz - 2).bit_length()   # whole padded array in one block
+    n_fft = max(n_fft_min, min(n_fft, CUDA_MAX_BLOCK_FFT))
     while n_fft >= n_fft_min:
         if cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize) <= budget:
             return n_fft
@@ -267,6 +276,25 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
 
     block_len = n_fft - kz + 1
     transform_shape = (nx, ny, n_fft)
+
+    # WORKAROUND for pytorch/pytorch#169670: multithreaded MKL 2024.x DFTI
+    # mis-normalizes a 3-D complex-to-real transform whose two leading
+    # dimensions are exactly 2048 x 2048, returning the correct field scaled by
+    # 1/2048^2 -- silently, and only at >= 4 threads (ATen passes
+    # at::get_num_threads() to DFTI_THREAD_LIMIT, so MKL_NUM_THREADS does not
+    # reach it; the proposed fix, PR #169743, was closed unmerged). The forward
+    # rfftn is fine, a 2-D c2r at 2048^2 is fine, a 3-D c2c is fine, and every
+    # production nest shape is fine -- it is specifically this 3-D c2r
+    # descriptor. Without the guard, simulate(2048^2, device='cpu') runs a
+    # cascade whose every class increment is 2e-7 of its true amplitude.
+    # Guarded on the trigger, not on the output: the result is numerically
+    # correct apart from the scale, so nothing about it looks wrong. Rescaling
+    # by 2048^2 would be the fragile fix -- it double-corrects the day MKL is
+    # repaired -- so drop to 2 threads instead and restore afterwards.
+    torch_threads = torch.get_num_threads()
+    if device != 'cuda' and transform_shape[:2] == (2048, 2048):
+        torch.set_num_threads(2)
+
     field_t = torch.from_numpy(field).to(device)
     kernel_t = torch.from_numpy(kernel).to(device)
 
@@ -296,6 +324,7 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
 
     trimmed = accum[..., cz:cz + nz].contiguous()
     del accum
+    torch.set_num_threads(torch_threads)
     return trimmed.cpu().numpy()
 
 
