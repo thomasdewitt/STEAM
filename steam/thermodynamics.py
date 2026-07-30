@@ -2,11 +2,12 @@
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 import netCDF4
 from . import constants
+from .output import compression_kwargs
 from .constants import (
     specific_heat_dry_air as cp,
     latent_heat_vaporization as Lv,
@@ -110,9 +111,9 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
         NetCDF group to operate on. None means the root group; pass e.g.
         "refinements/r0" to run diagnostics on a refinement group.
     compress : bool or None
-        If True, new diagnostic variables are written with zlib
-        compression at complevel=4. None (default) uses the module-level
-        ``steam.constants.output_compress`` setting.
+        If True, new diagnostic variables are written with the
+        ``steam.constants.output_compression`` filter. None (default) uses
+        the module-level ``steam.constants.output_compress`` setting.
     n_workers : int or None
         Number of threads used to compute chunks in parallel. None (default)
         picks ``min(8, n_chunks, cpu_count)``. Pass 1 for serial. Results are
@@ -142,9 +143,10 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
                   "p": ("Pa", "pressure")}
     for name, (units, long_name) in diag_names.items():
         if name not in grp.variables:
+            diag_chunks = (min(chunk_nx, nx), min(64, ny), nz)
             v = grp.createVariable(name, "f4", ("x", "y", "z"),
-                                   zlib=compress, complevel=4 if compress else 0,
-                                   chunksizes=(min(chunk_nx, nx), min(64, ny), nz))
+                                   chunksizes=diag_chunks,
+                                   **compression_kwargs(compress, diag_chunks))
             v.units = units
             v.long_name = long_name
 
@@ -191,19 +193,30 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
             done += 1
             _progress(done)
     else:
+        # Keep exactly n_workers chunks in flight: as soon as ANY worker
+        # finishes, write its result and immediately read and submit the next.
+        # In fixed batches of n_workers the pool sat idle through the whole
+        # serial read/compress/write leg of every batch, which is most of the
+        # wall time (measured 86.7 s vs 24.0 s at 2048^2 x 115). Reads and
+        # writes stay on the main thread -- the HDF5 layer is not re-entrant.
+        # Writes land in completion order rather than chunk order, which is
+        # safe because each chunk owns a disjoint x-slab.
         done = 0
+        next_chunk = 0
+        in_flight = {}
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for i in range(0, n_chunks, n_workers):
-                batch = chunks[i:i + n_workers]
-                futures = {}
-                for x0, x1 in batch:
+            while next_chunk < n_chunks or in_flight:
+                while len(in_flight) < n_workers and next_chunk < n_chunks:
+                    x0, x1 = chunks[next_chunk]
+                    next_chunk += 1
                     h_chunk = h_var[x0:x1, :, :]
                     qt_chunk = qt_var[x0:x1, :, :]
                     fut = pool.submit(recover_diagnostics, h_chunk, qt_chunk,
                                       z_values, _p_slice(x0, x1))
-                    futures[fut] = (x0, x1)
-                for fut in as_completed(futures):
-                    x0, x1 = futures[fut]
+                    in_flight[fut] = (x0, x1)
+                finished, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    x0, x1 = in_flight.pop(fut)
                     _write_result(x0, x1, fut.result())
                     done += 1
                     _progress(done)

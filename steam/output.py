@@ -7,6 +7,25 @@ from pathlib import Path
 from . import constants
 
 
+def compression_kwargs(compress, chunksizes):
+    """netCDF4 filter keywords for a float32 variable with these chunks.
+
+    One place for the filter choice (steam.constants.output_compression) and
+    for its two traps: ``shuffle=True`` is SILENTLY IGNORED by every non-zlib
+    compressor, so the byte shuffle has to be asked for as ``blosc_shuffle``;
+    and a chunk below ``output_compression_min_chunk_bytes`` is written raw,
+    because blosc fails the write outright on chunks too small for its header
+    (see the constant).
+    """
+    if not compress:
+        return dict(compression=None)
+    chunk_bytes = int(np.prod(chunksizes)) * 4
+    if chunk_bytes < constants.output_compression_min_chunk_bytes:
+        return dict(compression=None)
+    return dict(compression=constants.output_compression,
+                complevel=constants.output_complevel, blosc_shuffle=1)
+
+
 def write_netcdf(
     output_path, h_3d, qt_3d,
     x_coords, y_coords, z_coords,
@@ -41,9 +60,9 @@ def write_netcdf(
         existing file in append mode and write into a NetCDF4 group of this
         name — how refine() stores a nest alongside its parent.
     compress : bool or None
-        If True, write the 3D data variables with
-        zlib compression at complevel=4. None (default) uses the
-        module-level ``steam.constants.output_compress`` setting.
+        If True, write the 3D data variables with the
+        ``steam.constants.output_compression`` filter. None (default) uses
+        the module-level ``steam.constants.output_compress`` setting.
 
     Returns
     -------
@@ -89,17 +108,18 @@ def write_netcdf(
     z_var.long_name = "z coordinate (height)"
 
     # Data variables — chunked, optionally compressed
+    field_chunks = (min(64, nx_final), min(64, ny_final), nz_final)
     h_var = ds.createVariable(
-        "h", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
-        chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
+        "h", "f4", ("x", "y", "z"), chunksizes=field_chunks,
+        **compression_kwargs(compress, field_chunks),
     )
     h_var[:] = h_3d
     h_var.units = "J/kg"
     h_var.long_name = "moist static energy"
 
     qt_var = ds.createVariable(
-        "qt", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
-        chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
+        "qt", "f4", ("x", "y", "z"), chunksizes=field_chunks,
+        **compression_kwargs(compress, field_chunks),
     )
     qt_var[:] = qt_3d
     qt_var.units = "kg/kg"
@@ -107,8 +127,8 @@ def write_netcdf(
 
     if flux_3d is not None:
         flux_var = ds.createVariable(
-            "flux", "f4", ("x", "y", "z"), zlib=compress, complevel=4 if compress else 0,
-            chunksizes=(min(64, nx_final), min(64, ny_final), nz_final),
+            "flux", "f4", ("x", "y", "z"), chunksizes=field_chunks,
+            **compression_kwargs(compress, field_chunks),
         )
         flux_var[:] = flux_3d
         flux_var.units = "1"
@@ -227,7 +247,7 @@ def write_netcdf(
     if 'p_bottom' in p:
         pb_var = ds.createVariable(
             "p_bottom", "f4", ("x", "y"),
-            zlib=compress, complevel=4 if compress else 0,
+            **compression_kwargs(compress, (nx_final, ny_final)),
         )
         pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
         pb_var.units = "Pa"
@@ -261,7 +281,7 @@ def write_class_increments(output_path, increment_dir, grids,
     group : str or None
         Parent group to place ``class_increments`` under (None = root).
     compress : bool or None
-        zlib compression as in write_netcdf.
+        compression as in write_netcdf.
     """
     if compress is None:
         compress = constants.output_compress
@@ -284,14 +304,14 @@ def write_class_increments(output_path, increment_dir, grids,
         sub.createDimension("x", nx_i)
         sub.createDimension("y", ny_i)
         sub.createDimension("z", nz_i)
+        class_chunks = (min(64, nx_i), min(64, ny_i), nz_i)
         z_var = sub.createVariable("z", "f4", ("z",))
         z_var[:] = np.asarray(grids['z_arrays'][i], dtype=np.float32)
         z_var.units = "m"
         for name, units in names:
             v = sub.createVariable(
-                name, "f4", ("x", "y", "z"),
-                zlib=compress, complevel=4 if compress else 0,
-                chunksizes=(min(64, nx_i), min(64, ny_i), nz_i),
+                name, "f4", ("x", "y", "z"), chunksizes=class_chunks,
+                **compression_kwargs(compress, class_chunks),
             )
             v[:] = arrays[name]
             v.units = units

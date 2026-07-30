@@ -35,6 +35,32 @@ hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
 haar_to_mhat = 0.28927
 
 # NetCDF output default: whether h, qt, diagnostic variables, and p_bottom
-# are written with zlib compression (complevel=4). Overridden by an explicit
-# compress= kwarg on simulate(), write_netcdf(), compute_diagnostics().
+# are compressed at all. Overridden by an explicit compress= kwarg on
+# simulate(), write_netcdf(), compute_diagnostics().
 output_compress = False
+
+# The filter used when compression is on. blosc_zstd at complevel 1 writes
+# 8-11x faster than the former zlib complevel 4 for 5% more bytes (measured
+# on production fields: 20.7 s -> 1.8 s for a 1.93 GB h field), and reads
+# 2-3x faster. Byte shuffling must be asked for as blosc_shuffle -- netCDF4
+# SILENTLY IGNORES shuffle=True for every non-zlib compressor, and without
+# the shuffle zstd loses most of its ratio on float32 fields.
+#
+# Both blosc and zstd are HDF5 filter PLUGINS: a reader without them cannot
+# open the variable at all, where zlib is universal. The system netCDF here
+# (ncdump, and turbulon-analysis) has both. Switch to "zlib" complevel 1 for
+# anything archival or handed to a collaborator.
+output_compression = "blosc_zstd"
+output_complevel = 1
+
+# Chunks smaller than this are written RAW even when compression is on.
+# blosc's HDF5 filter does not degrade gracefully: given a chunk it cannot
+# shrink, and no room for its 16-byte header, it fails the write outright
+# with "Buffer is uncompressible". Measured on this box: incompressible
+# chunks up to 1024 bytes fail, 1536 and above succeed. The coarse
+# class-increment classes are exactly that small -- class 0 of a production
+# square is 4 x 4 x 12 = 768 bytes of noise -- so the pyramid's top would
+# take the whole write down. The threshold below is a wide margin over the
+# measured cliff and costs nothing: a chunk this small is a rounding error
+# beside the ~11 kB of HDF5 metadata the variable carries anyway.
+output_compression_min_chunk_bytes = 16 * 1024

@@ -4,6 +4,7 @@ import zlib
 import numpy as np
 import netCDF4
 import torch
+from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from . import constants
@@ -593,9 +594,9 @@ def simulate(
         Turbulon centers are not placed within min_distance_to_ground × k_z
         of the ground. Must be a non-negative integer.
     compress : bool or None
-        If True, 3D data variables in the output NetCDF are written with
-        zlib compression at complevel=4. None (default) uses the module-level
-        ``steam.constants.output_compress`` setting.
+        If True, 3D data variables in the output NetCDF are written with the
+        ``steam.constants.output_compression`` filter. None (default) uses the
+        module-level ``steam.constants.output_compress`` setting.
     device : {'cpu', 'cuda'}
         Where the per-class convolutions run. 'cuda' keeps the finest-grid FFT
         working set off the host — the host holds only its persistent float32
@@ -844,7 +845,13 @@ def simulate(
     increment_dir = None
     if save_class_increments:
         import tempfile
-        increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_"))
+        # Stage beside the output file, not in the default temporary
+        # directory: /tmp is tmpfs (RAM) on Linux, so the ~6.5 GB of staged
+        # per-class increments would be charged against the same memory the
+        # cascade is competing for. The output directory is sized for files
+        # like these by construction.
+        increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_",
+                                              dir=Path(output_path).parent))
 
     comp_k = _compensation_profiles(k_values, grids['z_arrays'],
                                     spheroscale_profile, z_profile,
@@ -1276,19 +1283,18 @@ def cascade_loop(
             # at production amplitudes.
             increment = CONVOLVE(W, kernel, device=device)
             del W
-            if increment_dir is not None:
-                before = perturbation_field.copy()
             _bounded_amplitude_add(perturbation_field, mean_1d, increment,
-                                   phi_min, phi_max, window=window, device=device)
-            del increment
+                                   phi_min, phi_max, window=window, device=device,
+                                   record_applied=increment_dir is not None)
             if increment_dir is not None:
                 # The ACTUALLY-ADDED increment (post bounded add), on this
                 # class's own working grid — the per-class record that lets
                 # a nest re-scale inherited content to its own
                 # INTERPOLATION_COMPENSATION reference (see refine).
-                np.subtract(perturbation_field, before, out=before)
-                np.save(Path(increment_dir) / f"c{i:02d}_{name}.npy", before)
-                del before
+                # record_applied left it in `increment` itself, so no
+                # full-size copy of the field is held across the add.
+                np.save(Path(increment_dir) / f"c{i:02d}_{name}.npy", increment)
+            del increment
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           done                     ')
 
@@ -1834,33 +1840,101 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     return C_k
 
 
+@njit(parallel=True, cache=True)
+def _gradient_stencil(field_3d, two_dx, two_dy,
+                      uniform_z, two_dz, a_z, b_z, c_z, dz_first, dz_last,
+                      grad_h, grad_z):
+    """Fused stencil behind :func:`_gradient_components` -- see its docstring
+    for the arithmetic this reproduces operation for operation."""
+    nx, ny, nz = field_3d.shape
+    for ix in prange(nx):
+        ix_plus = ix + 1 if ix + 1 < nx else 0
+        ix_minus = ix - 1 if ix > 0 else nx - 1
+        for iy in range(ny):
+            iy_plus = iy + 1 if iy + 1 < ny else 0
+            iy_minus = iy - 1 if iy > 0 else ny - 1
+            for iz in range(nz):
+                gx = (field_3d[ix_plus, iy, iz]
+                      - field_3d[ix_minus, iy, iz]) / two_dx
+                gy = (field_3d[ix, iy_plus, iz]
+                      - field_3d[ix, iy_minus, iz]) / two_dy
+                grad_h[ix, iy, iz] = np.sqrt(gx * gx + gy * gy)
+
+            if uniform_z:
+                for iz in range(1, nz - 1):
+                    grad_z[ix, iy, iz] = abs(
+                        (field_3d[ix, iy, iz + 1]
+                         - field_3d[ix, iy, iz - 1]) / two_dz)
+            else:
+                for iz in range(1, nz - 1):
+                    grad_z[ix, iy, iz] = abs(
+                        a_z[iz - 1] * field_3d[ix, iy, iz - 1]
+                        + b_z[iz - 1] * field_3d[ix, iy, iz]
+                        + c_z[iz - 1] * field_3d[ix, iy, iz + 1])
+            grad_z[ix, iy, 0] = abs(
+                (field_3d[ix, iy, 1] - field_3d[ix, iy, 0]) / dz_first)
+            grad_z[ix, iy, nz - 1] = abs(
+                (field_3d[ix, iy, nz - 1]
+                 - field_3d[ix, iy, nz - 2]) / dz_last)
+
+
 def _gradient_components(field_3d, dx, dy, z_coords):
     """Horizontal gradient magnitude |∇_h f| and vertical |∂f/∂z|.
 
     Periodic central differences in x,y; np.gradient in z (z_coords may be a
     scalar spacing or a 1D array of z-positions). Returns (grad_h, grad_z),
-    both non-negative. In-place accumulation keeps the peak at ~3 arrays.
+    both non-negative.
+
+    One fused numba pass, which is ~3x faster than the four np.roll copies
+    plus np.gradient it replaces and -- the reason it is worth the kernel --
+    holds TWO full-size arrays instead of three at the cascade's peak
+    instant, which is where the largest nest size is set.
+
+    Bit-identical to the numpy version it replaces, which requires
+    reproducing np.gradient's z arithmetic exactly rather than merely
+    equivalently:
+
+    * float32 throughout. np.gradient keeps the input dtype for an inexact
+      input, and the coefficients inherit float32 from ``np.diff`` of a
+      float32 z (NEP 50: the literal 2. in numpy's uniform branch is weak
+      and does not promote).
+    * a uniform z reduces to numpy's ``(f[k+1] - f[k-1]) / (2 dz)``, which
+      rounds differently from the general three-term form, so both branches
+      are kept.
+    * the endpoints are np.gradient's DEFAULT edge_order=1 one-sided
+      differences, not the second-order edges.
     """
-    dx_f32 = np.float32(2 * dx)
-    dy_f32 = np.float32(2 * dy)
+    two_dx = np.float32(2 * dx)
+    two_dy = np.float32(2 * dy)
 
-    # X: periodic central difference → grad_h holds grad_x**2
-    grad_h = np.roll(field_3d, -1, axis=0)
-    grad_h -= np.roll(field_3d, 1, axis=0)
-    grad_h /= dx_f32
-    grad_h **= 2
+    z = np.asarray(z_coords, dtype=np.float32)
+    if z.ndim == 0:
+        # Scalar spacing: uniform, and np.gradient never forms a difference.
+        uniform_z = True
+        two_dz = np.float32(2.0) * z[()]
+        dz_first = dz_last = z[()]
+        a_z = b_z = c_z = np.zeros(1, dtype=np.float32)
+    else:
+        dz = np.diff(z)
+        dz_first = dz[0]
+        dz_last = dz[-1]
+        uniform_z = bool((dz == dz[0]).all())
+        if uniform_z:
+            two_dz = np.float32(2.0) * dz[0]
+            a_z = b_z = c_z = np.zeros(1, dtype=np.float32)
+        else:
+            two_dz = np.float32(0.0)
+            dz1 = dz[:-1]
+            dz2 = dz[1:]
+            a_z = -(dz2) / (dz1 * (dz1 + dz2))
+            b_z = (dz2 - dz1) / (dz1 * dz2)
+            c_z = dz1 / (dz2 * (dz1 + dz2))
 
-    # Y: accumulate grad_y**2
-    grad = np.roll(field_3d, -1, axis=1)
-    grad -= np.roll(field_3d, 1, axis=1)
-    grad /= dy_f32
-    grad **= 2
-    grad_h += grad
-    del grad
-    np.sqrt(grad_h, out=grad_h)
-
-    grad_z = np.gradient(field_3d, z_coords.astype(np.float32) if hasattr(z_coords, 'astype') else z_coords, axis=2)
-    np.abs(grad_z, out=grad_z)
+    grad_h = np.empty_like(field_3d)
+    grad_z = np.empty_like(field_3d)
+    _gradient_stencil(field_3d, two_dx, two_dy,
+                      uniform_z, two_dz, a_z, b_z, c_z, dz_first, dz_last,
+                      grad_h, grad_z)
     return grad_h, grad_z
 
 
@@ -1921,7 +1995,8 @@ def _level_mean_abs(field, n_points):
 
 
 def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
-                                phi_min, phi_max, window, n_rescale):
+                                phi_min, phi_max, window, n_rescale,
+                                record_applied=False):
     """_bounded_amplitude_add on the GPU, all levels solved simultaneously.
 
     The same algorithm as the CPU path, with every per-level scalar (the
@@ -1994,12 +2069,19 @@ def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
 
     torch.sub(e, (0.5 * (mu_lo + mu_hi)).to(torch.float32), out=scratch).clamp_(lo, hi)
     scratch.sub_(mean_column)   # the bounded field, back to a perturbation
+    if record_applied:
+        # after - before, in the buffer the bisection has just finished with
+        # (e aliases d), so recording the increment costs no extra VRAM: the
+        # original perturbation is still on the host, and goes back up.
+        e.copy_(torch.from_numpy(perturbation_field))
+        torch.sub(scratch, e, out=e)
+        torch.from_numpy(increment).copy_(e)
     torch.from_numpy(perturbation_field).copy_(scratch)
 
 
 def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
                            phi_min, phi_max, window=None, n_rescale=10,
-                           device='cpu'):
+                           device='cpu', record_applied=False):
     """Add a class's increment under the three deposit conditions.
 
     For each z-level, the added perturbation delta satisfies (ruling
@@ -2039,6 +2121,15 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     domain whose statistics are enforced; caps are respected everywhere,
     halo included. ``increment`` must not alias ``perturbation_field``.
 
+    With ``record_applied``, ``increment`` is instead left holding the delta
+    the field ACTUALLY took, ``after - before``, which is what a caller
+    recording per-class increments wants. It is not the solved d: the
+    float32 ``+=`` rounds, and the recorded increments feed nest
+    continuation, so the difference is taken from the field itself. Handing
+    it back this way is why the caller needs no full-size copy of the field
+    across the call — the difference is formed one level at a time here, and
+    on the GPU path in a buffer the solve has already finished with.
+
     The levels are solved on a thread pool: each level's solve reads and
     writes only its own slice and every reduction is within a level, so
     they are independent (numpy releases the GIL on these whole-array
@@ -2057,7 +2148,8 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     """
     if device == 'cuda':
         _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
-                                    phi_min, phi_max, window, n_rescale)
+                                    phi_min, phi_max, window, n_rescale,
+                                    record_applied)
         return
 
     lo = np.float32(phi_min)
@@ -2073,35 +2165,40 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
         a0 = float(np.abs(dw).mean(dtype=np.float64))
         if a0 <= 0.0:
             np.clip(d, cap_lo, cap_hi, out=d)   # halo may still carry mass
-            perturbation_field[:, :, lev] += d
-            return
-        for _ in range(n_rescale):
+        else:
+            for _ in range(n_rescale):
+                d -= np.float32(dw.mean(dtype=np.float64))
+                np.clip(d, cap_lo, cap_hi, out=d)
+                m_abs = float(np.abs(dw).mean(dtype=np.float64))
+                if m_abs <= 0.0:
+                    break
+                scale = min(a0 / m_abs, 2.0)
+                if abs(scale - 1.0) < 1e-4:
+                    break
+                d *= np.float32(scale)
             d -= np.float32(dw.mean(dtype=np.float64))
             np.clip(d, cap_lo, cap_hi, out=d)
-            m_abs = float(np.abs(dw).mean(dtype=np.float64))
-            if m_abs <= 0.0:
-                break
-            scale = min(a0 / m_abs, 2.0)
-            if abs(scale - 1.0) < 1e-4:
-                break
-            d *= np.float32(scale)
-        d -= np.float32(dw.mean(dtype=np.float64))
-        np.clip(d, cap_lo, cap_hi, out=d)
-        if abs(float(dw.mean(dtype=np.float64))) > 1e-9 * a0:
-            mu_lo, mu_hi = -width, width
-            trial = np.empty_like(d)
-            trial_w = _inner_view(trial, window)
-            for _ in range(60):
-                mu = 0.5 * (mu_lo + mu_hi)
-                np.subtract(d, np.float32(mu), out=trial)
-                np.clip(trial, cap_lo, cap_hi, out=trial)
-                if float(trial_w.mean(dtype=np.float64)) > 0.0:
-                    mu_lo = mu
-                else:
-                    mu_hi = mu
-            np.subtract(d, np.float32(0.5 * (mu_lo + mu_hi)), out=d)
-            np.clip(d, cap_lo, cap_hi, out=d)
-        perturbation_field[:, :, lev] += d
+            if abs(float(dw.mean(dtype=np.float64))) > 1e-9 * a0:
+                mu_lo, mu_hi = -width, width
+                trial = np.empty_like(d)
+                trial_w = _inner_view(trial, window)
+                for _ in range(60):
+                    mu = 0.5 * (mu_lo + mu_hi)
+                    np.subtract(d, np.float32(mu), out=trial)
+                    np.clip(trial, cap_lo, cap_hi, out=trial)
+                    if float(trial_w.mean(dtype=np.float64)) > 0.0:
+                        mu_lo = mu
+                    else:
+                        mu_hi = mu
+                np.subtract(d, np.float32(0.5 * (mu_lo + mu_hi)), out=d)
+                np.clip(d, cap_lo, cap_hi, out=d)
+        if not record_applied:
+            perturbation_field[:, :, lev] += d
+        else:
+            before = perturbation_field[:, :, lev].copy()
+            perturbation_field[:, :, lev] += d
+            np.subtract(perturbation_field[:, :, lev], before,
+                        out=increment[:, :, lev])
 
     # 8 workers, not parallel_workers: this loop saturates memory bandwidth
     # (measured 19.7 s at 8, 20.9 s at 30 on the production shape), and extra
@@ -2160,6 +2257,36 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=N
         np.clip(field_lev - mu, lo, hi, out=field_lev)
         field_lev -= float(mean_1d[lev])
         perturbation_field[:, :, lev] = field_lev
+
+
+def _contiguous_runs(indices):
+    """Split a 1D index array into (start, stop) runs of consecutive values."""
+    breaks = np.flatnonzero(np.diff(indices) != 1) + 1
+    return [(int(run[0]), int(run[-1]) + 1)
+            for run in np.split(indices, breaks)]
+
+
+def _read_parent_slab(variable, x_indices, y_indices, z_indices):
+    """``variable[np.ix_(x, y, z)]`` read as NetCDF hyperslabs.
+
+    Each index array is a run of consecutive parent cells, wrapped modulo the
+    axis length where the parent is periodic, so it is one or two contiguous
+    ranges. Reading those directly means the nest touches only the cells it
+    keeps: the production strip's pad is 21 MB of a 1.93 GB parent field, and
+    reading the field whole cost ~2x its size transiently on the way to the
+    same 21 MB. The floats are identical -- a hyperslab returns what slicing
+    a full read returns.
+    """
+    x_blocks = []
+    for x0, x1 in _contiguous_runs(x_indices):
+        y_blocks = []
+        for y0, y1 in _contiguous_runs(y_indices):
+            z_blocks = [np.asarray(variable[x0:x1, y0:y1, z0:z1],
+                                   dtype=np.float32)
+                        for z0, z1 in _contiguous_runs(z_indices)]
+            y_blocks.append(np.concatenate(z_blocks, axis=2))
+        x_blocks.append(np.concatenate(y_blocks, axis=1))
+    return np.concatenate(x_blocks, axis=0)
 
 
 def refine(
@@ -2227,8 +2354,9 @@ def refine(
         parent group. The piecewise-isotropic option genuinely bites here:
         deep nests reach classes with k below the spheroscale.
     compress : bool or None
-        If True, 3D data variables in the output group are zlib-compressed at
-        complevel=4. None (default) uses ``steam.constants.output_compress``.
+        If True, 3D data variables in the output group are written with the
+        ``steam.constants.output_compression`` filter. None (default) uses
+        ``steam.constants.output_compress``.
     device : {'cpu', 'cuda'}
         Where the per-class convolutions run, as in simulate().
 
@@ -2244,8 +2372,6 @@ def refine(
     ds = netCDF4.Dataset(parent_path, "r")
     grp = ds if parent_group == '/' else ds[parent_group]
 
-    h_3d = grp.variables["h"][:].astype(np.float32)
-    qt_3d = grp.variables["qt"][:].astype(np.float32)
     if "flux" not in grp.variables:
         ds.close()
         raise ValueError(
@@ -2253,7 +2379,13 @@ def refine(
             f"continue the flux cascade. Regenerate the parent with the "
             f"current version of simulate()."
         )
-    flux_3d = grp.variables["flux"][:].astype(np.float32)
+    # h, qt and flux themselves are NOT read here: the nest keeps only the
+    # region plus its halo (a 2048 x 22 x 115 pad against a 2048^2 x 115
+    # parent for the production strip), and the extraction indices are not
+    # known until the halo widths are computed below. The file is reopened
+    # for a hyperslab read once they are.
+    parent_nx = len(grp.dimensions["x"])
+    parent_ny = len(grp.dimensions["y"])
     x_coords = grp.variables["x"][:]
     y_coords = grp.variables["y"][:]
     z_coords = np.asarray(grp.variables["z"][:], dtype=np.float64)
@@ -2352,8 +2484,6 @@ def refine(
     spheroscale_mean = float(np.mean(spheroscale_profile))
     k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
 
-    parent_nx = h_3d.shape[0]
-    parent_ny = h_3d.shape[1]
     inner_nx = x_stop - x_start
     inner_ny = y_stop - y_start
     if inner_nx < 1 or inner_ny < 1:
@@ -2494,10 +2624,12 @@ def refine(
         )
     z_coords_slice = z_coords[z_indices]
 
-    h_pad = h_3d[np.ix_(x_indices, y_indices, z_indices)]
-    qt_pad = qt_3d[np.ix_(x_indices, y_indices, z_indices)]
-    flux_pad = np.ascontiguousarray(flux_3d[np.ix_(x_indices, y_indices, z_indices)])
-    del h_3d, qt_3d, flux_3d
+    ds = netCDF4.Dataset(parent_path, "r")
+    grp = ds if parent_group == '/' else ds[parent_group]
+    h_pad = _read_parent_slab(grp.variables["h"], x_indices, y_indices, z_indices)
+    qt_pad = _read_parent_slab(grp.variables["qt"], x_indices, y_indices, z_indices)
+    flux_pad = _read_parent_slab(grp.variables["flux"], x_indices, y_indices, z_indices)
+    ds.close()
 
     h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
     qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
