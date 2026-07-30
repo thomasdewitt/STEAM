@@ -3,6 +3,7 @@
 import zlib
 import numpy as np
 import netCDF4
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from . import constants
 from .constants import (
@@ -1872,24 +1873,38 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     on levels pinned at a bound (~0.97 aloft), and the residual means
     compound down-cascade (caught 2026-07-28: +54x qt mean at 12 km).
 
-    Modifies perturbation_field in place; consumes ``increment``.
-    ``window`` (see _inner_view) is the domain whose statistics are
-    enforced; caps are respected everywhere, halo included.
+    Modifies perturbation_field in place; ``increment`` is scratch (the
+    solve works on per-level copies, but no promise it survives) and the
+    caller drops it immediately after. ``window`` (see _inner_view) is the
+    domain whose statistics are enforced; caps are respected everywhere,
+    halo included. ``increment`` must not alias ``perturbation_field``.
+
+    The levels are solved on a thread pool: each level's solve reads and
+    writes only its own slice and every reduction is within a level, so
+    they are independent (numpy releases the GIL on these whole-array
+    operations). The solve works on a CONTIGUOUS COPY of the level
+    because the level axis is last on a C-ordered (x, y, z) array — a
+    [:, :, lev] view is strided at nz*4 bytes, one useful float per cache
+    line, and the bisection walks it 60 times. Both are exact: the copy
+    is elementwise and numpy's pairwise mean follows index order, not
+    memory order, so the float64 level means are bit-for-bit the same as
+    the strided ones.
     """
     lo = np.float32(phi_min)
     hi = np.float32(phi_max)
     width = float(phi_max) - float(phi_min)
-    for lev in range(perturbation_field.shape[2]):
+
+    def solve_level(lev):
         phi = perturbation_field[:, :, lev] + mean_1d[lev]
         cap_lo = lo - phi
         cap_hi = hi - phi
-        d = increment[:, :, lev]
+        d = np.ascontiguousarray(increment[:, :, lev])
         dw = _inner_view(d, window)
         a0 = float(np.abs(dw).mean(dtype=np.float64))
         if a0 <= 0.0:
             np.clip(d, cap_lo, cap_hi, out=d)   # halo may still carry mass
             perturbation_field[:, :, lev] += d
-            continue
+            return
         for _ in range(n_rescale):
             d -= np.float32(dw.mean(dtype=np.float64))
             np.clip(d, cap_lo, cap_hi, out=d)
@@ -1917,6 +1932,14 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
             np.subtract(d, np.float32(0.5 * (mu_lo + mu_hi)), out=d)
             np.clip(d, cap_lo, cap_hi, out=d)
         perturbation_field[:, :, lev] += d
+
+    # 8 workers, not parallel_workers: this loop saturates memory bandwidth
+    # (measured 19.7 s at 8, 20.9 s at 30 on the production shape), and extra
+    # workers only add per-level scratch and oversubscribe when a square and
+    # a nest run concurrently.
+    nz = perturbation_field.shape[2]
+    with ThreadPoolExecutor(max_workers=max(1, min(8, nz))) as pool:
+        list(pool.map(solve_level, range(nz)))
 
 
 def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=None):
