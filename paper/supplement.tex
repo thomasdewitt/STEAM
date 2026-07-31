@@ -91,29 +91,31 @@ is required to be at least one profile cell and the profile is edge padded
 by the maximum half-width. The result is multiplied by the calibration
 constant $\lambda$ and taken in absolute value.
 
-$\lambda$ is calibrated end-to-end from the consistency requirement of
-Appendix A: the vertical Haar fluctuation of the simulated fields,
-evaluated at the vertical outer scale, must equal that of the mean
-profile. Full simulations are run with linear mean profiles for both
-scalars on a calibration geometry whose vertical extent resolves one
-vertical outer scale. The mean absolute vertical Haar fluctuation of the
-simulated columns is computed at dyadic lags; a line of fixed
-theoretical slope $H_v = H_h/H_z$ is anchored at the second-smallest lag
-and extrapolated to $k_{z,L}$, and $\lambda$ is the ratio of the
-profile's Haar fluctuation there to the extrapolated value, iterated to
-a fixed point (the bound projection makes the response slightly
-sublinear, so a single pass under-corrects). The line is anchored at
-small lags and extrapolated upward deliberately: near the outer scale
-the directly measured fluctuation curve bends where the profile and the
-turbulence mix, and the criterion concerns the cascade amplitude, not
-the mixing. Because the same Haar operator is applied to the profile and
-to the simulated field, all definitional conventions -- the envelope
-amplitude convention and the delivery convention of the
-interpolation-compensation factors below -- are absorbed into $\lambda$.
-The calibrated value depends systematically on the horizontal Hurst
-exponent (delivery grows with $H_h$), so $\lambda$ is calibrated at the
-production $H_h$ and is not transferable across it; for $H_h = 0.45$,
-$\lambda = 0.28927$. The scale-dependent amplitudes
+$\lambda$ is set by the consistency requirement of Appendix A: the
+vertical Haar fluctuation of the simulated fields at the vertical outer
+scale must equal that of the mean profile. It is calibrated by running
+the full algorithm on linear mean profiles for both scalars, on a domain
+whose vertical extent contains one vertical outer scale. The mean
+absolute vertical Haar fluctuation of the simulated columns is computed
+at logarithmically spaced lags. A line of fixed slope $H_v = H_h/H_z$ is
+anchored to the fluctuation at the second-smallest lag (the smallest,
+at the grid spacing, is affected by discretization) and extrapolated to
+$k_{z,L}$. The criterion is evaluated on this extrapolated line rather
+than on the fluctuations measured at $k_{z,L}$ itself, because near the
+outer scale the measured fluctuations mix the cascade with the profile,
+and the criterion concerns the cascade amplitude alone. The ratio of
+the profile's Haar fluctuation at $k_{z,L}$ to the extrapolated value,
+averaged geometrically over the two scalars, multiplies $\lambda$, and
+the calibration is repeated until the ratio converges to one. The
+iteration is needed because the bound projection makes the response to
+$\lambda$ slightly sublinear, so a single pass under-corrects. Because
+the same Haar operator is applied to the profile and to the simulated
+field, the envelope amplitude convention and the reference-resolution
+convention of the interpolation-compensation factors below are absorbed
+into $\lambda$. The fluctuation amplitude the cascade realizes from a
+given $C_{\Phi,L}$ grows systematically with the horizontal Hurst
+exponent, so $\lambda$ is calibrated at the production $H_h$ and does
+not transfer across it; for $H_h = 0.45$, $\lambda = 0.28927$. The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 as described in Appendix A and are interpolated
 to each size class's vertical grid.
@@ -555,11 +557,11 @@ the 6--8~km mid-level band. The normalization test overlays the
 field's vertical $\hat{M}_1(\ell)$ against the same operator applied to
 the input mean profile: by the $C_{\Phi,L}$ construction
 (Sect.~\ref{ssect:steam algorithm spec}, Normalization) the two must
-agree at the vertical outer scale -- in the extrapolated sense of the
-$\lambda$ calibration, i.e. the power law fitted to the field's
-fluctuations below the outer scale and extrapolated to $k_{z,L}$
-matches the profile fluctuation there, while the directly measured
-curve bends upward near $k_{z,L}$ where profile and turbulence mix. Moment-scaling exponents $\xi(q)$
+agree at the vertical outer scale, in the same sense as the $\lambda$
+calibration: a power law fitted to the field's fluctuations below the
+outer scale and extrapolated to $k_{z,L}$ reproduces the profile
+fluctuation there. The directly measured curve departs from the power
+law near $k_{z,L}$, where the profile and the turbulence mix. Moment-scaling exponents $\xi(q)$
 are least-squares slopes of $\ln \hat{M}_q$ against $\ln \ell$ over
 lags up to 6~km (the nest's own classes plus one inherited octave), for
 $q$ from 0.2 to 3; for the flux the moment scaling $K(q)$ is also
