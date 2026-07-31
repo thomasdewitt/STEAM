@@ -22,6 +22,7 @@ from .utils import (
     zoom_trilinear,
     zoom_bilinear,
     available_memory_bytes,
+    cuda_level_batch_size,
     fft_convolution_bytes,
     MEMORY_HEADROOM_BYTES,
 )
@@ -1196,19 +1197,17 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
-        if increment_dir is not None:
-            flux_before = flux.copy()
-        S_k, _ = _advance_flux(
+        S_k, flux_increment, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
             device=device, window=window, amplitude_factor=comp_k[i],
+            return_increment=increment_dir is not None,
         )
         if increment_dir is not None:
             # Net flux change of this class (increment + clip + renorm),
             # for the nest-side compensation re-scaling (see refine).
-            np.subtract(flux, flux_before, out=flux_before)
-            np.save(Path(increment_dir) / f"c{i:02d}_flux.npy", flux_before)
-            del flux_before
+            np.save(Path(increment_dir) / f"c{i:02d}_flux.npy", flux_increment)
+            del flux_increment
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -1255,10 +1254,20 @@ def cascade_loop(
             # delivered per-level amplitude stays C_k at every class.
             W *= S_k            # joint pattern W*S_k (sparse at centers)
             W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
+            # _bound_taper consumed running_sum, so its buffer is dead and is
+            # reused here for |W| instead of allocating (and page-faulting) a
+            # second full-size array. The level sums are unchanged: a sum over
+            # axes (0, 1) of an (x, y, z) array accumulates in index order,
+            # which is the same whether the operand is this contiguous buffer
+            # or the window's strided view of it (verified both ways).
+            absolute_W = running_sum
             del running_sum
             inner = _inner_view(W, window)
-            level_sum = np.abs(inner).sum(axis=(0, 1), dtype=np.float64)
+            inner_absolute = _inner_view(absolute_W, window)
+            np.abs(inner, out=inner_absolute)
+            level_sum = inner_absolute.sum(axis=(0, 1), dtype=np.float64)
             level_cnt = np.count_nonzero(inner, axis=(0, 1))
+            del absolute_W, inner_absolute
             level_mean = (level_sum / np.maximum(level_cnt, 1)).astype(np.float32)
             W /= np.where(level_mean > 0, level_mean, np.float32(1.0))[None, None, :]
 
@@ -1334,6 +1343,7 @@ def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
     device='cpu', window=None, amplitude_factor=None,
+    return_increment=False,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -1373,6 +1383,15 @@ def _advance_flux(
     scalars (Thomas's ruling, 2026-07-28). The scalar noise S_k is
     computed from the UNdamped increment; it is normalized per level
     downstream, so a per-level factor would cancel there anyway.
+
+    Returns ``(scalar_amplitude, applied_increment, diagnostics)``. With
+    ``return_increment`` the second element is this class's NET change of the
+    flux -- convolved increment plus what the clip at zero and the volume-mean
+    renormalization did to it -- which is what a caller recording per-class
+    increments for a nest wants. It is formed here rather than by the caller
+    differencing a copy of the flux, because the noise buffer is already dead
+    by then and can hold the entering flux for free. Without it the second
+    element is None and nothing extra is held.
     """
     s_x, s_y, s_z = sparsity_factors
     # Captured before the increment: this is what the renormalization restores.
@@ -1382,29 +1401,58 @@ def _advance_flux(
     shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
     per_class_scale = np.float32(per_class_scale)
 
-    gamma = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
-    if zero_bottom and n_zero > 0:
-        gamma[:, :, :n_zero] = 0
-    if zero_top and n_zero > 0:
-        gamma[:, :, -n_zero:] = 0
-
     # Unit-mean multiplier noise exp(gamma)-1 at the turbulon centers, and
     # exactly 0 off-centers (no turbulon there); bounded below by -1.
-    gamma *= per_class_scale
-    noise = np.expm1(gamma - shift)
-    noise[gamma == 0.0] = np.float32(0.0)
+    #
+    # The whole chain runs in the generator's own buffer: scale, shift and
+    # expm1 are elementwise, so the arithmetic per cell is exactly what it
+    # was, but the shifted generator and the noise are no longer two more
+    # full-size arrays on top of it (three field-sized buffers at once became
+    # one plus the off-center mask, which is a quarter of a field). At the
+    # 4096^2 finest class a field is 7.7 GB.
+    generator = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
+    if zero_bottom and n_zero > 0:
+        generator[:, :, :n_zero] = 0
+    if zero_top and n_zero > 0:
+        generator[:, :, -n_zero:] = 0
+
+    generator *= per_class_scale
+    off_center = generator == 0.0   # the generator's own zeros: no turbulon
+    generator -= shift
+    np.expm1(generator, out=generator)
+    noise = generator               # the same buffer, now the multiplier noise
+    del generator
+    noise[off_center] = np.float32(0.0)
+    del off_center
 
     noise_inner = _inner_view(noise, window)
     mean_abs = np.abs(noise_inner).sum() / max(np.count_nonzero(noise_inner), 1)
-    scalar_amplitude = noise * flux
-    if mean_abs > 0:
-        scalar_amplitude *= np.float32(1.0 / mean_abs)
-
+    # The multiplier noise times the entering flux, formed once: the signed
+    # scalar amplitude is that same product scaled to unit mean absolute
+    # value, and the flux increment is that same product damped by the
+    # interpolation compensation.
     noise *= flux
+    if mean_abs > 0:
+        scalar_amplitude = noise * np.float32(1.0 / mean_abs)
+    else:
+        scalar_amplitude = noise.copy()
+
     if amplitude_factor is not None:
         noise *= np.asarray(amplitude_factor,
                             dtype=np.float32)[np.newaxis, np.newaxis, :]
-    flux += CONVOLVE(noise, kernel, device=device)
+    increment = CONVOLVE(noise, kernel, device=device)
+    if return_increment:
+        # noise is dead the moment the convolution returns, so its buffer
+        # holds the entering flux for the difference below -- the caller
+        # needs no copy of its own and this function allocates nothing new.
+        entering_flux = noise
+        np.copyto(entering_flux, flux)
+    else:
+        entering_flux = None
+        del noise
+    flux += increment
+    if not return_increment:
+        del increment
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
@@ -1416,6 +1464,14 @@ def _advance_flux(
         # rescale, so restore the entering mean as a flat field.
         flux[...] = np.float32(entering_mean)
 
+    if return_increment:
+        # Net change of this class: the convolved increment, plus what the
+        # clip at zero and the volume-mean renormalization did to it.
+        np.subtract(flux, entering_flux, out=increment)
+        applied_increment = increment
+    else:
+        applied_increment = None
+
     diagnostics = {
         'n_clipped': n_clipped,
         'n_points': int(flux.size),
@@ -1423,7 +1479,7 @@ def _advance_flux(
         'entering_mean': entering_mean,
         'realized_mean': realized_mean,
     }
-    return scalar_amplitude, diagnostics
+    return scalar_amplitude, applied_increment, diagnostics
 
 
 def simulate_flux_only(
@@ -1522,7 +1578,7 @@ def simulate_flux_only(
         # regime), so the c -> C1 calibration reflects production.
         comp_i = np.full(shape[2], np.float32(_interpolation_compensation(
             2.0 * float(k) / float(grids['k'][n_classes - 1]))))
-        scalar_amplitude, advance = _advance_flux(
+        scalar_amplitude, _, advance = _advance_flux(
             flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
             n_zero, zero_bottom, zero_top, amplitude_factor=comp_i,
         )
@@ -1997,22 +2053,58 @@ def _level_mean_abs(field, n_points):
 def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
                                 phi_min, phi_max, window, n_rescale,
                                 record_applied=False):
-    """_bounded_amplitude_add on the GPU, all levels solved simultaneously.
+    """_bounded_amplitude_add on the GPU, a batch of z-levels at a time.
+
+    The levels are independent -- every reduction in the solve is within a
+    level -- so the card only ever needs a slab of them. It takes as many as
+    ``cuda_level_batch_size`` allows (all 115 of the 2048^2 production square,
+    42 of a 4096^2 one, whose whole-field form would want 23.2 GiB of VRAM) and
+    walks the field in those slabs. The host side of a slab is a strided view
+    of the (x, y, z) array; torch transfers it directly rather than through a
+    staging buffer, because a pinned staging buffer costs peak host RSS at
+    exactly the moment -- the finest class -- where peak host RSS is what
+    limits the domain size.
+
+    Batch size is a function of the field shape alone (see
+    cuda_level_batch_size), so it is reproducible; a field whose levels all fit
+    in one batch is solved exactly as it was before batching existed.
+    """
+    torch.cuda.empty_cache()    # so mem_get_info sees the true free VRAM
+    nx, ny, nz = perturbation_field.shape
+    levels_per_batch = cuda_level_batch_size(nx, ny, nz,
+                                             perturbation_field.itemsize)
+    for z_start in range(0, nz, levels_per_batch):
+        z_stop = min(z_start + levels_per_batch, nz)
+        _bounded_amplitude_add_cuda_levels(
+            perturbation_field[:, :, z_start:z_stop], mean_1d[z_start:z_stop],
+            increment[:, :, z_start:z_stop], phi_min, phi_max, window,
+            n_rescale, record_applied,
+        )
+
+
+def _bounded_amplitude_add_cuda_levels(perturbation_field, mean_1d, increment,
+                                       phi_min, phi_max, window, n_rescale,
+                                       record_applied=False):
+    """One batch of z-levels of _bounded_amplitude_add_cuda.
 
     The same algorithm as the CPU path, with every per-level scalar (the
-    target amplitude A0, the rescale factor, the bisection bracket) a (nz,)
-    float64 device vector and the per-level early exits masks, so the whole
-    call synchronizes with the host only once per rescale iteration
+    target amplitude A0, the rescale factor, the bisection bracket) a
+    (n_levels,) float64 device vector and the per-level early exits masks, so
+    the whole call synchronizes with the host only once per rescale iteration
     (``done.all()``). This is where the GPU pays: the bisection is 60 passes
     over the field, ~320 GiB of memory traffic per call at the production
     class, and the card has ~12x the CPU's bandwidth (measured 16-18 s -> 1.5 s
     at 2048^2 x 115, including the host round trip).
 
-    Three field-sized device buffers are live -- the field, the increment and
-    one scratch (5.4 GiB at 2048^2 x 115) -- because the clip caps are never
-    materialized: clip(d, phi_min - phi, phi_max - phi) is computed as
-    clamp(d + phi, phi_min, phi_max) - phi, and the bisection runs entirely in
-    that shifted space.
+    Three slab-sized device buffers are live -- the field, the increment and
+    one scratch (5.4 GiB for a whole 2048^2 x 115 field) -- because the clip
+    caps are never materialized: clip(d, phi_min - phi, phi_max - phi) is
+    computed as clamp(d + phi, phi_min, phi_max) - phi, and the bisection runs
+    entirely in that shifted space.
+
+    ``perturbation_field``, ``increment`` and ``mean_1d`` are the batch's own
+    z-slabs of the caller's arrays -- strided views for a batch smaller than
+    the field, which torch uploads and downloads as they are.
 
     REALIZATION-CHANGING, not bit-identical: the GPU's reduction order differs
     from numpy's pairwise sum and the level means feed the bisection. The

@@ -9,6 +9,7 @@ from scipy.signal import oaconvolve
 MEMORY_HEADROOM_BYTES = 2 * 1024**3  # keep this much RAM free; OOM swap-thrashes the host
 CUDA_MEMORY_HEADROOM_BYTES = 1 * 1024**3  # keep this much VRAM free for cuFFT plan caches / fragmentation
 CUDA_MAX_BLOCK_FFT = 32                   # z-planes per overlap-add block; see cuda_block_fft_size
+CUDA_BOUNDED_ADD_BUDGET_BYTES = 8 * 1024**3   # VRAM one bounded-add batch may hold; see cuda_level_batch_size
 
 
 def available_memory_bytes():
@@ -61,6 +62,25 @@ def cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize):
             + spectrum)                                   # cuFFT workspace
 
 
+def cuda_stream_convolution_bytes(nx, ny, kz, n_fft, itemsize):
+    """Peak VRAM of the STREAMED GPU :func:`convolve_fft_xy_oa_z` at n_fft.
+
+    Nothing field-sized is resident: per overlap-add block the card holds the
+    block's input slab, its spectrum, its real output and the kernel spectrum,
+    with cuFFT scratch budgeted at one more spectral array. The field and the
+    accumulating output stay on the host. Independent of nz, which is the
+    point -- this is what makes a field larger than the card possible.
+    """
+    plane = nx * ny
+    spectrum = plane * (n_fft // 2 + 1) * 2 * itemsize   # complex
+    block_len = n_fft - kz + 1
+    return (plane * block_len * itemsize                  # input slab
+            + spectrum                                    # kernel spectrum
+            + spectrum                                    # block spectrum in flight
+            + plane * n_fft * itemsize                    # block real output
+            + spectrum)                                   # cuFFT workspace
+
+
 def cuda_block_fft_size(nx, ny, nz, kz, itemsize):
     """Overlap-add FFT length along z: at most CUDA_MAX_BLOCK_FFT, less if VRAM is short.
 
@@ -72,26 +92,72 @@ def cuda_block_fft_size(nx, ny, nz, kz, itemsize):
     _bounded_amplitude_add's offloaded solve (three field-sized buffers) and
     for the cascade state, so both can run at grids larger than today's.
     Below the cap the length still shrinks toward the kernel length
-    (block_len = n_fft - kz + 1 >= 1) as free VRAM demands, and raises
-    MemoryError if even the minimal block will not fit, mirroring the host
-    guard in :func:`convolve_fft_xy_oa_z`.
+    (block_len = n_fft - kz + 1 >= 1) as free VRAM demands.
+
+    Returns ``(n_fft, streamed)``. ``streamed`` is False while the field and
+    the overlap-add accumulator both fit on the card, which is the fast path
+    and the only one a 2048^2 x 115 square ever takes. When they do not -- at
+    4096^2 x 115 those two arrays alone are 15.5 GiB, more than a 16 GiB card
+    has, whatever n_fft does -- the same blocks are computed one at a time
+    with the field and the accumulator left on the host (see
+    cuda_stream_convolution_bytes). The block arithmetic is identical either
+    way; only where the blocks are added up moves. MemoryError if not even a
+    minimal streamed block fits, mirroring the host guard in
+    :func:`convolve_fft_xy_oa_z`.
     """
     free, _ = torch.cuda.mem_get_info()
     budget = free - CUDA_MEMORY_HEADROOM_BYTES
     n_fft_min = 1 << (kz - 1).bit_length()    # smallest power of two >= kz
-    n_fft = 1 << (nz + kz - 2).bit_length()   # whole padded array in one block
-    n_fft = max(n_fft_min, min(n_fft, CUDA_MAX_BLOCK_FFT))
+    n_fft_max = 1 << (nz + kz - 2).bit_length()   # whole padded array in one block
+    n_fft_max = max(n_fft_min, min(n_fft_max, CUDA_MAX_BLOCK_FFT))
+    n_fft = n_fft_max
     while n_fft >= n_fft_min:
         if cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft, itemsize) <= budget:
-            return n_fft
+            return n_fft, False
         n_fft >>= 1
-    requested = cuda_fft_convolution_bytes(nx, ny, nz, kz, n_fft_min, itemsize)
+    n_fft = n_fft_max
+    while n_fft >= n_fft_min:
+        if cuda_stream_convolution_bytes(nx, ny, kz, n_fft, itemsize) <= budget:
+            return n_fft, True
+        n_fft >>= 1
+    requested = cuda_stream_convolution_bytes(nx, ny, kz, n_fft_min, itemsize)
     raise MemoryError(
         f"convolve_fft_xy_oa_z (cuda) needs {requested / 1024**3:.1f} GiB VRAM "
-        f"for the minimal block of field shape {(nx, ny, nz)} (kernel kz={kz}) "
-        f"but only {free / 1024**3:.1f} GiB is free; refusing to risk OOM. "
-        f"Reduce resolution, domain size, or vertical levels."
+        f"for the minimal streamed block of field shape {(nx, ny, nz)} "
+        f"(kernel kz={kz}) but only {free / 1024**3:.1f} GiB is free; refusing "
+        f"to risk OOM. Reduce resolution, domain size, or vertical levels."
     )
+
+
+def cuda_level_batch_size(nx, ny, nz, itemsize):
+    """z-levels per batch for the GPU bounded amplitude add.
+
+    The add solves each level independently, so the field can be sent to the
+    card a slab of levels at a time; three field-sized buffers (field,
+    increment, one scratch) become three slab-sized ones. At 4096^2 x 115 the
+    whole-field form would need 23.2 GiB of VRAM, which no 16 GiB card has.
+
+    The budget is a FIXED constant, not the free VRAM of the moment, and a
+    batch that does not fit raises rather than shrinking. That is deliberate:
+    the per-level means are float32 reductions whose value depends on how many
+    levels share the reduction, so the batch size is part of the realization.
+    Sizing it from whatever else happened to be on the card would make the same
+    seed give different fields on different days. ``CUDA_BOUNDED_ADD_BUDGET_BYTES``
+    is 8 GiB so that the 2048^2 x 115 production square (5.78 GiB) is a single
+    batch and reproduces the pre-batching realization exactly.
+    """
+    per_level = 3 * nx * ny * itemsize
+    levels = max(1, min(nz, int(CUDA_BOUNDED_ADD_BUDGET_BYTES // per_level)))
+    free, _ = torch.cuda.mem_get_info()
+    needed = levels * per_level
+    if needed > free - CUDA_MEMORY_HEADROOM_BYTES:
+        raise MemoryError(
+            f"_bounded_amplitude_add (cuda) needs {needed / 1024**3:.1f} GiB VRAM "
+            f"for a batch of {levels} levels of field shape {(nx, ny, nz)} but only "
+            f"{free / 1024**3:.1f} GiB is free; refusing to risk OOM. A smaller "
+            f"batch would change the realization, so it is not taken automatically."
+        )
+    return levels
 
 
 @njit(parallel=True, cache=True)
@@ -261,8 +327,9 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
         # a sequence sees only what the previous call left uncached and sizes the
         # block ever smaller until even the minimal block cannot fit.
         torch.cuda.empty_cache()
-        n_fft = cuda_block_fft_size(nx, ny, nz, kz, field.itemsize)
+        n_fft, streamed = cuda_block_fft_size(nx, ny, nz, kz, field.itemsize)
     else:
+        streamed = False
         n_fft = 1 << max(4, (2 * kz - 1).bit_length())
         requested = fft_convolution_bytes(nx, ny, nz, kz, field.itemsize)
         available = available_memory_bytes()
@@ -295,7 +362,6 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
     if device != 'cuda' and transform_shape[:2] == (2048, 2048):
         torch.set_num_threads(2)
 
-    field_t = torch.from_numpy(field).to(device)
     kernel_t = torch.from_numpy(kernel).to(device)
 
     kernel_padded = torch.zeros((nx, ny, kz), dtype=kernel_t.dtype, device=device)
@@ -306,6 +372,37 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
     )
     del kernel_t, kernel_padded
 
+    if streamed:
+        # Field and accumulator on the host, one block on the card at a time.
+        # Each block's spectra and its real output are exactly what the
+        # resident path computes, and they are summed in the same order, in
+        # the same float32 -- only the summation happens on the host, and
+        # directly into the trimmed output so that no padded accumulator is
+        # ever allocated. Padded index p corresponds to output index p - cz.
+        out = np.zeros((nx, ny, nz), dtype=field.dtype)
+        for start in range(0, nz, block_len):
+            end = min(start + block_len, nz)
+            block_spectrum = torch.fft.rfftn(
+                torch.from_numpy(field[..., start:end]).to(device),
+                s=transform_shape, dim=(0, 1, 2),
+            )
+            block_spectrum.mul_(kernel_spectrum)
+            block_out = torch.fft.irfftn(
+                block_spectrum, s=transform_shape, dim=(0, 1, 2),
+            )
+            del block_spectrum
+            seg_len = min(n_fft, nz_lin - start)
+            keep_lo = max(0, cz - start)                 # within the block
+            keep_hi = min(seg_len, cz + nz - start)
+            if keep_hi > keep_lo:
+                out[..., start + keep_lo - cz:start + keep_hi - cz] += (
+                    block_out[..., keep_lo:keep_hi].cpu().numpy())
+            del block_out
+        del kernel_spectrum
+        torch.set_num_threads(torch_threads)
+        return out
+
+    field_t = torch.from_numpy(field).to(device)
     accum = torch.zeros((nx, ny, nz_lin), dtype=field_t.dtype, device=device)
     for start in range(0, nz, block_len):
         end = min(start + block_len, nz)

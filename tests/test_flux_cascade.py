@@ -54,7 +54,7 @@ def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
     c = 0.4
-    amplitude, diagnostics = sm._advance_flux(
+    amplitude, _, diagnostics = sm._advance_flux(
         flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
         c, 1, (1, 1, 1),
     )
@@ -89,7 +89,7 @@ def test_advance_flux_scales_generator_by_class_density(monkeypatch):
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
     c, n = 0.4, 2
-    amplitude, diagnostics = sm._advance_flux(
+    amplitude, _, diagnostics = sm._advance_flux(
         flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
         c, n, (1, 1, 1),
     )
@@ -173,8 +173,9 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu", window=None, amplitude_factor=None):
-        return np.ones_like(flux), {"n_clipped": 0}
+                     device="cpu", window=None, amplitude_factor=None,
+                     return_increment=False):
+        return np.ones_like(flux), None, {"n_clipped": 0}
 
     def record_convolution(field, kernel, device="cpu"):
         convolved_fields.append(field.copy())
