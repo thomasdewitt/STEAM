@@ -100,6 +100,11 @@ FLUX_ALPHA = 1.8
 # remaining cascade (current class and all smaller classes).
 BOUND_BUFFER_MULTIPLE = 3
 
+# Size of the temporary _bound_taper is allowed to make for its reflected
+# distance-to-the-upper-bound (see _bound_taper). It only sets how many
+# x-rows one elementwise numpy call covers, so it affects no result.
+TAPER_SLAB_BYTES = 64 * 1024**2
+
 # Interpolation compensation for the resolution dependence of the mean
 # absolute turbulon amplitude (2026-07-28 convention, Thomas; replaces
 # the hops-remaining ZOOM_RETENTION bookkeeping, whose factors were
@@ -789,18 +794,21 @@ def simulate(
                                      support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
 
     # Pre-flight host-memory estimate so a doomed config fails in milliseconds.
-    # The cascade's concurrent peak is EIGHT field-sized float32 arrays at the
+    # The cascade's concurrent peak is SEVEN field-sized float32 arrays at the
     # finest grid, not just the three persistent ones (h, qt, flux): the
-    # gradient-weighting peak adds S_k, the running-sum buffer, the gradient
-    # accumulator and a np.roll/np.gradient temporary; the flux-advance peak
-    # equivalently adds gamma, noise, S_k and the convolution result. On CPU
-    # the FFT spectral working set (precisely guarded inside
-    # convolve_fft_xy_oa_z) rides on top; on CUDA it lives in VRAM and only
-    # the eight host arrays remain. (2026-07-15: a 5-field estimate passed
-    # preflight at (2048, 2048, 363) and the kernel OOM-killed the session.)
+    # flux-advance peak -- now the binding stage -- adds gamma (reused in
+    # place through expm1), S_k, the convolution result, and the increment
+    # being recorded. Measured 2026-07-30 after the buffer-reuse rounds:
+    # 7.17x field at (4096, 4096, 115) cuda, 7.2x at the production nest on
+    # cpu; 7.5 here keeps half a field of slack. On CPU the FFT spectral
+    # working set (precisely guarded inside convolve_fft_xy_oa_z) rides on
+    # top; on CUDA it lives in VRAM and only the host arrays remain.
+    # (2026-07-15: a 5-field estimate passed preflight at (2048, 2048, 363)
+    # and the kernel OOM-killed the session -- keep this honest against the
+    # measured peak whenever the live-array set changes.)
     nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
     field_bytes = nx_f * ny_f * nz_f * 4
-    peak_bytes = 8 * field_bytes
+    peak_bytes = int(7.5 * field_bytes)
     if device != 'cuda':
         peak_bytes += fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
     available = available_memory_bytes()
@@ -1225,11 +1233,11 @@ def cascade_loop(
             # The flux enters the amplitude ONCE, through S_k (which
             # carries the local larger-scale flux); multiplying W by the
             # flux as well would double-count it (removed 2026-07-22).
-            grad_h, grad_z = _gradient_components(running_sum, dx_k, dy_k, z_k)
-            W = grad_z
-            W *= aspect_k[i]    # 1D broadcast: ℓ_z/ℓ_x
-            W += grad_h
-            del grad_h
+            # One kernel, one output array: the two gradient components are
+            # combined in registers rather than materialized (see
+            # _advective_weight). Six live full-size arrays here instead of
+            # seven, which is what sets the largest grid that fits.
+            W = _advective_weight(running_sum, dx_k, dy_k, z_k, aspect_k[i])
 
             # Joint product norm (2026-07-27 ruling): W and S_k are
             # CORRELATED — the flux is large where past deposits (and so
@@ -1934,35 +1942,15 @@ def _gradient_stencil(field_3d, two_dx, two_dy,
                  - field_3d[ix, iy, nz - 2]) / dz_last)
 
 
-def _gradient_components(field_3d, dx, dy, z_coords):
-    """Horizontal gradient magnitude |∇_h f| and vertical |∂f/∂z|.
+def _z_difference_coefficients(z_coords):
+    """np.gradient's z-difference coefficients, in float32.
 
-    Periodic central differences in x,y; np.gradient in z (z_coords may be a
-    scalar spacing or a 1D array of z-positions). Returns (grad_h, grad_z),
-    both non-negative.
-
-    One fused numba pass, which is ~3x faster than the four np.roll copies
-    plus np.gradient it replaces and -- the reason it is worth the kernel --
-    holds TWO full-size arrays instead of three at the cascade's peak
-    instant, which is where the largest nest size is set.
-
-    Bit-identical to the numpy version it replaces, which requires
-    reproducing np.gradient's z arithmetic exactly rather than merely
-    equivalently:
-
-    * float32 throughout. np.gradient keeps the input dtype for an inexact
-      input, and the coefficients inherit float32 from ``np.diff`` of a
-      float32 z (NEP 50: the literal 2. in numpy's uniform branch is weak
-      and does not promote).
-    * a uniform z reduces to numpy's ``(f[k+1] - f[k-1]) / (2 dz)``, which
-      rounds differently from the general three-term form, so both branches
-      are kept.
-    * the endpoints are np.gradient's DEFAULT edge_order=1 one-sided
-      differences, not the second-order edges.
+    z_coords is either a scalar spacing or a 1D array of z-positions.
+    Returns (uniform_z, two_dz, a_z, b_z, c_z, dz_first, dz_last), the
+    arguments the numba z-stencils take. Shared by
+    :func:`_gradient_components` and :func:`_advective_weight` so that the
+    two reproduce np.gradient identically by construction.
     """
-    two_dx = np.float32(2 * dx)
-    two_dy = np.float32(2 * dy)
-
     z = np.asarray(z_coords, dtype=np.float32)
     if z.ndim == 0:
         # Scalar spacing: uniform, and np.gradient never forms a difference.
@@ -1985,6 +1973,44 @@ def _gradient_components(field_3d, dx, dy, z_coords):
             a_z = -(dz2) / (dz1 * (dz1 + dz2))
             b_z = (dz2 - dz1) / (dz1 * dz2)
             c_z = dz1 / (dz2 * (dz1 + dz2))
+    return uniform_z, two_dz, a_z, b_z, c_z, dz_first, dz_last
+
+
+def _gradient_components(field_3d, dx, dy, z_coords):
+    """Horizontal gradient magnitude |∇_h f| and vertical |∂f/∂z|.
+
+    Periodic central differences in x,y; np.gradient in z (z_coords may be a
+    scalar spacing or a 1D array of z-positions). Returns (grad_h, grad_z),
+    both non-negative.
+
+    One fused numba pass, which is ~3x faster than the four np.roll copies
+    plus np.gradient it replaces, and holds TWO full-size arrays instead of
+    three.
+
+    The cascade itself does not call this: it wants the two components
+    combined, and calls :func:`_advective_weight`, which holds ONE array --
+    the peak instant of the cascade, and so the thing that sets the largest
+    grid that fits. This entry point remains for the tests and for anyone
+    wanting the components separately.
+
+    Bit-identical to the numpy version it replaces, which requires
+    reproducing np.gradient's z arithmetic exactly rather than merely
+    equivalently:
+
+    * float32 throughout. np.gradient keeps the input dtype for an inexact
+      input, and the coefficients inherit float32 from ``np.diff`` of a
+      float32 z (NEP 50: the literal 2. in numpy's uniform branch is weak
+      and does not promote).
+    * a uniform z reduces to numpy's ``(f[k+1] - f[k-1]) / (2 dz)``, which
+      rounds differently from the general three-term form, so both branches
+      are kept.
+    * the endpoints are np.gradient's DEFAULT edge_order=1 one-sided
+      differences, not the second-order edges.
+    """
+    two_dx = np.float32(2 * dx)
+    two_dy = np.float32(2 * dy)
+    (uniform_z, two_dz, a_z, b_z, c_z,
+     dz_first, dz_last) = _z_difference_coefficients(z_coords)
 
     grad_h = np.empty_like(field_3d)
     grad_z = np.empty_like(field_3d)
@@ -1992,6 +2018,90 @@ def _gradient_components(field_3d, dx, dy, z_coords):
                       uniform_z, two_dz, a_z, b_z, c_z, dz_first, dz_last,
                       grad_h, grad_z)
     return grad_h, grad_z
+
+
+@njit(parallel=True, cache=True)
+def _advective_weight_stencil(field_3d, two_dx, two_dy,
+                              uniform_z, two_dz, a_z, b_z, c_z,
+                              dz_first, dz_last, aspect_z, weight):
+    """Fused stencil behind :func:`_advective_weight`.
+
+    Same two passes over each (ix, iy) column as :func:`_gradient_stencil`,
+    but the horizontal magnitude is parked in the OUTPUT array instead of a
+    second full-size buffer, and the z pass finishes the combination in
+    place. Per cell the operations, and their order, are exactly
+    ``grad_z * aspect_z`` then ``+ grad_h`` in float32 -- the same three
+    stored float32 values the two-array path produced.
+    """
+    nx, ny, nz = field_3d.shape
+    for ix in prange(nx):
+        ix_plus = ix + 1 if ix + 1 < nx else 0
+        ix_minus = ix - 1 if ix > 0 else nx - 1
+        for iy in range(ny):
+            iy_plus = iy + 1 if iy + 1 < ny else 0
+            iy_minus = iy - 1 if iy > 0 else ny - 1
+            for iz in range(nz):
+                gx = (field_3d[ix_plus, iy, iz]
+                      - field_3d[ix_minus, iy, iz]) / two_dx
+                gy = (field_3d[ix, iy_plus, iz]
+                      - field_3d[ix, iy_minus, iz]) / two_dy
+                weight[ix, iy, iz] = np.sqrt(gx * gx + gy * gy)
+
+            if uniform_z:
+                for iz in range(1, nz - 1):
+                    grad_z = abs(
+                        (field_3d[ix, iy, iz + 1]
+                         - field_3d[ix, iy, iz - 1]) / two_dz)
+                    weight[ix, iy, iz] = (grad_z * aspect_z[iz]
+                                          + weight[ix, iy, iz])
+            else:
+                for iz in range(1, nz - 1):
+                    grad_z = abs(
+                        a_z[iz - 1] * field_3d[ix, iy, iz - 1]
+                        + b_z[iz - 1] * field_3d[ix, iy, iz]
+                        + c_z[iz - 1] * field_3d[ix, iy, iz + 1])
+                    weight[ix, iy, iz] = (grad_z * aspect_z[iz]
+                                          + weight[ix, iy, iz])
+            grad_z = abs(
+                (field_3d[ix, iy, 1] - field_3d[ix, iy, 0]) / dz_first)
+            weight[ix, iy, 0] = grad_z * aspect_z[0] + weight[ix, iy, 0]
+            grad_z = abs(
+                (field_3d[ix, iy, nz - 1]
+                 - field_3d[ix, iy, nz - 2]) / dz_last)
+            weight[ix, iy, nz - 1] = (grad_z * aspect_z[nz - 1]
+                                      + weight[ix, iy, nz - 1])
+
+
+def _advective_weight(field_3d, dx, dy, z_coords, aspect_z):
+    """The advective weight W = |∇_h f| + (ℓ_z/ℓ_x) |∂f/∂z|, in one array.
+
+    aspect_z is the per-level turbulon aspect ratio ℓ_z/ℓ_x (1D, float32,
+    length nz). Identical, cell by cell, to
+
+        grad_h, grad_z = _gradient_components(field_3d, dx, dy, z_coords)
+        W = grad_z; W *= aspect_z; W += grad_h
+
+    but the two components never exist as arrays: they live in registers
+    and only W is allocated. That is one fewer full-size live array at the
+    cascade's peak instant (the finest class's gradient stage), which is
+    what sets the largest square and nest that fit in host RAM.
+    """
+    two_dx = np.float32(2 * dx)
+    two_dy = np.float32(2 * dy)
+    (uniform_z, two_dz, a_z, b_z, c_z,
+     dz_first, dz_last) = _z_difference_coefficients(z_coords)
+
+    aspect_z = np.ascontiguousarray(aspect_z, dtype=np.float32)
+    if aspect_z.shape != (field_3d.shape[2],):
+        raise ValueError(
+            f"aspect_z has shape {aspect_z.shape}, expected "
+            f"({field_3d.shape[2]},) -- one value per level.")
+
+    weight = np.empty_like(field_3d)
+    _advective_weight_stencil(field_3d, two_dx, two_dy,
+                              uniform_z, two_dz, a_z, b_z, c_z,
+                              dz_first, dz_last, aspect_z, weight)
+    return weight
 
 
 def _bound_buffers(C_k, z_arrays):
@@ -2024,10 +2134,22 @@ def _bound_taper(running_sum, b, phi_min, phi_max):
     broadcast over (x, y). Computed in float32, in place: running_sum is
     consumed as the output buffer. Where b <= 0 the tiny surrogate divisor
     gives g = 1 strictly inside the bounds and g = 0 at or outside them.
+
+    The distance to the upper bound is ``span - g``, a reflected copy of the
+    whole field -- and this call is the cascade's high-water instant, so that
+    copy sets the largest grid that fits. It is taken an x-slab at a time
+    instead -- x, the slowest axis, so a slab is a contiguous block of
+    memory. Every operation here is elementwise, so slabbing changes only
+    the size of the temporary, not a single resulting bit.
     """
     g = running_sum
     g -= np.float32(phi_min)
-    np.minimum(g, np.float32(phi_max - phi_min) - g, out=g)
+    span = np.float32(phi_max - phi_min)
+    nx, ny, nz = g.shape
+    rows_per_slab = max(1, TAPER_SLAB_BYTES // (ny * nz * g.itemsize))
+    for x_start in range(0, nx, rows_per_slab):
+        slab = g[x_start:x_start + rows_per_slab]
+        np.minimum(slab, span - slab, out=slab)
     g /= np.where(b > 0, b, np.float32(1e-30))
     np.clip(g, np.float32(0.0), np.float32(1.0), out=g)
     return g
