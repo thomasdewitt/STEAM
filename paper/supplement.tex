@@ -86,21 +86,34 @@ The outer-scale amplitude profile $C_{\Phi, L}(z)$ is computed for each
 scalar $\Phi \in \{h, q_t\}$ from the mean profile as described in
 Appendix A. At each profile level, the Haar fluctuation at the local
 vertical outer scale is computed by taking the mean of the profile over the upper half of
-a $k_{z,L}(z)$-wide window minus the mean over the lower half. Half-window width 
+a $k_{z,L}(z)$-wide window minus the mean over the lower half. Half-window width
 is required to be at least one profile cell and the profile is edge padded
-by the maximum half-width. The result is multiplied by the calibration constant $\lambda = 1/R \approx 1.30$
-and taken in absolute value. Here $R \approx 0.77$ is the mean absolute
-vertical Haar fluctuation of a field of unit-amplitude outer-scale
-turbulons. $R$ is measured numerically by synthesizing such a field
-exactly as the cascade builds one: computed on a coarse grid with
-$s_x = s_y = s_z = 1$, linearly interpolated down to a fine grid, and
-scaled by the interpolation-compensation factor of the next section.
-Those factors are normalized to a reference resolution chosen by
-convention, and $R$ inherits that choice, so its magnitude carries no
-meaning by itself. Because the same Haar wavelet is used for the computation of $C_{\Phi, L}(z)$
-and for $R$, definitional conventions are incorporated
-into $\lambda$ and the Haar fluctuation at the outer scale of the
-simulated fields equals that of the input profile by construction. The scale-dependent amplitudes
+by the maximum half-width. The result is multiplied by the calibration
+constant $\lambda$ and taken in absolute value.
+
+$\lambda$ is calibrated end-to-end from the consistency requirement of
+Appendix A: the vertical Haar fluctuation of the simulated fields,
+evaluated at the vertical outer scale, must equal that of the mean
+profile. Full simulations are run with linear mean profiles for both
+scalars on a calibration geometry whose vertical extent resolves one
+vertical outer scale. The mean absolute vertical Haar fluctuation of the
+simulated columns is computed at dyadic lags; a line of fixed
+theoretical slope $H_v = H_h/H_z$ is anchored at the second-smallest lag
+and extrapolated to $k_{z,L}$, and $\lambda$ is the ratio of the
+profile's Haar fluctuation there to the extrapolated value, iterated to
+a fixed point (the bound projection makes the response slightly
+sublinear, so a single pass under-corrects). The line is anchored at
+small lags and extrapolated upward deliberately: near the outer scale
+the directly measured fluctuation curve bends where the profile and the
+turbulence mix, and the criterion concerns the cascade amplitude, not
+the mixing. Because the same Haar operator is applied to the profile and
+to the simulated field, all definitional conventions -- the envelope
+amplitude convention and the delivery convention of the
+interpolation-compensation factors below -- are absorbed into $\lambda$.
+The calibrated value depends systematically on the horizontal Hurst
+exponent (delivery grows with $H_h$), so $\lambda$ is calibrated at the
+production $H_h$ and is not transferable across it; for $H_h = 0.45$,
+$\lambda = 0.28927$. The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 as described in Appendix A and are interpolated
 to each size class's vertical grid.
@@ -256,7 +269,9 @@ phases, and pressure are then recovered by the saturation adjustment of
 the main-text appendix.
 
 Each simulation produces one NetCDF4 file, with the contents listed in
-Table \ref{tab:output file}. All fields are single precision. The
+Table \ref{tab:output file}. All fields are single precision, compressed
+with the blosc-zstd filter (byte-shuffled, compression level 1); chunks
+smaller than 16\,KiB are stored uncompressed. The
 inputs are stored alongside the outputs so that every file is
 self-describing, and scalar attributes record the full configuration:
 grid dimensions and spacings, outer scale, domain height, bounds,
@@ -540,7 +555,11 @@ the 6--8~km mid-level band. The normalization test overlays the
 field's vertical $\hat{M}_1(\ell)$ against the same operator applied to
 the input mean profile: by the $C_{\Phi,L}$ construction
 (Sect.~\ref{ssect:steam algorithm spec}, Normalization) the two must
-agree at the vertical outer scale. Moment-scaling exponents $\xi(q)$
+agree at the vertical outer scale -- in the extrapolated sense of the
+$\lambda$ calibration, i.e. the power law fitted to the field's
+fluctuations below the outer scale and extrapolated to $k_{z,L}$
+matches the profile fluctuation there, while the directly measured
+curve bends upward near $k_{z,L}$ where profile and turbulence mix. Moment-scaling exponents $\xi(q)$
 are least-squares slopes of $\ln \hat{M}_q$ against $\ln \ell$ over
 lags up to 6~km (the nest's own classes plus one inherited octave), for
 $q$ from 0.2 to 3; for the flux the moment scaling $K(q)$ is also
