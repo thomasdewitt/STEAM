@@ -138,12 +138,12 @@ TAPER_SLAB_BYTES = 64 * 1024**2
 # anisotropic vertical chain, crop machinery) by single-class A/B runs
 # across output resolutions: tests/heavy/interpolation_compensation.py.
 # Two effects are bundled, and both are real:
-#   (1) sampling inflation at small k/dx -- the big rise 0.36 -> 0.92
+#   (1) sampling inflation at small k/dx -- the big rise 0.34 -> 0.93
 #       over 2..32 (the isotropic toy underestimates it: the vertical
 #       working grids refine as k_z ~ k^{H_z} per octave and stay
 #       under-resolved far longer than the horizontal);
 #   (2) a slow chain leak of ~1-3% PER OCTAVE that persists to at least
-#       k/dx = 256 (per-hop ratios 0.976, 0.973, 0.974, 0.987 over
+#       k/dx = 256 (per-hop ratios 0.967, 0.973, 0.975, 0.987 over
 #       16..256; the vertical regrids never node-nest, so each hop
 #       re-chords the deposit slightly). The old ZOOM_RETENTION tail
 #       drift (0.461 -> 0.388) was this leak, misread as a small-grid
@@ -153,7 +153,7 @@ TAPER_SLAB_BYTES = 64 * 1024**2
 # square runs (entry extrapolated from the measured 256 -> 512 trend).
 # The choice of reference is a single overall constant absorbed into
 # HAAR_TO_MHAT; only the shape matters. Values 2..64: 384-km-domain
-# probe, 3 seeds (seed spread < 0.3%); 128..256: 96-km-domain deep
+# probe, 3 seeds (seed spread < 0.2%); 128..256: 96-km-domain deep
 # probe ratios (the two probes agree to 4 digits on their shared
 # 32->64 hop). Classes deeper than 512 clamp to 1 (slightly
 # under-compensated by the ~1%/octave residual leak -- no production
@@ -202,20 +202,26 @@ TAPER_SLAB_BYTES = 64 * 1024**2
 # of the canonical 9-octave chain (k/dx = 512, the square-run outer
 # class) -- the reference the lambda calibration (HAAR_TO_MHAT) is
 # anchored to. Hops beyond the tables retain 1.
+# Re-measured 2026-08-03 for the cell-consistent interpolation convention
+# (zoom_trilinear align_corners=False). Only the poorly-resolved end moves:
+# from y = 16 up the two conventions agree to 3e-4 (canonical 128 hop
+# 0.9871 here against 0.9872 corner-aligned), which is what one expects of
+# a chord-polygon leak.
 HOP_RETENTION = {
-    # canonical: 384-km production probe (3 seeds, spread < 0.3%) for
-    # y = 2..32, spliced with the 96-km deep probe for 64..256 (the two
-    # agree to 4 digits on the shared 32 hop); 256 entry extrapolated
-    # from the decaying-loss trend.
-    'canonical': {2: 0.5971, 4: 0.7504, 8: 0.8949, 16: 0.9669,
-                  32: 0.9726, 64: 0.9744, 128: 0.9872, 256: 0.9880},
-    # isotropic: spheroscale >> L probe (piecewise option, k_z = k all
-    # classes); losses decay geometrically ~x0.5/hop, so the table is
-    # short. 32 entry from the k/dx = 64 tail runs (2 seeds, 0.9912 /
-    # 0.9907); truncating beyond leaves ~1% cumulative, comparable to
-    # the canonical table's own tail truncation.
-    'isotropic': {2: 0.5121, 4: 0.8517, 8: 0.9420, 16: 0.9827,
-                  32: 0.9910},
+    # canonical: 384-km production probe (3 seeds, spread < 0.2%) for
+    # y = 2..16, spliced with the 96-km deep probe (DOMAIN = OUTER = 96 km,
+    # target class 12 km) for 32..128. The two probes' shared 32 and 64
+    # hops agree to 4 digits. The 256 entry is extrapolated from the
+    # decaying-loss trend (losses 0.0270, 0.0254, 0.0129 over 32..128).
+    'canonical': {2: 0.5664, 4: 0.7456, 8: 0.8926, 16: 0.9667,
+                  32: 0.9730, 64: 0.9746, 128: 0.9871, 256: 0.9880},
+    # isotropic: spheroscale >> every class (piecewise option, k_z = k
+    # throughout), 3 seeds, y = 2..64 measured. Its geometry has to differ
+    # from the canonical probe's -- with k_z = k the vertical outer scale
+    # is L itself and must fit inside the domain height -- so it runs
+    # L = domain = 12 km under a 16 km height, target class 1.5 km.
+    'isotropic': {2: 0.5401, 4: 0.8362, 8: 0.9587, 16: 0.9839,
+                  32: 0.9956},
 }
 
 
@@ -260,7 +266,7 @@ def _build_canonical_table():
 
 
 INTERPOLATION_COMPENSATION = _build_canonical_table()
-# ~= {2: 0.358, 4: 0.600, 8: 0.800, 16: 0.894, 32: 0.924, 64: 0.950,
+# ~= {2: 0.337, 4: 0.595, 8: 0.798, 16: 0.894, 32: 0.925, 64: 0.950,
 #     128: 0.975, 256: 0.988, 512: 1.0}
 
 
