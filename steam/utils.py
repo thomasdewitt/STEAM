@@ -428,12 +428,23 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
 def zoom_trilinear(field, target_shape):
     """Resample a 3D float32 field to target_shape with trilinear interpolation.
 
-    Matches scipy.ndimage.zoom(order=1) to float32 precision (the
-    corner-aligned sampling convention — torch's align_corners=True).
+    Cell-consistent sampling (torch's align_corners=False): source and
+    target samples are the cell CENTRES of grids covering the same physical
+    extent, so the map is a pure dilation by exactly the resolution ratio
+    and every domain position pays the same interpolation loss.
+
+    This replaces the corner-aligned convention (align_corners=True, which
+    matches scipy.ndimage.zoom(order=1)), under which the two end samples
+    are pinned exactly and the field is stretched by (n_out-1)/(n_in-1).
+    That delivers a turbulon's amplitude in a position-dependent ramp
+    across the domain — 97% / 76% / 93% at edge / middle / edge through the
+    production ladder — which no per-class scalar compensation can absorb.
+    Here the delivered peak is 76.2% at EVERY domain position and the
+    per-hop dilation is exactly 1.0 (measured 2026-07-31).
     """
     t = torch.from_numpy(field)[None, None]  # NCDHW
     out = torch.nn.functional.interpolate(
-        t, size=tuple(target_shape), mode="trilinear", align_corners=True,
+        t, size=tuple(target_shape), mode="trilinear", align_corners=False,
     )
     return out[0, 0].numpy().astype(np.float32)
 
@@ -441,10 +452,10 @@ def zoom_trilinear(field, target_shape):
 def zoom_bilinear(field, target_shape):
     """Resample a 2D float32 field to target_shape with bilinear interpolation.
 
-    Corner-aligned (torch's align_corners=True).
+    Cell-consistent (torch's align_corners=False), matching zoom_trilinear.
     """
     t = torch.from_numpy(field.astype(np.float32))[None, None]  # NCHW
     out = torch.nn.functional.interpolate(
-        t, size=tuple(target_shape), mode="bilinear", align_corners=True,
+        t, size=tuple(target_shape), mode="bilinear", align_corners=False,
     )
     return out[0, 0].numpy().astype(np.float32)

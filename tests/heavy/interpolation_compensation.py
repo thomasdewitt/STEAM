@@ -55,9 +55,12 @@ OUTER = 96_000.0            # m
 K_TARGET = 12_000.0         # m, the probed class (index 3: 96, 48, 24, 12)
 HEIGHT = 8_000.0            # m
 PROFILE_DZ = 50.0
-SPHEROSCALE = 10.0
+SPHEROSCALE = 10.0          # << every class -> canonical vertical chain.
+                            # Set >> every class (see __main__) to probe the
+                            # isotropic regime instead.
 DX_LIST = (6000.0, 3000.0, 1500.0, 750.0, 375.0)   # k/dx = 2,4,8,16,32
 SEEDS = (0, 1, 2)
+TAG = '384km'               # output npz suffix
 BAND = (2_000.0, 6_000.0)   # m, mid-band for the volume mean (avoids
                             # surface/top center exclusion and cutoffs)
 
@@ -124,19 +127,47 @@ def main():
 
     kdx = np.array([K_TARGET / dx for dx in DX_LIST])
     f = M[:, -1][:, None] / M          # per-seed, relative to deepest run
+    r = M[:, 1:] / M[:, :-1]           # per-hop retention r(y), y = kdx[:-1]
     here = Path(__file__).parent
-    np.savez(here / f"interpolation_compensation_k{int(K_TARGET)}.npz",
-             kdx=kdx, M=M, f=f, seeds=np.array(SEEDS),
-             k_target=K_TARGET, dx_list=np.array(DX_LIST))
+    np.savez(here / f"interpolation_compensation_{TAG}.npz",
+             kdx=kdx, M=M, f=f, r=r, seeds=np.array(SEEDS),
+             k_target=K_TARGET, dx_list=np.array(DX_LIST),
+             domain=DOMAIN, outer=OUTER, spheroscale=SPHEROSCALE)
     print(f"\n k/dx    f (mean +/- std over seeds)   [target class "
           f"{K_TARGET:.0f} m; reference: deepest run k/dx = {kdx[-1]:.0f}]")
     for j, x in enumerate(kdx):
         print(f"  {x:4.0f}   {f[:, j].mean():6.3f} +/- {f[:, j].std():.3f}")
+    print("\n    y    r(y) per-hop retention (mean +/- std over seeds)")
+    for j, x in enumerate(kdx[:-1]):
+        print(f"  {x:4.0f}   {r[:, j].mean():6.4f} +/- {r[:, j].std():.4f}")
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:            # e.g. 96000 for the deep-tail probe
-        K_TARGET = float(sys.argv[1])
-    if len(sys.argv) > 2:            # optional extra dx entries, comma-sep
-        DX_LIST = tuple(float(v) for v in sys.argv[2].split(','))
+    # NAME=VALUE overrides of the module constants above, so every probe
+    # geometry the tables are spliced from is reachable without editing this
+    # file. The three used for the tables:
+    #
+    #   canonical, 384 km domain, y = 2..16   (defaults)
+    #   canonical, 96 km deep probe, y..256
+    #     K_TARGET=12000 DOMAIN=96000 OUTER=96000 SEEDS=0 TAG=can96deep
+    #     DX_LIST=6000,3000,1500,750,375,187.5,93.75,46.875
+    #   isotropic, y = 2..64
+    #     SPHEROSCALE=1e7 K_TARGET=1500 DOMAIN=12000 OUTER=12000 HEIGHT=16000
+    #     PROFILE_DZ=100 BAND=4000,12000 TAG=iso
+    #     DX_LIST=750,375,187.5,93.75,46.875,23.4375
+    #
+    # The isotropic probe needs its own geometry, not just a big spheroscale:
+    # with k_z = k on every class the vertical outer scale is k_z,L = L
+    # itself, which has to fit inside the domain height. Hence L = 12 km
+    # under a 16 km domain rather than the canonical probe's 96 km.
+    for arg in sys.argv[1:]:
+        name, value = arg.split('=', 1)
+        if name in ('DX_LIST', 'BAND'):
+            globals()[name] = tuple(float(v) for v in value.split(','))
+        elif name == 'SEEDS':
+            globals()[name] = tuple(int(v) for v in value.split(','))
+        elif name == 'TAG':
+            globals()[name] = value
+        else:
+            globals()[name] = float(value)
     main()
