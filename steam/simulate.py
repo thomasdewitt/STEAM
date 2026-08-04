@@ -59,6 +59,15 @@ SUPPORT_FACTOR = 3
 # centered outside the nest reach into it, and it is discarded on output. Like
 # the ghost cells of a nested LES it is excluded from every domain statistic
 # (see _inner_view).
+#
+# Scope is meant to be the ONLY change, and that is testable: a nest taken
+# over its parent's ENTIRE domain has the same statistics available as a root
+# and must therefore reproduce, cell for cell, a root run carried straight to
+# the nest's resolution. It does -- bit-exactly, and equally through a nest of
+# a nest -- see tests/heavy/test_nest_identity.py, which is also where the one
+# thing that still breaks it is documented: INTERPOLATION_COMPENSATION is
+# anchored to the run's own output grid, so a parent damps its finest classes
+# for a grid its descendants will not stop on.
 
 # ─── FLUX CASCADE ────────────────────────────────────────────────────────────
 # F is dimensionless and initialized to one. The flux is advanced exactly ONCE
@@ -1872,7 +1881,7 @@ def _compute_normalization(profile, z_profile, k_z_L_on_profile,
     profile : ndarray, shape (n_profile,)
         Mean profile <Phi>_t on its own input grid.
     z_profile : ndarray, shape (n_profile,)
-        Heights of the profile levels [m], uniformly spaced.
+        Heights of the profile levels [m], increasing.
     k_z_L_on_profile : ndarray, shape (n_profile,)
         Local vertical outer scale k_z(outer_scale, spheroscale(z)) [m].
     k_values : ndarray, shape (n_classes,)
