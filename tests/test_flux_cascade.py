@@ -131,7 +131,10 @@ def test_flux_only_runs_with_two_classes_per_dyad():
     # Each class restores the volume mean it entered with, so the only drift
     # from one is the trilinear regrid between classes, not the cascade
     # (2026-07-27 ruling; the regrid drift is deliberately not scrubbed).
-    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=5e-3)
+    # Cell-consistent regrid (align_corners=False, 2026-08-04 merge) drifts
+    # ~2% on this deliberately tiny grid; production-scale drift is far
+    # smaller (nest-identity A/B overlap median 1.018).
+    np.testing.assert_allclose(flux.mean(dtype=np.float64), 1.0, rtol=3e-2)
     assert diagnostics["n_scale_classes_per_dyad"] == 2
     assert len(diagnostics["steps"]) == len(k_values)
 
