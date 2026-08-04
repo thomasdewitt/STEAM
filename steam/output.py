@@ -35,6 +35,8 @@ def write_netcdf(
     group=None,
     compress=None,
     flux_3d=None,
+    h_pert_3d=None,
+    qt_pert_3d=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -134,6 +136,24 @@ def write_netcdf(
         flux_var.units = "1"
         flux_var.long_name = "dimensionless conserved flux"
 
+    # The perturbations as the cascade left them, BEFORE the mean profile was
+    # added back. h = h_perturbation + <h>(z) in float32 is not invertible to
+    # the last bit (the mean is ~1e5 times the perturbation), so a nest that
+    # reconstructed the cascade state by subtracting the mean would start from
+    # a field a rounding step away from the one its parent finished with.
+    # Opt-in, because it doubles the file: pass save_perturbations=True to
+    # simulate() / refine() for runs intended as refinement parents.
+    if h_pert_3d is not None:
+        for name, field, units in (("h_perturbation", h_pert_3d, "J/kg"),
+                                   ("qt_perturbation", qt_pert_3d, "kg/kg")):
+            var = ds.createVariable(
+                name, "f4", ("x", "y", "z"), chunksizes=field_chunks,
+                **compression_kwargs(compress, field_chunks),
+            )
+            var[:] = field
+            var.units = units
+            var.long_name = f"{name} as the cascade left it (mean not added)"
+
     # Profile variables
     zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))
     zp_var[:] = z_profile
@@ -184,37 +204,39 @@ def write_netcdf(
     p = simulation_params
     ds.nx = np.int32(p['nx'])
     ds.ny = np.int32(p['ny'])
-    ds.dx = np.float32(p['dx'])
-    ds.dy = np.float32(p['dy'])
+    ds.dx = np.float64(p['dx'])
+    ds.dy = np.float64(p['dy'])
     # dz: always 1D variable (cell heights per z-level)
     dz_var = ds.createVariable("dz", "f4", ("z",))
     dz_var[:] = np.asarray(p['dz'], dtype=np.float32)
     dz_var.units = "m"
     dz_var.long_name = "cell height"
-    ds.outer_scale = np.float32(p['outer_scale'])
+    ds.outer_scale = np.float64(p['outer_scale'])
     # spheroscale: 1D variable (profile on output grid)
     ls_var = ds.createVariable("spheroscale", "f4", ("z",))
     ls_var[:] = np.asarray(p['spheroscale'], dtype=np.float32)
     ls_var.units = "m"
     ls_var.long_name = "spheroscale profile"
-    ds.domain_height = np.float32(p['domain_height'])
+    ds.domain_height = np.float64(p['domain_height'])
     if 'domain_z_min' in p:
-        ds.domain_z_min = np.float32(p['domain_z_min'])
-    ds.profile_dz = np.float32(p['profile_dz'])
+        ds.domain_z_min = np.float64(p['domain_z_min'])
+    ds.profile_dz = np.float64(p['profile_dz'])
     ds.sparsity_factors = np.array(p['sparsity_factors'], dtype=np.int32)
-    ds.surface_pressure = np.float32(p['surface_pressure'])
+    ds.surface_pressure = np.float64(p['surface_pressure'])
     ds.seed = np.int32(p['seed']) if p['seed'] is not None else -1
-    ds.C_h_L = np.float32(p['C_h_L'])
-    ds.C_qt_L = np.float32(p['C_qt_L'])
+    ds.C_h_L = np.float64(p['C_h_L'])
+    ds.C_qt_L = np.float64(p['C_qt_L'])
     ds.n_large_turbulons = np.int32(p['n_large_turbulons'])
-    ds.H_h = np.float32(p['H_h'])
-    ds.H_z = np.float32(p['H_z'])
-    if 'lambda_haar_to_mhat' in p:
-        ds.lambda_haar_to_mhat = np.float32(p['lambda_haar_to_mhat'])
-    ds.h_min = np.float32(p['h_min'])
-    ds.h_max = np.float32(p['h_max'])
-    ds.qt_min = np.float32(p['qt_min'])
-    ds.qt_max = np.float32(p['qt_max'])
+    # float64: a nest recomputes its amplitude ladder from these, and a
+    # float32 round-trip of the exponent would put its C_k a rounding step
+    # off the ladder its parent used.
+    ds.H_h = np.float64(p['H_h'])
+    ds.H_z = np.float64(p['H_z'])
+    ds.lambda_haar_to_mhat = np.float64(p['lambda_haar_to_mhat'])
+    ds.h_min = np.float64(p['h_min'])
+    ds.h_max = np.float64(p['h_max'])
+    ds.qt_min = np.float64(p['qt_min'])
+    ds.qt_max = np.float64(p['qt_max'])
     ds.min_distance_to_ground = np.int32(p['min_distance_to_ground'])
     if 'turbulon_shape' in p:
         ds.turbulon_shape = p['turbulon_shape']
@@ -222,8 +244,15 @@ def write_netcdf(
         ds.anisotropy = p['anisotropy']
     if 'n_scale_classes_per_dyad' in p:
         ds.n_scale_classes_per_dyad = np.int32(p['n_scale_classes_per_dyad'])
-    ds.flux_noise_scale = np.float32(p['flux_noise_scale'])
-    ds.flux_alpha = np.float32(p['flux_alpha'])
+    ds.flux_noise_scale = np.float64(p['flux_noise_scale'])
+    ds.flux_alpha = np.float64(p['flux_alpha'])
+    # Continuation bookkeeping: what a descendant nest needs in order to be
+    # the SAME cascade carried further — the root's outer scale (the one
+    # (k/L)^H_h ladder), the root's seed, and how many size classes of that
+    # seed's per-class stream have already been drawn.
+    ds.root_outer_scale = np.float64(p['root_outer_scale'])
+    ds.root_seed = np.int32(p['root_seed']) if p['root_seed'] is not None else -1
+    ds.n_classes_consumed = np.int32(p['n_classes_consumed'])
 
     # Refinement-specific attributes. periodic_x / periodic_y record whether
     # the group's own x / y axis wraps: a root always does, a nest only where

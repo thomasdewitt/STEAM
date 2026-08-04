@@ -539,6 +539,7 @@ def simulate(
     compress=None,
     device='cpu',
     save_class_increments=False,
+    save_perturbations=False,
     hurst_horizontal=None,
     haar_to_mhat=None,
 ):
@@ -618,6 +619,13 @@ def simulate(
         INTERPOLATION_COMPENSATION reference to the nest's own (Thomas's
         ruling, 2026-07-28) — without them a nest inherits the parent's
         finest classes ~2.2x too weak in the seam octaves.
+    save_perturbations : bool
+        If True, also store h and qt as the cascade left them, before the
+        mean profile was added back (``h_perturbation``, ``qt_perturbation``;
+        doubles the file). refine() starts from these when they are present,
+        which is what makes a nest bit-exact against the same cascade run
+        straight through: h = h_perturbation + <h>(z) rounds in float32 and
+        subtracting the mean back off does not recover the lost bits.
     hurst_horizontal : float or None
         Override for the module constant H_h (steam.constants). None uses
         the constant. Enters only through _compute_normalization's
@@ -777,16 +785,10 @@ def simulate(
         anisotropy=anisotropy,
     )
 
-    # Interpolate profiles to finest grid for normalization
-    z_finest = grids['z_arrays'][-1]
-    h_on_finest = np.interp(z_finest, z_profile, h_profile)
-    qt_on_finest = np.interp(z_finest, z_profile, qt_profile)
-    spheroscale_on_finest = np.interp(z_finest, z_profile, spheroscale_profile)
-
     # Local vertical outer scale k_z,L(z) from the local spheroscale, so the
     # normalization response (a vertical-gradient measure of the mean profile
     # at scale k_z,L) dies where the profile is flat over the local k_z,L.
-    k_z_L_on_finest = _k_z(anisotropy, outer_scale, spheroscale_on_finest)
+    k_z_L_on_profile = _k_z(anisotropy, outer_scale, spheroscale_profile)
 
     # Outer-scale turbulon envelope; its x=y=0 center column is the 1D response
     # used to normalize against the mean profile (Eqn apxeq:norm factor computation).
@@ -821,13 +823,13 @@ def simulate(
         )
 
     C_h_k = _compute_normalization(
-        h_on_finest, k_z_L_on_finest,
+        h_profile, z_profile, k_z_L_on_profile,
         k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
         hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
     )
     C_qt_k = _compute_normalization(
-        qt_on_finest, k_z_L_on_finest,
+        qt_profile, z_profile, k_z_L_on_profile,
         k_values, outer_scale, grids,
         n_scale_classes_per_dyad=n_scale_classes_per_dyad,
         hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
@@ -846,8 +848,8 @@ def simulate(
         aspect_k.append((_k_z(anisotropy, k, ls_i) / k).astype(np.float32))
 
     # Per-class taper buffer widths b_{Phi,i}(z) (see _bound_buffers).
-    b_h_k = _bound_buffers(C_h_k, grids['z_arrays'])
-    b_qt_k = _bound_buffers(C_qt_k, grids['z_arrays'])
+    b_h_k = _bound_buffers(C_h_k, n_scale_classes_per_dyad, hurst_horizontal)
+    b_qt_k = _bound_buffers(C_qt_k, n_scale_classes_per_dyad, hurst_horizontal)
 
     child_seeds = seed_sequence.spawn(n_classes)
 
@@ -889,7 +891,10 @@ def simulate(
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
     # The perturbation buffers are no longer needed separately. Reuse them for
-    # final fields instead of holding two additional full-domain arrays.
+    # final fields instead of holding two additional full-domain arrays --
+    # unless they are being stored, in which case a copy is unavoidable.
+    h_pert_out = h_pert.copy() if save_perturbations else None
+    qt_pert_out = qt_pert.copy() if save_perturbations else None
     h_pert += h_mean_final[np.newaxis, np.newaxis, :]
     qt_pert += qt_mean_final[np.newaxis, np.newaxis, :]
     h_3d = np.ascontiguousarray(h_pert)
@@ -957,6 +962,9 @@ def simulate(
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
         'flux_alpha': FLUX_ALPHA,
+        'root_outer_scale': outer_scale,
+        'root_seed': seed,
+        'n_classes_consumed': n_classes,
     }
 
     write_netcdf(
@@ -967,6 +975,7 @@ def simulate(
         simulation_params,
         compress=compress,
         flux_3d=flux_3d,
+        h_pert_3d=h_pert_out, qt_pert_3d=qt_pert_out,
     )
     if increment_dir is not None:
         from .output import write_class_increments
@@ -1814,7 +1823,7 @@ def _turbulon_envelope(k, dx, dy, dz, support_factor=SUPPORT_FACTOR, shape='mexi
     return envelope
 
 
-def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
+def _compute_normalization(profile, z_profile, k_z_L_on_profile,
                            k_values, outer_scale, z_arrays,
                            n_scale_classes_per_dyad=1,
                            hurst_horizontal=None, haar_to_mhat=None):
@@ -1850,11 +1859,21 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     per-octave variance is invariant under s ~ n_c^{-1/alpha}). Not verified
     for all scalar statistics; unity at the production n_c = 1.
 
+    The Haar response is measured on the INPUT PROFILE's own z-grid, not on
+    the cascade's finest grid. C_{Phi,L}(z) is then a property of the input
+    profile alone, independent of the resolution the run happens to stop at
+    — which is what makes a nest's amplitude ladder agree exactly with the
+    ladder of a root run taken straight to the nest's resolution (the
+    half-window MEANS already make the response nearly resolution-free; this
+    removes the residual rounding of the window to a whole number of cells).
+
     Parameters
     ----------
-    profile_on_finest_grid : ndarray, shape (nz_finest,)
-        Mean profile <Phi>_t interpolated to the finest-resolution z-grid.
-    k_z_L_on_finest : ndarray, shape (nz_finest,)
+    profile : ndarray, shape (n_profile,)
+        Mean profile <Phi>_t on its own input grid.
+    z_profile : ndarray, shape (n_profile,)
+        Heights of the profile levels [m], uniformly spaced.
+    k_z_L_on_profile : ndarray, shape (n_profile,)
         Local vertical outer scale k_z(outer_scale, spheroscale(z)) [m].
     k_values : ndarray, shape (n_classes,)
     outer_scale : float
@@ -1878,15 +1897,14 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     lambda_used = (HAAR_TO_MHAT if haar_to_mhat is None
                    else float(haar_to_mhat))
 
-    z_finest = z_arrays['z_arrays'][-1]
-    dz_finest = float(np.mean(np.diff(z_finest)))
-    n_p = profile_on_finest_grid.size
+    dz_prof = float(np.mean(np.diff(z_profile)))
+    n_p = profile.size
 
-    # Per-level Haar half-window k_z,L(z)/2 in finest cells (>= 1 cell).
+    # Per-level Haar half-window k_z,L(z)/2 in profile cells (>= 1 cell).
     n_half = np.maximum(1, np.round(
-        0.5 * np.asarray(k_z_L_on_finest) / dz_finest).astype(int))
+        0.5 * np.asarray(k_z_L_on_profile) / dz_prof).astype(int))
     n_max = int(n_half.max())
-    padded = np.pad(profile_on_finest_grid.astype(np.float64),
+    padded = np.pad(np.asarray(profile, dtype=np.float64),
                     (n_max, n_max), mode='edge')
 
     response = np.empty(n_p)
@@ -1899,7 +1917,7 @@ def _compute_normalization(profile_on_finest_grid, k_z_L_on_finest,
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h_used) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
-        C_profile = np.interp(z_arrays['z_arrays'][i], z_finest, response).astype(np.float32) * hurst_scale
+        C_profile = np.interp(z_arrays['z_arrays'][i], z_profile, response).astype(np.float32) * hurst_scale
         C_k.append(C_profile)
     return C_k
 
@@ -2104,27 +2122,35 @@ def _advective_weight(field_3d, dx, dy, z_coords, aspect_z):
     return weight
 
 
-def _bound_buffers(C_k, z_arrays):
+def _bound_buffers(C_k, n_scale_classes_per_dyad, hurst_horizontal=None):
     """Per-class taper buffer widths b_{Phi,i}(z), one array per size class.
 
         b_{Phi,i}(z) = BOUND_BUFFER_MULTIPLE * sum_{j >= i} C_{Phi,j}(z)
 
     — the current class plus all SMALLER classes, a LINEAR sum of
     mean-absolute amplitudes (deliberately not quadrature; first-moment
-    discipline). Each C_{Phi,j} lives on its own per-class z-grid and is
-    interpolated onto class i's grid before summing.
+    discipline).
+
+    The sum runs over the WHOLE remaining ladder, not just the classes this
+    particular run happens to carry. C_{Phi,j} = C_{Phi,i} (k_j/k_i)^H_h is
+    geometric with ratio 2^(-H_h/n_c) < 1, so the tail below the finest
+    class closes in one factor:
+
+        b_{Phi,i}(z) = BOUND_BUFFER_MULTIPLE * C_{Phi,i}(z) / (1 - 2^(-H_h/n_c))
+
+    Truncating at the run's own finest class instead would make the taper —
+    and so the realized field — depend on where the run stops, which breaks
+    the identity between a nest and a root run taken straight to the nest's
+    resolution. It is also the physically honest reading: the buffer
+    reserves room for the scales still to come, and the atmosphere's do not
+    stop at the grid.
 
     Returns a list of n_classes float32 arrays parallel to C_k.
     """
-    n_classes = len(C_k)
-    buffers = []
-    for i in range(n_classes):
-        z_i = z_arrays[i]
-        total = np.zeros(len(z_i), dtype=np.float64)
-        for j in range(i, n_classes):
-            total += np.interp(z_i, z_arrays[j], C_k[j])
-        buffers.append((BOUND_BUFFER_MULTIPLE * total).astype(np.float32))
-    return buffers
+    H_h_used = H_h if hurst_horizontal is None else float(hurst_horizontal)
+    tail = 1.0 / (1.0 - 2.0 ** (-H_h_used / n_scale_classes_per_dyad))
+    return [(BOUND_BUFFER_MULTIPLE * tail * C_i).astype(np.float32)
+            for C_i in C_k]
 
 
 def _bound_taper(running_sum, b, phi_min, phi_max):
@@ -2518,6 +2544,8 @@ def refine(
     anisotropy=None,
     compress=None,
     device='cpu',
+    save_class_increments=False,
+    save_perturbations=False,
 ):
     """Continue a completed simulation's cascade over a subdomain, finer.
 
@@ -2553,8 +2581,11 @@ def refine(
         NetCDF group name for output. Default: auto-generated
         "refinements/r0", "r1", ...
     seed : int or None
-        Random seed. If None, derived deterministically from the parent seed
-        and the output group name.
+        Random seed. None (the default) CONTINUES the root's per-class seed
+        stream where the parent left off, so the nest's classes draw exactly
+        what a root run taken straight to the nest's resolution would have
+        drawn for them. Pass a seed to get an independent realization
+        instead (which forfeits the identity).
     sparsity_factors : tuple of 3 ints or None
         If None, inherit from the parent.
     turbulon_shape : str or None
@@ -2573,6 +2604,8 @@ def refine(
         ``steam.constants.output_compress``.
     device : {'cpu', 'cuda'}
         Where the per-class convolutions run, as in simulate().
+    save_class_increments, save_perturbations : bool
+        As in simulate(). Set both on a nest that will itself be refined.
 
     Returns
     -------
@@ -2625,6 +2658,24 @@ def refine(
     min_distance_to_ground = int(grp.min_distance_to_ground)
     parent_n_per_dyad = int(grp.n_scale_classes_per_dyad)
     size_class_gap_factor = 2.0 ** (1.0 / parent_n_per_dyad)
+
+    # Continuation bookkeeping (see write_netcdf). The nest is the SAME
+    # cascade carried further, so it needs the ROOT's outer scale and Hurst
+    # exponent — the one (k/L)^H_h ladder every descendant sits on — the
+    # root's seed, and how many classes of its per-class stream are spent.
+    for attribute in ('root_outer_scale', 'root_seed', 'n_classes_consumed'):
+        if not hasattr(grp, attribute):
+            ds.close()
+            raise ValueError(
+                f"Parent group {parent_group!r} has no {attribute} attribute; "
+                f"it predates continuation bookkeeping. Regenerate it with the "
+                f"current version of simulate()."
+            )
+    root_outer_scale = float(grp.root_outer_scale)
+    root_seed = int(grp.root_seed) if int(grp.root_seed) != -1 else None
+    n_classes_consumed = int(grp.n_classes_consumed)
+    hurst_horizontal = float(grp.H_h)
+    haar_to_mhat = float(grp.lambda_haar_to_mhat)
 
     if sparsity_factors is None:
         sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
@@ -2682,8 +2733,12 @@ def refine(
         raise ValueError(f"z_max ({z_max}) must be greater than z_min ({z_min})")
 
     # The nest's classes start one log-step BELOW the parent's finest, so no
-    # size class is ever simulated twice.
-    new_outer_scale = float(k_values_parent[-1])
+    # size class is ever simulated twice. They are taken from the ROOT's
+    # ladder by index rather than from the parent's stored k_values, so the
+    # floats are bit-for-bit the ones a root run reaching this deep would
+    # use.
+    new_outer_scale = (root_outer_scale
+                       / size_class_gap_factor ** (n_classes_consumed - 1))
     n_classes = int(np.floor(
         np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
     ))
@@ -2693,7 +2748,8 @@ def refine(
             f"{new_outer_scale}, dx={dx}, gap={size_class_gap_factor}. "
             f"Decrease dx or use a parent with a larger finest scale."
         )
-    k_values = new_outer_scale / size_class_gap_factor ** np.arange(1, n_classes + 1)
+    k_values = root_outer_scale / size_class_gap_factor ** np.arange(
+        n_classes_consumed, n_classes_consumed + n_classes)
 
     spheroscale_mean = float(np.mean(spheroscale_profile))
     k_z_values = _k_z(anisotropy, k_values, spheroscale_mean)
@@ -2838,18 +2894,32 @@ def refine(
         )
     z_coords_slice = z_coords[z_indices]
 
+    # The cascade state to continue is the PERTURBATION. Where the parent
+    # stored it (save_perturbations=True) it is picked up untouched; where it
+    # did not, it is recovered by subtracting the mean profile off h, which
+    # costs the last few bits of the parent's state (the mean is ~1e5 times
+    # the perturbation) and so forfeits exact identity with an unnested run.
     ds = netCDF4.Dataset(parent_path, "r")
     grp = ds if parent_group == '/' else ds[parent_group]
-    h_pad = _read_parent_slab(grp.variables["h"], x_indices, y_indices, z_indices)
-    qt_pad = _read_parent_slab(grp.variables["qt"], x_indices, y_indices, z_indices)
+    stored_perturbation = "h_perturbation" in grp.variables
+    if stored_perturbation:
+        h_pert_pad = _read_parent_slab(grp.variables["h_perturbation"],
+                                       x_indices, y_indices, z_indices)
+        qt_pert_pad = _read_parent_slab(grp.variables["qt_perturbation"],
+                                        x_indices, y_indices, z_indices)
+    else:
+        h_pert_pad = _read_parent_slab(grp.variables["h"],
+                                       x_indices, y_indices, z_indices)
+        qt_pert_pad = _read_parent_slab(grp.variables["qt"],
+                                        x_indices, y_indices, z_indices)
     flux_pad = _read_parent_slab(grp.variables["flux"], x_indices, y_indices, z_indices)
     ds.close()
 
     h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
     qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
-    h_pert_pad = h_pad - h_mean_1d[np.newaxis, np.newaxis, :]
-    qt_pert_pad = qt_pad - qt_mean_1d[np.newaxis, np.newaxis, :]
-    del h_pad, qt_pad
+    if not stored_perturbation:
+        h_pert_pad -= h_mean_1d[np.newaxis, np.newaxis, :]
+        qt_pert_pad -= qt_mean_1d[np.newaxis, np.newaxis, :]
 
     # Re-scale inherited per-class content to the NEST's interpolation-
     # compensation reference (Thomas's ruling, 2026-07-28). f(k/dx) is a
@@ -2961,26 +3031,24 @@ def refine(
             (window_x_start, window_x_stop, window_y_start, window_y_stop))
 
     # C_{Phi,k}(z) = n_c^{-1/alpha} C_{Phi,L}(z) (k/L)^H_h is ONE ladder from
-    # the root outer scale down; the nest just extends it below the parent's
-    # finest class. The parent already committed to a C_{Phi,L}(z); its last
-    # class, scaled by (k/k_parent)^H_h, extends that same ladder with no seam
-    # at the overlap scale. This is literally "continue what the parent was
-    # doing": the parent's own loop never re-measures C_{Phi,L} per class.
-    # (A re-measured-at-nest-resolution alternative was considered and ruled
-    # out 2026-07-27 -- the mean profile is smooth and interpolatable, and
-    # re-measuring leaves a step at the overlap scale; see git history.)
-    anchor_k = float(k_values_parent[-1])
-    anchor_C_h = np.asarray(C_h_k_parent[-1], dtype=np.float64)[:len(z_coords)]
-    anchor_C_qt = np.asarray(C_qt_k_parent[-1], dtype=np.float64)[:len(z_coords)]
-    C_h_k = []
-    C_qt_k = []
-    for i, k in enumerate(k_values):
-        hurst_scale = float((k / anchor_k) ** H_h)
-        z_i = grids['z_arrays'][i]
-        C_h_k.append(
-            (np.interp(z_i, z_coords, anchor_C_h) * hurst_scale).astype(np.float32))
-        C_qt_k.append(
-            (np.interp(z_i, z_coords, anchor_C_qt) * hurst_scale).astype(np.float32))
+    # the ROOT outer scale down; the nest just extends it below the parent's
+    # finest class. Re-derived here from the mean profile with exactly the
+    # call the root made, at the root's L, H_h and lambda: the Haar response
+    # is a property of the input profile (see _compute_normalization), so
+    # this reproduces the root's ladder rung for rung with no seam at the
+    # overlap scale — and, unlike anchoring on the parent's stored C_k, with
+    # no round-trip through the parent's output z-grid.
+    k_z_L_on_profile = _k_z(anisotropy, root_outer_scale, spheroscale_profile)
+    C_h_k = _compute_normalization(
+        h_profile, z_profile, k_z_L_on_profile, k_values, root_outer_scale,
+        grids, n_scale_classes_per_dyad=parent_n_per_dyad,
+        hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
+    )
+    C_qt_k = _compute_normalization(
+        qt_profile, z_profile, k_z_L_on_profile, k_values, root_outer_scale,
+        grids, n_scale_classes_per_dyad=parent_n_per_dyad,
+        hurst_horizontal=hurst_horizontal, haar_to_mhat=haar_to_mhat,
+    )
     C_h_L = float(np.mean(C_h_k[0]))
     C_qt_L = float(np.mean(C_qt_k[0]))
 
@@ -2989,16 +3057,25 @@ def refine(
         spheroscale_i = np.interp(grids['z_arrays'][i], z_profile, spheroscale_profile)
         aspect_k.append((_k_z(anisotropy, k, spheroscale_i) / k).astype(np.float32))
 
-    # b_{Phi,i} sums the current class and all SMALLER ones. Every class
-    # smaller than the parent's finest lives in this nest, so the sum is whole.
-    b_h_k = _bound_buffers(C_h_k, grids['z_arrays'])
-    b_qt_k = _bound_buffers(C_qt_k, grids['z_arrays'])
+    b_h_k = _bound_buffers(C_h_k, parent_n_per_dyad, hurst_horizontal)
+    b_qt_k = _bound_buffers(C_qt_k, parent_n_per_dyad, hurst_horizontal)
 
-    if seed is None and parent_seed is not None:
-        # zlib.crc32, not hash(): str hashing is salted per process, which
-        # would make an auto-seeded nest irreproducible across runs.
-        seed = int(parent_seed + zlib.crc32(output_group.encode()) % (2 ** 31))
-    child_seeds = np.random.SeedSequence(seed).spawn(n_classes)
+    # Continue the root's per-class seed stream: SeedSequence.spawn hands out
+    # children by index, so skipping the classes already spent gives each of
+    # the nest's classes precisely the seed a root run reaching this deep
+    # would have given it. An explicit seed asks for an independent nest
+    # instead.
+    if seed is None:
+        child_seeds = np.random.SeedSequence(root_seed).spawn(
+            n_classes_consumed + n_classes)[n_classes_consumed:]
+    else:
+        child_seeds = np.random.SeedSequence(seed).spawn(n_classes)
+
+    increment_dir = None
+    if save_class_increments:
+        import tempfile
+        increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_",
+                                              dir=parent_path.parent))
 
     h_pert_refined, qt_pert_refined, flux_refined, final_grid = cascade_loop(
         h_profile, qt_profile, z_profile,
@@ -3021,6 +3098,7 @@ def refine(
         zero_bottom=at_ground,
         zero_top=at_top,
         device=device,
+        increment_dir=increment_dir,
         comp_k=_compensation_profiles(k_values, grids['z_arrays'],
                                       spheroscale_profile, z_profile,
                                       anisotropy),
@@ -3144,6 +3222,10 @@ def refine(
         'parent_y_offset': float(y_start * parent_dy),
         'periodic_x': periodic_x,
         'periodic_y': periodic_y,
+        'lambda_haar_to_mhat': haar_to_mhat,
+        'root_outer_scale': root_outer_scale,
+        'root_seed': root_seed,
+        'n_classes_consumed': n_classes_consumed + n_classes,
     }
     if p_bottom_field is not None:
         simulation_params['p_bottom'] = p_bottom_field
@@ -3157,5 +3239,15 @@ def refine(
         group=output_group,
         compress=compress,
         flux_3d=flux_inner,
+        h_pert_3d=(np.ascontiguousarray(h_pert_inner)
+                   if save_perturbations else None),
+        qt_pert_3d=(np.ascontiguousarray(qt_pert_inner)
+                    if save_perturbations else None),
     )
+    if increment_dir is not None:
+        from .output import write_class_increments
+        import shutil
+        write_class_increments(parent_path, increment_dir, grids,
+                               group=output_group, compress=compress)
+        shutil.rmtree(increment_dir, ignore_errors=True)
     return parent_path
