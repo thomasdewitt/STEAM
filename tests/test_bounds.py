@@ -137,9 +137,8 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
 
     def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
-                     device="cpu", window=None, amplitude_factor=None,
-                     return_increment=False):
-        return np.ones_like(flux), None, {"n_clipped": 0}
+                     device="cpu", window=None):
+        return np.ones_like(flux), {"n_clipped": 0}
 
     def capture_convolution(field, kernel, device="cpu"):
         captured.append(field.copy())
@@ -157,15 +156,14 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
         0, (1, 1, 1), np.random.SeedSequence(4).spawn(len(grids["k"])),
     )
 
-    # With C = 1, S = 1, g = 1, the captured amplitude is the normalized
-    # product times the interpolation compensation f(k/dx_out) of the
-    # first (outermost, poorly-resolved-relative-to-nothing) class.
+    # With C = 1, S = 1, g = 1 the captured amplitude is the normalized
+    # product itself, mean absolute value exactly one per level. The
+    # interpolation compensation is NOT in it: it is applied to the
+    # increment the class adds, when the output is composed, never to the
+    # pattern the cascade convolves.
     h_W = captured[0]      # first class, h
     qt_W = captured[1]     # first class, qt
-    k_over_dx = 2.0 * float(grids["k"][0]) / float(grids["k"][-1])
-    np.testing.assert_allclose(h_W.mean(axis=(0, 1)),
-                               sm._interpolation_compensation(k_over_dx),
-                               rtol=1e-5)
+    np.testing.assert_allclose(np.abs(h_W).mean(axis=(0, 1)), 1.0, rtol=1e-5)
     np.testing.assert_array_equal(qt_W, 0.0)
 
 

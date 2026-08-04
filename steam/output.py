@@ -141,7 +141,7 @@ def write_netcdf(
     # the last bit (the mean is ~1e5 times the perturbation), so a nest that
     # reconstructed the cascade state by subtracting the mean would start from
     # a field a rounding step away from the one its parent finished with.
-    # Opt-in, because it doubles the file: pass save_perturbations=True to
+    # Opt-in, because it doubles the file: pass save_for_refinement=True to
     # simulate() / refine() for runs intended as refinement parents.
     if h_pert_3d is not None:
         for name, field, units in (("h_perturbation", h_pert_3d, "J/kg"),
@@ -289,26 +289,31 @@ def write_netcdf(
     return output_path
 
 
-def write_class_increments(output_path, increment_dir, grids,
+def write_class_increments(output_path, increment_dir, class_grids,
                            group=None, compress=None):
     """Append per-class added increments to an existing STEAM output file.
 
-    Stores, for each size class i, the h and qt increments the cascade
-    actually added (post bounded add) on that class's own working grid,
-    under ``class_increments/c{i:02d}``. Each class subgroup carries its
-    own (x, y, z) dimensions, its z-coordinate array, and attributes k,
-    dx, dy. Total size is a geometric pyramid, ~1.14x one output-grid
-    field per scalar before compression.
+    Stores, for each size class j of the WHOLE root ladder, the h and qt
+    increments the cascade actually added (post bounded add) on that
+    class's own grid, under ``class_increments/c{j:02d}``. Each class
+    subgroup carries its own (x, y, z) dimensions, its z-coordinate array,
+    and attributes k, dx, dy. Total size is a geometric pyramid, ~1.14x one
+    output-grid field per scalar before compression.
+
+    A nest stores the ladder whole -- the classes it inherited, carried
+    through from its parent, followed by its own -- so that a nest of a
+    nest re-weights exactly the same uniform ladder that a nest of a root
+    does.
 
     Parameters
     ----------
     output_path : str or Path
         Existing NetCDF file written by write_netcdf.
     increment_dir : str or Path
-        Directory of ``c{i:02d}_{h,qt}.npy`` files saved by cascade_loop.
-    grids : dict
-        The per-class grid dict from _compute_all_grids (keys k, dx, dy,
-        z_arrays).
+        Directory of ``c{j:02d}_{h,qt}.npy`` files staged by the caller.
+    class_grids : list of dict
+        One per stored class, in ladder order, with keys k, dx, dy and z
+        (the class's 1D z-coordinate array).
     group : str or None
         Parent group to place ``class_increments`` under (None = root).
     compress : bool or None
@@ -322,35 +327,30 @@ def write_class_increments(output_path, increment_dir, grids,
     base = ds_root if group is None else ds_root[group]
     inc_root = base.createGroup("class_increments")
 
-    n_classes = len(grids['k'])
-    for i in range(n_classes):
-        sub = inc_root.createGroup(f"c{i:02d}")
-        arrays = {}
-        names = [("h", "J/kg"), ("qt", "kg/kg")]
-        if (increment_dir / f"c{i:02d}_flux.npy").exists():
-            names.append(("flux", "1"))
-        for name, _ in names:
-            arrays[name] = np.load(increment_dir / f"c{i:02d}_{name}.npy")
-        nx_i, ny_i, nz_i = arrays["h"].shape
-        sub.createDimension("x", nx_i)
-        sub.createDimension("y", ny_i)
-        sub.createDimension("z", nz_i)
-        class_chunks = (min(64, nx_i), min(64, ny_i), nz_i)
-        z_var = sub.createVariable("z", "f4", ("z",))
-        z_var[:] = np.asarray(grids['z_arrays'][i], dtype=np.float32)
+    for j, class_grid in enumerate(class_grids):
+        sub = inc_root.createGroup(f"c{j:02d}")
+        arrays = {name: np.load(increment_dir / f"c{j:02d}_{name}.npy")
+                  for name in ("h", "qt")}
+        nx_j, ny_j, nz_j = arrays["h"].shape
+        sub.createDimension("x", nx_j)
+        sub.createDimension("y", ny_j)
+        sub.createDimension("z", nz_j)
+        class_chunks = (min(64, nx_j), min(64, ny_j), nz_j)
+        z_var = sub.createVariable("z", "f8", ("z",))
+        z_var[:] = np.asarray(class_grid['z'], dtype=np.float64)
         z_var.units = "m"
-        for name, units in names:
+        for name, units in (("h", "J/kg"), ("qt", "kg/kg")):
             v = sub.createVariable(
                 name, "f4", ("x", "y", "z"), chunksizes=class_chunks,
                 **compression_kwargs(compress, class_chunks),
             )
             v[:] = arrays[name]
             v.units = units
-            v.long_name = f"class {i} added {name} increment (working grid)"
-        sub.k = np.float32(grids['k'][i])
-        sub.dx = np.float32(grids['dx'][i])
-        sub.dy = np.float32(grids['dy'][i])
+            v.long_name = f"class {j} added {name} increment"
+        sub.k = np.float64(class_grid['k'])
+        sub.dx = np.float64(class_grid['dx'])
+        sub.dy = np.float64(class_grid['dy'])
 
     ds_root.close()
-    print(f"Written class_increments ({n_classes} classes) to {output_path}")
+    print(f"Written class_increments ({len(class_grids)} classes) to {output_path}")
     return output_path

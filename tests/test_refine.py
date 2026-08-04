@@ -45,7 +45,7 @@ def parent_template(tmp_path_factory):
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
              outer_scale=8000, spheroscale=100,
              domain_height=PARENT_DOMAIN_HEIGHT, profile_dz=PARENT_PROFILE_DZ,
-             output_path=out, seed=42)
+             output_path=out, seed=42, save_for_refinement=True)
     compute_diagnostics(out)
     return out
 
@@ -115,13 +115,13 @@ def test_split_cascade_matches_full_cascade(monkeypatch):
         )
 
     all_seeds = np.random.SeedSequence(123).spawn(n_classes)
-    h_full, qt_full, flux_full, _ = run(slice(0, n_classes), all_seeds)
+    h_full, qt_full, flux_full, _, _, _ = run(slice(0, n_classes), all_seeds)
 
     split = n_classes // 2
     seeds = np.random.SeedSequence(123).spawn(n_classes)
-    h_1, qt_1, flux_1, _ = run(slice(0, split), seeds[:split])
-    h_2, qt_2, flux_2, _ = run(slice(split, n_classes), seeds[split:],
-                               h_pert=h_1, qt_pert=qt_1, flux=flux_1)
+    h_1, qt_1, flux_1, _, _, _ = run(slice(0, split), seeds[:split])
+    h_2, qt_2, flux_2, _, _, _ = run(slice(split, n_classes), seeds[split:],
+                                     h_pert=h_1, qt_pert=qt_1, flux=flux_1)
 
     np.testing.assert_array_equal(h_2, h_full)
     np.testing.assert_array_equal(qt_2, qt_full)
@@ -215,11 +215,11 @@ def test_refine_tiny_inner_keeps_grid_bounded(parent_nc):
 # Inheritance: the nest starts from the parent's field, not from scratch
 # ---------------------------------------------------------------------------
 
-def test_nest_with_zero_amplitude_reproduces_the_parent_field(parent_nc):
+def test_nest_with_zero_amplitude_reproduces_the_parent_state(parent_nc):
     """With the turbulon amplitudes set to zero the nest adds nothing, so its
-    output must be exactly the parent's field interpolated onto the nest grid.
-    That isolates the inheritance path (extraction, mean removal, zoom,
-    projection, trim) from the cascade itself.
+    cascade state must be exactly the parent's state interpolated onto the
+    nest grid. That isolates the inheritance path (extraction, zoom, trim)
+    from the cascade itself.
 
     A doubly-spanning nest is used so there is no halo to complicate the
     comparison. The nest re-derives its amplitude ladder from the parent's
@@ -231,37 +231,30 @@ def test_nest_with_zero_amplitude_reproduces_the_parent_field(parent_nc):
     new_dx = geometry['k_finest'] / 4
 
     refine(parent_nc, 0, geometry['nx'], 0, geometry['ny'], new_dx, new_dx,
-           seed=1)
+           seed=1, save_for_refinement=True)
 
     with netCDF4.Dataset(parent_nc, "r") as ds:
-        parent_h = np.asarray(ds.variables["h"][:], dtype=np.float32)
-        parent_z = np.asarray(ds.variables["z"][:], dtype=np.float64)
+        parent_state = np.asarray(ds.variables["h_perturbation"][:],
+                                  dtype=np.float32)
         z_profile = np.asarray(ds.variables["z_profile"][:], dtype=np.float64)
         h_profile = np.asarray(ds.variables["h_profile"][:])
+        h_min, h_max = float(ds.h_min), float(ds.h_max)
         r0 = ds.groups["refinements"].groups["r0"]
-        nest_h = np.asarray(r0.variables["h"][:], dtype=np.float32)
+        nest_state = np.asarray(r0.variables["h_perturbation"][:],
+                                dtype=np.float32)
         nest_z = np.asarray(r0.variables["z"][:], dtype=np.float64)
 
-    parent_mean = np.interp(parent_z, z_profile, h_profile).astype(np.float32)
-    nest_mean = np.interp(nest_z, z_profile, h_profile).astype(np.float32)
-    expected = zoom_trilinear(parent_h - parent_mean[np.newaxis, np.newaxis, :],
-                              nest_h.shape) + nest_mean[np.newaxis, np.newaxis, :]
-
-    with netCDF4.Dataset(parent_nc, "r") as ds:
-        h_min, h_max = float(ds.h_min), float(ds.h_max)
-
-    # Levels the field does not press against a bound must match exactly: the
-    # nest is pure interpolation there.
-    interior = ((expected.min(axis=(0, 1)) > h_min + 1.0)
-                & (expected.max(axis=(0, 1)) < h_max - 1.0))
-    assert interior.sum() > len(interior) // 2
-    np.testing.assert_allclose(nest_h[:, :, interior], expected[:, :, interior],
-                               rtol=1e-6, atol=1e-2)
-    # On the levels that do saturate, the mean-preserving projection re-solves
-    # its offset on the nest's own grid, so those levels may shift slightly.
-    np.testing.assert_allclose(nest_h, expected, rtol=2e-3)
-    assert nest_h.min() >= h_min - 1e-3 and nest_h.max() <= h_max + 1e-3
-
+    expected = zoom_trilinear(parent_state, nest_state.shape)
+    # Levels the interpolated field does not press against a bound are pure
+    # interpolation. On the rest the per-class add still enforces the bounds
+    # pointwise, so a cell the finer mean profile pushed outside is pulled
+    # back -- correctly, and only ever toward the bound.
+    field = expected + np.interp(nest_z, z_profile, h_profile)[None, None, :]
+    interior = ((field.min(axis=(0, 1)) > h_min + 1.0)
+                & (field.max(axis=(0, 1)) < h_max - 1.0))
+    assert interior.sum() > 5      # not a vacuous comparison
+    np.testing.assert_allclose(nest_state[:, :, interior],
+                               expected[:, :, interior], rtol=1e-6, atol=1e-3)
 
 def test_nest_amplitude_ladder_continues_the_parent(parent_nc):
     """C_{Phi,k} must continue the parent's ladder with no step at the overlap
@@ -443,7 +436,8 @@ def test_recursive_refinement_inside_a_nest(parent_nc):
     geometry = _parent_geometry(parent_nc)
     half = geometry['nx'] // 2
     refine(parent_nc, 0, half, 0, half,
-           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=11)
+           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=11,
+           save_for_refinement=True)
 
     r0 = _nest_geometry(parent_nc, "refinements/r0")
     pad_cells = int(np.ceil(SUPPORT_FACTOR * r0['k_finest'] / r0['dx']))
@@ -469,7 +463,8 @@ def test_boundary_touching_nest_of_a_nest_is_rejected(parent_nc):
     geometry = _parent_geometry(parent_nc)
     half = geometry['nx'] // 2
     refine(parent_nc, 0, half, 0, half,
-           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=17)
+           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=17,
+           save_for_refinement=True)
     r0 = _nest_geometry(parent_nc, "refinements/r0")
     inner_cells = int(round(r0['k_finest'] / r0['dx']))
     with pytest.raises(ValueError, match="non-periodic parent"):
@@ -484,7 +479,8 @@ def test_spanning_a_non_periodic_parent_axis_is_rejected(parent_nc):
     geometry = _parent_geometry(parent_nc)
     half = geometry['nx'] // 2
     refine(parent_nc, 0, half, 0, half,
-           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=17)
+           geometry['k_finest'] / 4, geometry['k_finest'] / 4, seed=17,
+           save_for_refinement=True)
     r0 = _nest_geometry(parent_nc, "refinements/r0")
     with pytest.raises(ValueError, match="non-periodic parent"):
         refine(parent_nc, 0, r0['nx'], 0, r0['ny'],
@@ -641,25 +637,24 @@ def parent_with_increments(tmp_path_factory):
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
              outer_scale=8000, spheroscale=100,
              domain_height=PARENT_DOMAIN_HEIGHT, profile_dz=PARENT_PROFILE_DZ,
-             output_path=out, seed=42, save_class_increments=True)
+             output_path=out, seed=42, save_for_refinement=True)
     compute_diagnostics(out)
     return out
 
 
-def test_class_increments_replay_to_final_perturbation(parent_with_increments):
-    """Sum of stored increments, replayed down the regrid chain, is the field.
+def test_class_increments_replay_to_the_cascade_state(parent_with_increments):
+    """Sum of stored increments, replayed down the regrid chain, is the STATE.
 
     The cascade adds each class's increment on its own working grid and
     the between-class regrids are linear, so replaying every stored
     increment through the same chain and summing must reproduce the final
-    perturbation (up to float32 accumulation order and the single-ulp
-    output clamp).
+    perturbation the loop left (up to float32 accumulation order). It is
+    the state, not the written h: h carries the interpolation compensation
+    and the output projection on top.
     """
     with netCDF4.Dataset(parent_with_increments) as ds:
-        h_3d = np.asarray(ds.variables["h"][:], dtype=np.float64)
-        z_out = np.asarray(ds.variables["z"][:], dtype=np.float64)
+        state = np.asarray(ds.variables["h_perturbation"][:], dtype=np.float64)
         z_profile = np.asarray(ds.variables["z_profile"][:], dtype=np.float64)
-        h_profile = np.asarray(ds.variables["h_profile"][:], dtype=np.float64)
         ls_profile = np.asarray(ds.variables["spheroscale_profile"][:],
                                 dtype=np.float64)
         k_values = np.asarray(ds.variables["k_values"][:], dtype=np.float64)
@@ -684,48 +679,46 @@ def test_class_increments_replay_to_final_perturbation(parent_with_increments):
                                        int(grids['ny'][m]),
                                        int(grids['nz'][m])))
         total += cur
-    pert = h_3d - np.interp(z_out, z_profile, h_profile)[None, None, :]
 
-    scale = np.abs(pert).mean()
+    scale = np.abs(state).mean()
     assert scale > 0
-    err = np.abs(total - pert).max()
-    assert err < 5e-3 * scale + 1e-2
+    assert np.abs(total - state).max() < 5e-3 * scale + 1e-2
 
 
-def test_refine_rescales_inherited_content(parent_with_increments, tmp_path):
-    """A nest of an increments-parent boosts the under-compensated classes.
+def test_inherited_classes_are_compensated_up_at_the_nest_grid():
+    """An inherited class is further from a nest's output grid than from its
+    parent's, so it needs MORE compensation there -- the seam octaves, which
+    a nest would otherwise under-represent. Pure function check on the
+    factor itself."""
+    z = [np.zeros(4)]
+    ls, zp = np.full(4, 1e9), np.arange(4, dtype=float)
+    parent_ladder = 8000.0 / 2.0 ** np.arange(4)
+    nest_ladder = 8000.0 / 2.0 ** np.arange(4, 7)
+    at_parent = sm._compensation_profiles(parent_ladder, z, ls, zp, 'canonical')
+    at_nest = sm._compensation_profiles(
+        np.concatenate([parent_ladder, nest_ladder]), z, ls, zp, 'canonical')
+    assert at_nest[0][0] > at_parent[0][0]
 
-    The correction adds (f_nest/f_parent - 1) * increment for the parent's
-    poorly resolved classes (ratio > 1), so the corrected nest's inherited
-    field must carry MORE variance than a nest of the same parent with its
-    stored increments hidden — and both must respect the bounds.
-    """
+
+def test_nest_output_is_the_state_damped_and_bounded(parent_with_increments,
+                                                     tmp_path):
+    """The written nest field is its state plus the compensation deficit,
+    projected onto the bounds. f <= 1, so the composition carries LESS
+    amplitude than the raw state, and it respects the bounds."""
     src = tmp_path / "parent_inc.nc"
     shutil.copy(parent_with_increments, src)
     refine(src, x_start=8, x_stop=24, y_start=8, y_stop=24, dx=125, dy=125,
-           seed=7)
+           seed=7, save_for_refinement=True)
 
-    bare = tmp_path / "parent_bare.nc"
-    shutil.copy(parent_with_increments, bare)
-    with netCDF4.Dataset(bare, "a") as ds:
-        ds.renameGroup("class_increments", "class_increments_hidden")
-    refine(bare, x_start=8, x_stop=24, y_start=8, y_stop=24, dx=125, dy=125,
-           seed=7)
+    with netCDF4.Dataset(src) as ds:
+        grp = ds["refinements/r0"]
+        h = np.asarray(grp.variables["h"][:], dtype=np.float64)
+        qt = np.asarray(grp.variables["qt"][:], dtype=np.float64)
+        state = np.asarray(grp.variables["h_perturbation"][:], dtype=np.float64)
+        h_min, h_max = float(grp.h_min), float(grp.h_max)
+        qt_min, qt_max = float(grp.qt_min), float(grp.qt_max)
 
-    def nest_stats(path):
-        with netCDF4.Dataset(path) as ds:
-            grp = ds["refinements/r0"]
-            h = np.asarray(grp.variables["h"][:], dtype=np.float64)
-            qt = np.asarray(grp.variables["qt"][:], dtype=np.float64)
-            qt_min, qt_max = float(grp.qt_min), float(grp.qt_max)
-            h_min, h_max = float(grp.h_min), float(grp.h_max)
-        pert = h - h.mean(axis=(0, 1))[None, None, :]
-        return float(np.std(pert)), (h, h_min, h_max, qt, qt_min, qt_max)
-
-    std_corrected, fields_c = nest_stats(src)
-    std_bare, fields_b = nest_stats(bare)
-
-    assert std_corrected > std_bare
-    for h, h_min, h_max, qt, qt_min, qt_max in (fields_c, fields_b):
-        assert h.min() >= h_min - 1e-3 and h.max() <= h_max + 1e-3
-        assert qt.min() >= qt_min - 1e-9 and qt.max() <= qt_max + 1e-9
+    output_pert = h - h.mean(axis=(0, 1))[None, None, :]
+    assert np.std(output_pert) < np.std(state - state.mean(axis=(0, 1))[None, None, :])
+    assert h.min() >= h_min - 1e-3 and h.max() <= h_max + 1e-3
+    assert qt.min() >= qt_min - 1e-9 and qt.max() <= qt_max + 1e-9

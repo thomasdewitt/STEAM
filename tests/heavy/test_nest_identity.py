@@ -14,18 +14,18 @@ Two tests, run on two configurations, all small enough to finish in seconds:
        like a nest within a root.
 
 Both pass BIT-EXACTLY -- every one of h, qt and flux identical in every
-cell of every configuration -- with the interpolation compensation off, and
-both fail completely with it on.  That is not a defect in the nesting.
-INTERPOLATION_COMPENSATION is anchored to the run's OWN output grid
-(comp_i = D_REF / D_i, with D_i the delivery of class i's regrid chain down
-to the finest class the run happens to reach), so a run that stops coarse
-damps its last nine classes differently from one that carries on -- and
-those classes are the field the later coarse classes advect, through the
-advective weight and the bound taper.  The depth-independent limit of that
-factor, the chain continued indefinitely, is comp = 1 everywhere, i.e. no
-compensation at all.  So no reformulation of an output-anchored, in-cascade
-compensation can make a nest identical to a deeper root run; it is a
-modelling choice between the two.  Both settings are therefore reported.
+cell of every configuration -- and they pass with the interpolation
+compensation ON, which is the point.  The compensation is a property of
+the OUTPUT grid, so it is applied when the output is composed and never to
+the cascade's running state (see the HOP_RETENTION note in steam/simulate).
+The state is therefore the same field however deep the run goes, and the
+output composition is linear in the per-class increments, so a nest
+re-weights its parent's stored increments to its own grid and lands on
+exactly what a root run ending there would have written.
+
+The compensation-OFF rows are kept as a cross-check: they isolate the
+cascade state, so if a run ever fails ON but passes OFF, the composition
+is at fault rather than the continuation.
 
 Run standalone:  python tests/heavy/test_nest_identity.py
 """
@@ -84,7 +84,7 @@ def run(config, path, dx):
         config['h'], config['qt'], n, n, dx, dx,
         config['outer_scale'], config['spheroscale'], config['height'],
         config['profile_dz'], path,
-        seed=SEED, save_class_increments=True, save_perturbations=True,
+        seed=SEED, save_for_refinement=True,
         device='cpu', **config['kwargs'],
     )
 
@@ -168,7 +168,7 @@ def both_tests(config, scratch):
     nx, ny = grid_size(p2)
     refine(p2, 0, nx, 0, ny, dx_mid, dx_mid,
            output_group='refinements/r0', device='cpu',
-           save_class_increments=True, save_perturbations=True)
+           save_for_refinement=True)
     nx, ny = grid_size(p2, 'refinements/r0')
     refine(p2, 0, nx, 0, ny, dx_fine, dx_fine, parent_group='refinements/r0',
            output_group='refinements/r1', device='cpu')
@@ -201,15 +201,10 @@ def main():
         print(f"compensation {state:3s}  {name:8s}  "
               f"test 1 {'PASS' if ok1 else 'FAIL'}   "
               f"test 2 {'PASS' if ok2 else 'FAIL'}")
-    off = [ok for (state, _), pair in results.items() if state == "OFF"
-           for ok in pair]
-    on = [ok for (state, _), pair in results.items() if state == "ON"
-          for ok in pair]
-    if not all(on):
-        print("\nThe compensation-ON failures are the depth-dependence of "
-              "INTERPOLATION_COMPENSATION; see this module's docstring. That "
-              "is a modelling decision, not a defect in the nesting.")
-    return 0 if all(off) else 1
+    everything = [ok for pair in results.values() for ok in pair]
+    print(f"\n{'ALL PASS' if all(everything) else 'FAILURES ABOVE'}: a nest "
+          f"is the same cascade carried further, cell for cell.")
+    return 0 if all(everything) else 1
 
 
 if __name__ == '__main__':

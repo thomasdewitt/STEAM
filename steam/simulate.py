@@ -159,13 +159,25 @@ TAPER_SLAB_BYTES = 64 * 1024**2
 # under-compensated by the ~1%/octave residual leak -- no production
 # config goes deeper).
 #
-# NOTE (nested refinement, OPEN): f depends on the run's own output
-# resolution. A nest's inherited content was deposited by the parent
-# with f(k/dx_parent) but is re-read at the nest's finer resolution,
-# where the correct factor would be larger: the parent's finest class
-# arrives in a nest ~2.2x too weak. A single summed field cannot be
-# correct at two output resolutions at once; resolution pending
-# (per-class increment storage vs. accepting the seam bias).
+# WHERE f IS APPLIED (settled 2026-08-03). f depends on the OUTPUT grid,
+# so it is applied when the output is composed and nowhere else. The
+# cascade's running state -- the field the advective weight and the bound
+# taper read, and the field a nest continues from -- carries no f at all,
+# and is therefore the same field however deep the run goes. The output
+# is state + sum_i (f_i - 1) * (class i's added increment), carried down
+# the same regrid chain and projected onto the physical bounds last.
+#
+# The alternative, damping each class's deposit inside the cascade, made
+# a run that stops coarse advect a different field from one that carries
+# on, so a nest could not be the same cascade continued -- and no choice
+# of f fixes that, because f's own depth-independent limit (the chain
+# continued indefinitely) is f = 1 everywhere. Composing at the output
+# instead is exact for a nest: the composition is LINEAR in the
+# increments, so a nest re-weights its parent's stored per-class
+# increments to its own output grid and gets, to the last bit, what a
+# root run ending on that grid would have written
+# (tests/heavy/test_nest_identity.py).
+#
 # The PRIMITIVE the factors are built from is the per-hop retention
 # r(y): the ratio of a deposit's delivered mean absolute amplitude after
 # one regrid hop to its value before, with y the deposit's resolution
@@ -285,24 +297,6 @@ def _hop_retention_profile(y, k_dest, ls_z, anisotropy):
     return np.where(k_dest < np.asarray(ls_z), r_iso, r_can)
 
 
-def _nest_continuation_ratio(k_j, dx_parent, k_values_nest, ls_z,
-                             anisotropy):
-    """Per-level re-scaling for inherited class-k_j content in a nest.
-
-    The parent delivered the class correctly for ITS output grid; the
-    nest's additional regrid hops (parent output grid -> nest class
-    grids) retain less, so the correction is one over the product of
-    those hops' retentions. For a pure-canonical chain this telescopes
-    to f(k_j/dx_nest) / f(k_j/dx_parent).
-    """
-    D = np.ones(np.shape(ls_z), dtype=np.float64)
-    y = float(k_j) / float(dx_parent)
-    for k_m in k_values_nest:
-        D *= _hop_retention_profile(y, float(k_m), ls_z, anisotropy)
-        y = 2.0 * float(k_j) / float(k_m)
-    return 1.0 / D
-
-
 def _compensation_profiles(k_values, z_arrays, spheroscale_profile,
                            z_profile, anisotropy):
     """Per-class, per-level compensation factors f_i(z) = D_REF / D_i(z).
@@ -310,19 +304,24 @@ def _compensation_profiles(k_values, z_arrays, spheroscale_profile,
     D_i(z) composes the per-hop retentions of class i's actual regrid
     chain, each hop in its own regime at each level. Reduces exactly to
     the pure-canonical table when no class sits below the spheroscale.
-    Applied to the scalar amplitudes AND the flux increment (Thomas's
-    ruling, 2026-07-28: "the flux should have the same normalization").
+
+    ``k_values`` is the chain the content will travel: every class from
+    the outer scale down to the OUTPUT grid, which for a nest means the
+    root's classes followed by the nest's own. ``z_arrays`` gives the
+    z-grid of each class a factor is wanted FOR, so it may be shorter
+    than k_values — a nest asks for its parent's classes (their z-grids)
+    against the whole chain. The factor is therefore a function of
+    (class, output grid) alone, which is what makes a nest's output
+    composition agree with a root run ending on the same grid.
     """
-    n = len(k_values)
     if not INTERPOLATION_COMPENSATION:
-        return [np.ones(len(z_arrays[i]), dtype=np.float32)
-                for i in range(n)]
+        return [np.ones(len(z), dtype=np.float32) for z in z_arrays]
     d_ref = _canonical_delivery_reference()
     out = []
-    for i in range(n):
-        ls_z = np.interp(z_arrays[i], z_profile, spheroscale_profile)
+    for i, z_i in enumerate(z_arrays):
+        ls_z = np.interp(z_i, z_profile, spheroscale_profile)
         D = np.ones(ls_z.shape, dtype=np.float64)
-        for m in range(i + 1, n):
+        for m in range(i + 1, len(k_values)):
             y = 2.0 * float(k_values[i]) / float(k_values[m - 1])
             D *= _hop_retention_profile(y, float(k_values[m]), ls_z,
                                         anisotropy)
@@ -546,8 +545,7 @@ def simulate(
     anisotropy='canonical',
     compress=None,
     device='cpu',
-    save_class_increments=False,
-    save_perturbations=False,
+    save_for_refinement=False,
     hurst_horizontal=None,
     haar_to_mhat=None,
 ):
@@ -617,23 +615,23 @@ def simulate(
         working set off the host — the host holds only its persistent float32
         fields. A 'cuda' request with no usable GPU is an error, never a silent
         CPU fall back.
-    save_class_increments : bool
-        If True, store each class's actually-added h and qt increments, on
-        that class's own working grid, in a ``class_increments`` group of
-        the output file (~1.14x one output-grid field per scalar; the
-        working grids form a geometric pyramid). Opt in for runs intended
-        as refinement parents: refine() uses the stored increments to
-        re-scale inherited content from the parent's
-        INTERPOLATION_COMPENSATION reference to the nest's own (Thomas's
-        ruling, 2026-07-28) — without them a nest inherits the parent's
-        finest classes ~2.2x too weak in the seam octaves.
-    save_perturbations : bool
-        If True, also store h and qt as the cascade left them, before the
-        mean profile was added back (``h_perturbation``, ``qt_perturbation``;
-        doubles the file). refine() starts from these when they are present,
-        which is what makes a nest bit-exact against the same cascade run
-        straight through: h = h_perturbation + <h>(z) rounds in float32 and
-        subtracting the mean back off does not recover the lost bits.
+    save_for_refinement : bool
+        Store everything a nest needs to continue THIS run, roughly
+        doubling the file. Two things, and both are needed:
+
+        - the cascade STATE, h and qt as the loop left them, before the
+          compensation deficit and the mean profile were added and before
+          the output projection (``h_perturbation``, ``qt_perturbation``).
+          The written h is not invertible to it: the projection is not
+          invertible at all, and h = perturbation + <h>(z) rounds in
+          float32 besides.
+        - each class's actually-added increment, on that class's own
+          working grid, in a ``class_increments`` group (~1.14x one
+          output-grid field per scalar; the working grids form a geometric
+          pyramid). A nest re-weights these to ITS output grid to compose
+          the part of its output that its inherited classes contribute.
+
+        Without them refine() refuses, because it cannot be exact.
     hurst_horizontal : float or None
         Override for the module constant H_h (steam.constants). None uses
         the constant. Enters only through _compute_normalization's
@@ -816,9 +814,14 @@ def simulate(
     # (2026-07-15: a 5-field estimate passed preflight at (2048, 2048, 363)
     # and the kernel OOM-killed the session -- keep this honest against the
     # measured peak whenever the live-array set changes.)
+    #
+    # 2026-08-03: +2 for the h and qt compensation deficits. They are the
+    # price of composing the interpolation compensation at the output rather
+    # than damping the cascade's own state, and they are live over exactly
+    # the classes where the peak is -- the last nine, where f != 1.
     nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
     field_bytes = nx_f * ny_f * nz_f * 4
-    peak_bytes = int(7.5 * field_bytes)
+    peak_bytes = int(9.5 * field_bytes)
     if device != 'cuda':
         peak_bytes += fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
     available = available_memory_bytes()
@@ -862,7 +865,7 @@ def simulate(
     child_seeds = seed_sequence.spawn(n_classes)
 
     increment_dir = None
-    if save_class_increments:
+    if save_for_refinement:
         import tempfile
         # Stage beside the output file, not in the default temporary
         # directory: /tmp is tmpfs (RAM) on Linux, so the ~6.5 GB of staged
@@ -876,7 +879,8 @@ def simulate(
                                     spheroscale_profile, z_profile,
                                     anisotropy)
 
-    h_pert, qt_pert, flux_field, final_grid = cascade_loop(
+    (h_pert, qt_pert, flux_field,
+     deficit_h, deficit_qt, final_grid) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -898,24 +902,9 @@ def simulate(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    # The perturbation buffers are no longer needed separately. Reuse them for
-    # final fields instead of holding two additional full-domain arrays --
-    # unless they are being stored, in which case a copy is unavoidable.
-    h_pert_out = h_pert.copy() if save_perturbations else None
-    qt_pert_out = qt_pert.copy() if save_perturbations else None
-    h_pert += h_mean_final[np.newaxis, np.newaxis, :]
-    qt_pert += qt_mean_final[np.newaxis, np.newaxis, :]
-    h_3d = np.ascontiguousarray(h_pert)
-    qt_3d = np.ascontiguousarray(qt_pert)
-    del h_pert, qt_pert
-
-    # The per-class bounded amplitude-preserving add guarantees the bounds
-    # up to float32 rounding of the (perturbation + mean) reassembly, which
-    # can undershoot by ~1 ulp of the field value (observed -1e-9 on qt).
-    # Clamp that rounding residue only — this moves values by at most one
-    # ulp and is not a physics clip.
-    np.clip(h_3d, np.float32(h_min), np.float32(h_max), out=h_3d)
-    np.clip(qt_3d, np.float32(qt_min), np.float32(qt_max), out=qt_3d)
+    h_3d = _compose_output(h_pert, deficit_h, h_mean_final, h_min, h_max)
+    qt_3d = _compose_output(qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max)
+    del deficit_h, deficit_qt
 
     flux_3d = np.ascontiguousarray(flux_field)
 
@@ -983,13 +972,17 @@ def simulate(
         simulation_params,
         compress=compress,
         flux_3d=flux_3d,
-        h_pert_3d=h_pert_out, qt_pert_3d=qt_pert_out,
+        h_pert_3d=h_pert if save_for_refinement else None,
+        qt_pert_3d=qt_pert if save_for_refinement else None,
     )
     if increment_dir is not None:
         from .output import write_class_increments
         import shutil
-        write_class_increments(output_path, increment_dir, grids,
-                               compress=compress)
+        write_class_increments(
+            output_path, increment_dir,
+            [{'k': grids['k'][i], 'dx': grids['dx'][i], 'dy': grids['dy'][i],
+              'z': grids['z_arrays'][i]} for i in range(n_classes)],
+            compress=compress)
         shutil.rmtree(increment_dir, ignore_errors=True)
     return output_path
 
@@ -1007,6 +1000,8 @@ def cascade_loop(
     h_perturbation=None,
     qt_perturbation=None,
     flux=None,
+    deficit_h=None,
+    deficit_qt=None,
     inner_windows=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
@@ -1067,6 +1062,16 @@ def cascade_loop(
     flux : ndarray or None
         Existing dimensionless flux field for nested simulations, on the same
         grid as h_perturbation. If None, initialized to one.
+    deficit_h, deficit_qt : ndarray or None
+        Running compensation deficits, sum over classes so far of
+        (f_i(z) - 1) times the increment that class actually added, carried
+        down the same regrid chain as the state. None (a root, or a nest
+        whose inherited classes are all well resolved) starts them at zero,
+        allocated lazily at the first class with f != 1. The caller adds
+        them to the state to get the OUTPUT field; the state itself never
+        sees them, which is what makes it independent of the run's depth.
+        A nest passes the deficit its inherited classes carry at ITS output
+        grid (see refine).
     inner_windows : list of (x_start, x_stop, y_start, y_stop) or None
         Per-class index window of the nest's own horizontal extent within the
         padded working grid. None (root) means the whole grid is the domain.
@@ -1091,6 +1096,10 @@ def cascade_loop(
     qt_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
     flux : ndarray
         Final dimensionless unit-mean flux.
+    deficit_h, deficit_qt : ndarray or None
+        The accumulated compensation deficits on the finest grid. None if
+        no class carried one (every class well resolved, or the
+        compensation table is empty).
     final_grid_info : dict
         Keys nx, ny, nz, dx, dy, dz (mean), z (1D coordinate array) from
         the last (finest) iteration.
@@ -1173,44 +1182,44 @@ def cascade_loop(
         else:
             if flux is None:
                 flux = np.ones(h_perturbation.shape, dtype=np.float32)
+            # Everything the cascade carries between classes: the two scalar
+            # states, the flux, and the two compensation deficits. The
+            # deficits ride the IDENTICAL regrid chain, since that chain is
+            # exactly what they compensate.
+            carried = [h_perturbation, qt_perturbation, flux,
+                       deficit_h, deficit_qt]
             # Crop-before-zoom when padded extent shrinks between classes.
             # Cropping happens in physical units at the previous class's
             # resolution, centered on the inner region.
             if prev_padded_extent_x is not None:
                 eps = 1e-9
-                cur_nx, cur_ny, cur_nz = h_perturbation.shape
                 if padded_x_i < prev_padded_extent_x - eps:
-                    keep = int(round(padded_x_i / prev_dx))
-                    keep = max(1, min(cur_nx, keep))
-                    start = (cur_nx - keep) // 2
-                    h_perturbation = h_perturbation[start:start+keep, :, :]
-                    qt_perturbation = qt_perturbation[start:start+keep, :, :]
-                    flux = flux[start:start+keep, :, :]
+                    keep = max(1, min(carried[0].shape[0],
+                                      int(round(padded_x_i / prev_dx))))
+                    start = (carried[0].shape[0] - keep) // 2
+                    carried = [f if f is None else f[start:start+keep, :, :]
+                               for f in carried]
                 if padded_y_i < prev_padded_extent_y - eps:
-                    cur_ny = h_perturbation.shape[1]
-                    keep = int(round(padded_y_i / prev_dy))
-                    keep = max(1, min(cur_ny, keep))
-                    start = (cur_ny - keep) // 2
-                    h_perturbation = h_perturbation[:, start:start+keep, :]
-                    qt_perturbation = qt_perturbation[:, start:start+keep, :]
-                    flux = flux[:, start:start+keep, :]
+                    keep = max(1, min(carried[0].shape[1],
+                                      int(round(padded_y_i / prev_dy))))
+                    start = (carried[0].shape[1] - keep) // 2
+                    carried = [f if f is None else f[:, start:start+keep, :]
+                               for f in carried]
                 if padded_h_i < prev_padded_height - eps:
-                    cur_nz = h_perturbation.shape[2]
-                    keep = int(round(padded_h_i / prev_dz_mean))
-                    keep = max(1, min(cur_nz, keep))
-                    # Offset in z is relative to prev class's bottom (z_min_per_class[i-1]).
-                    # New bottom is z_min_i; start index in cells:
-                    z_offset = z_min_i - prev_z_min
-                    start = int(round(z_offset / prev_dz_mean))
-                    start = max(0, min(cur_nz - keep, start))
-                    h_perturbation = h_perturbation[:, :, start:start+keep]
-                    qt_perturbation = qt_perturbation[:, :, start:start+keep]
-                    flux = flux[:, :, start:start+keep]
+                    keep = max(1, min(carried[0].shape[2],
+                                      int(round(padded_h_i / prev_dz_mean))))
+                    # Offset in z is relative to prev class's bottom
+                    # (z_min_per_class[i-1]); new bottom is z_min_i.
+                    start = int(round((z_min_i - prev_z_min) / prev_dz_mean))
+                    start = max(0, min(carried[0].shape[2] - keep, start))
+                    carried = [f if f is None else f[:, :, start:start+keep]
+                               for f in carried]
 
-            if h_perturbation.shape != (nx_k, ny_k, nz_k):
-                h_perturbation = zoom_trilinear(h_perturbation, (nx_k, ny_k, nz_k))
-                qt_perturbation = zoom_trilinear(qt_perturbation, (nx_k, ny_k, nz_k))
-                flux = zoom_trilinear(flux, (nx_k, ny_k, nz_k))
+            if carried[0].shape != (nx_k, ny_k, nz_k):
+                carried = [f if f is None
+                           else zoom_trilinear(f, (nx_k, ny_k, nz_k))
+                           for f in carried]
+            h_perturbation, qt_perturbation, flux, deficit_h, deficit_qt = carried
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
@@ -1222,24 +1231,26 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
-        S_k, flux_increment, _ = _advance_flux(
+        S_k, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
-            device=device, window=window, amplitude_factor=comp_k[i],
-            return_increment=increment_dir is not None,
+            device=device, window=window,
         )
-        if increment_dir is not None:
-            # Net flux change of this class (increment + clip + renorm),
-            # for the nest-side compensation re-scaling (see refine).
-            np.save(Path(increment_dir) / f"c{i:02d}_flux.npy", flux_increment)
-            del flux_increment
+
+        # This class's compensation deficit, f_i(z) - 1. Zero for every
+        # well-resolved class, so the deficit fields are not allocated until
+        # the cascade reaches the classes that carry one (the last nine).
+        deficit_i = comp_k[i] - np.float32(1.0)
+        if np.any(deficit_i) and deficit_h is None:
+            deficit_h = np.zeros_like(h_perturbation)
+            deficit_qt = np.zeros_like(qt_perturbation)
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
         # Process h and qt sequentially to halve peak memory
-        for (name, perturbation_field, mean_1d, C_k_i, b_i, phi_min, phi_max) in (
-            ('h',  h_perturbation,  h_mean_1d,  C_h_k[i],  b_h_k[i],  h_min,  h_max),
-            ('qt', qt_perturbation, qt_mean_1d, C_qt_k[i], b_qt_k[i], qt_min, qt_max),
+        for (name, perturbation_field, deficit_field, mean_1d, C_k_i, b_i, phi_min, phi_max) in (
+            ('h',  h_perturbation,  deficit_h,  h_mean_1d,  C_h_k[i],  b_h_k[i],  h_min,  h_max),
+            ('qt', qt_perturbation, deficit_qt, qt_mean_1d, C_qt_k[i], b_qt_k[i], qt_min, qt_max),
         ):
             running_sum = perturbation_field + mean_1d[np.newaxis, np.newaxis, :]
 
@@ -1298,14 +1309,6 @@ def cascade_loop(
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
 
-            # Interpolation compensation f(k/dx_out, z): damp poorly
-            # resolved classes so every class delivers the same mean
-            # absolute amplitude convention on the output grid (see
-            # HOP_RETENTION / _compensation_profiles). Per level, so a
-            # cascade crossing the spheroscale gets isotropic factors
-            # below it and canonical above.
-            W *= comp_k[i][np.newaxis, np.newaxis, :]
-
             # Convolve (periodic x,y; zero-padded z), then add through the
             # amplitude-preserving bounded projection (2026-07-28 ruling):
             # each class's added increment is (1) zero-mean per level,
@@ -1317,16 +1320,21 @@ def cascade_loop(
             # at production amplitudes.
             increment = CONVOLVE(W, kernel, device=device)
             del W
+            # record_applied leaves the ACTUALLY-ADDED increment (post
+            # bounded add) in `increment` itself, so no full-size copy of
+            # the field is held across the call. That increment is this
+            # class's contribution to the output, and the only thing the
+            # interpolation compensation ever multiplies: the running
+            # state stays uncompensated, and the deficit field accumulates
+            # (f_i - 1) times what was added, down the same regrid chain.
             _bounded_amplitude_add(perturbation_field, mean_1d, increment,
                                    phi_min, phi_max, window=window, device=device,
-                                   record_applied=increment_dir is not None)
+                                   record_applied=True)
+            if deficit_field is not None:
+                deficit_field += deficit_i[np.newaxis, np.newaxis, :] * increment
             if increment_dir is not None:
-                # The ACTUALLY-ADDED increment (post bounded add), on this
-                # class's own working grid — the per-class record that lets
-                # a nest re-scale inherited content to its own
-                # INTERPOLATION_COMPENSATION reference (see refine).
-                # record_applied left it in `increment` itself, so no
-                # full-size copy of the field is held across the add.
+                # Per-class record on this class's own working grid: what a
+                # nest replays to compose ITS output (see refine).
                 np.save(Path(increment_dir) / f"c{i:02d}_{name}.npy", increment)
             del increment
 
@@ -1347,7 +1355,8 @@ def cascade_loop(
         'dz': grids['dz_arrays'][i],   # 1D array (uniform for scalar ls, variable for profile ls)
         'z': z_k,
     }
-    return h_perturbation, qt_perturbation, flux, final_grid_info
+    return (h_perturbation, qt_perturbation, flux,
+            deficit_h, deficit_qt, final_grid_info)
 
 
 def _inner_view(field, window):
@@ -1367,8 +1376,7 @@ def _inner_view(field, window):
 def _advance_flux(
     flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
-    device='cpu', window=None, amplitude_factor=None,
-    return_increment=False,
+    device='cpu', window=None,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -1402,21 +1410,9 @@ def _advance_flux(
     halo. Both the volume means above and the mean absolute multiplier noise
     are taken over it; None means the whole array, as for a root.
 
-    ``amplitude_factor`` (1D per-level float32 array or None) multiplies
-    the flux increment before it is added -- the interpolation
-    compensation f(k/dx_out), applied to the flux exactly as to the
-    scalars (Thomas's ruling, 2026-07-28). The scalar noise S_k is
-    computed from the UNdamped increment; it is normalized per level
-    downstream, so a per-level factor would cancel there anyway.
-
-    Returns ``(scalar_amplitude, applied_increment, diagnostics)``. With
-    ``return_increment`` the second element is this class's NET change of the
-    flux -- convolved increment plus what the clip at zero and the volume-mean
-    renormalization did to it -- which is what a caller recording per-class
-    increments for a nest wants. It is formed here rather than by the caller
-    differencing a copy of the flux, because the noise buffer is already dead
-    by then and can hold the entering flux for free. Without it the second
-    element is None and nothing extra is held.
+    Returns ``(scalar_amplitude, diagnostics)``. The flux carries no
+    interpolation compensation: it is a cascade STATE, and the compensation
+    belongs to the output composition (see the HOP_RETENTION note).
     """
     s_x, s_y, s_z = sparsity_factors
     # Captured before the increment: this is what the renormalization restores.
@@ -1462,22 +1458,10 @@ def _advance_flux(
     else:
         scalar_amplitude = noise.copy()
 
-    if amplitude_factor is not None:
-        noise *= np.asarray(amplitude_factor,
-                            dtype=np.float32)[np.newaxis, np.newaxis, :]
     increment = CONVOLVE(noise, kernel, device=device)
-    if return_increment:
-        # noise is dead the moment the convolution returns, so its buffer
-        # holds the entering flux for the difference below -- the caller
-        # needs no copy of its own and this function allocates nothing new.
-        entering_flux = noise
-        np.copyto(entering_flux, flux)
-    else:
-        entering_flux = None
-        del noise
+    del noise
     flux += increment
-    if not return_increment:
-        del increment
+    del increment
 
     n_clipped = int(np.count_nonzero(flux < 0))
     np.maximum(flux, np.float32(0.0), out=flux)
@@ -1489,14 +1473,6 @@ def _advance_flux(
         # rescale, so restore the entering mean as a flat field.
         flux[...] = np.float32(entering_mean)
 
-    if return_increment:
-        # Net change of this class: the convolved increment, plus what the
-        # clip at zero and the volume-mean renormalization did to it.
-        np.subtract(flux, entering_flux, out=increment)
-        applied_increment = increment
-    else:
-        applied_increment = None
-
     diagnostics = {
         'n_clipped': n_clipped,
         'n_points': int(flux.size),
@@ -1504,7 +1480,7 @@ def _advance_flux(
         'entering_mean': entering_mean,
         'realized_mean': realized_mean,
     }
-    return scalar_amplitude, applied_increment, diagnostics
+    return scalar_amplitude, diagnostics
 
 
 def simulate_flux_only(
@@ -1599,13 +1575,13 @@ def simulate_flux_only(
             flux = zoom_trilinear(flux, shape)
 
         rng = np.random.default_rng(seeds[i])
-        # Same interpolation compensation as the full model (canonical
-        # regime), so the c -> C1 calibration reflects production.
-        comp_i = np.full(shape[2], np.float32(_interpolation_compensation(
-            2.0 * float(k) / float(grids['k'][n_classes - 1]))))
-        scalar_amplitude, _, advance = _advance_flux(
+        # No interpolation compensation, matching the full model: the
+        # compensation is applied when the OUTPUT is composed, never to the
+        # cascade's own state, and the flux is a state (see the
+        # HOP_RETENTION note).
+        scalar_amplitude, advance = _advance_flux(
             flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
-            n_zero, zero_bottom, zero_top, amplitude_factor=comp_i,
+            n_zero, zero_bottom, zero_top,
         )
         del scalar_amplitude
 
@@ -2520,6 +2496,107 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=N
         perturbation_field[:, :, lev] = field_lev
 
 
+def _stage_nest_increments(increment_dir, parent_path, parent_group,
+                           n_inherited, n_own, grids, inner_windows,
+                           z_trim_start, z_trim_stop,
+                           x_start, x_stop, y_start, y_stop,
+                           parent_nx, parent_ny, periodic_x, periodic_y,
+                           z_min, z_max):
+    """Stage this nest's class_increments: the whole ladder, its own extent.
+
+    The classes the nest inherited are carried through from the parent's
+    stored increments, cut down to the nest's extent on each class's own
+    grid; the nest's own are cut down from their padded working grids to
+    the same extent. A descendant then sees one uniform ladder and need not
+    know how many nests deep it is.
+
+    Restricting an inherited class by index on its own coarse grid, rather
+    than after carrying it down the chain, is exact when the nest spans its
+    parent (the restriction is then the identity) and an edge approximation
+    otherwise, of the same kind as the halo itself. Renames the nest's own
+    staged files from local to ladder class numbering in passing.
+    """
+    increment_dir = Path(increment_dir)
+    # Own classes first, and from the deepest down: cascade_loop staged them
+    # under LOCAL class numbers, which are the ladder numbers the inherited
+    # classes are about to take.
+    own_grids = []
+    for i in reversed(range(n_own)):
+        x0, x1, y0, y1 = inner_windows[i]
+        z_i = grids['z_arrays'][i]
+        keep_z = np.where((z_i >= z_min - 1e-6) & (z_i < z_max - 1e-6))[0]
+        for name in ("h", "qt"):
+            staged = increment_dir / f"c{i:02d}_{name}.npy"
+            inner = np.load(staged)[x0:x1, y0:y1,
+                                    keep_z[0]:keep_z[-1] + 1].copy()
+            staged.unlink()
+            np.save(increment_dir / f"c{n_inherited + i:02d}_{name}.npy", inner)
+        own_grids.append({'k': grids['k'][i], 'dx': grids['dx'][i],
+                          'dy': grids['dy'][i], 'z': z_i[keep_z]})
+    own_grids.reverse()
+
+    class_grids = []
+    ds = netCDF4.Dataset(parent_path, "r")
+    inc_root = (ds if parent_group == '/'
+                else ds[parent_group])["class_increments"]
+    for j in range(n_inherited):
+        sub = inc_root[f"c{j:02d}"]
+        z_j = np.asarray(sub.variables["z"][:], dtype=np.float64)
+        keep_z = np.where((z_j >= z_min - 1e-6) & (z_j < z_max - 1e-6))[0]
+        keep = []
+        for size, start, stop, extent, periodic in (
+                (sub.dimensions["x"].size, x_start, x_stop, parent_nx, periodic_x),
+                (sub.dimensions["y"].size, y_start, y_stop, parent_ny, periodic_y)):
+            first = int(round(start / extent * size))
+            count = max(1, int(round((stop - start) / extent * size)))
+            index = np.arange(first, first + count)
+            keep.append(index % size if periodic
+                        else np.clip(index, 0, size - 1))
+        for name in ("h", "qt"):
+            np.save(increment_dir / f"c{j:02d}_{name}.npy",
+                    np.asarray(sub.variables[name][:], dtype=np.float32)[
+                        np.ix_(keep[0], keep[1], keep_z)])
+        class_grids.append({'k': float(sub.k), 'dx': float(sub.dx),
+                            'dy': float(sub.dy), 'z': z_j[keep_z]})
+    ds.close()
+    return class_grids + own_grids
+
+
+def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None):
+    """The field that gets written: state + deficit + mean, then projected.
+
+    The cascade's state carries no interpolation compensation; the output
+    does, as the accumulated per-class deficit sum_i (f_i - 1) * increment_i
+    (see the HOP_RETENTION note). Restoring amplitude to under-resolved
+    classes can push the sum past the physical bounds that the per-class
+    bounded add held the STATE inside, so the composition is projected onto
+    them here, preserving each level's horizontal mean.
+
+    The projection is deliberately the LAST thing that happens, and it
+    touches nothing the cascade or a descendant nest reads: a nest continues
+    from the state, which is why it is the state, not this, that is stored.
+    Projecting is not invertible, and a nest that had to undo it could not
+    be the same cascade continued.
+
+    ``deficit`` is consumed (its buffer becomes the output) and must not be
+    used again. None means every class was well resolved, in which case the
+    state is already the output.
+    """
+    if deficit is None:
+        output = state + mean_1d[np.newaxis, np.newaxis, :]
+    else:
+        deficit += state
+        _project_onto_bounds(deficit, mean_1d, phi_min, phi_max, window)
+        output = deficit
+        output += mean_1d[np.newaxis, np.newaxis, :]
+    # The bounds now hold up to float32 rounding of the (perturbation + mean)
+    # reassembly, which can undershoot by ~1 ulp of the field value (observed
+    # -1e-9 on qt). Clamp that rounding residue only — at most one ulp, not a
+    # physics clip.
+    np.clip(output, np.float32(phi_min), np.float32(phi_max), out=output)
+    return np.ascontiguousarray(output)
+
+
 def _contiguous_runs(indices):
     """Split a 1D index array into (start, stop) runs of consecutive values."""
     breaks = np.flatnonzero(np.diff(indices) != 1) + 1
@@ -2565,8 +2642,7 @@ def refine(
     anisotropy=None,
     compress=None,
     device='cpu',
-    save_class_increments=False,
-    save_perturbations=False,
+    save_for_refinement=False,
 ):
     """Continue a completed simulation's cascade over a subdomain, finer.
 
@@ -2625,8 +2701,11 @@ def refine(
         ``steam.constants.output_compress``.
     device : {'cpu', 'cuda'}
         Where the per-class convolutions run, as in simulate().
-    save_class_increments, save_perturbations : bool
-        As in simulate(). Set both on a nest that will itself be refined.
+    save_for_refinement : bool
+        As in simulate(). Required on a nest that will itself be refined.
+        The stored class_increments cover the WHOLE root ladder — the
+        classes this nest inherited followed by its own — so a nest of a
+        nest re-weights the same uniform ladder as a nest of a root.
 
     Returns
     -------
@@ -2660,7 +2739,6 @@ def refine(
     h_profile = grp.variables["h_profile"][:]
     qt_profile = grp.variables["qt_profile"][:]
     z_profile = np.asarray(grp.variables["z_profile"][:], dtype=np.float64)
-    k_values_parent = grp.variables["k_values"][:]
     spheroscale_profile = np.asarray(
         grp.variables["spheroscale_profile"][:], dtype=np.float64)
 
@@ -2724,14 +2802,16 @@ def refine(
             index += 1
         output_group = f"refinements/r{index}"
 
-    # For the inherited-content compensation re-scaling below: whether the
-    # parent stored per-class increments, and the PARENT's own grid
-    # parameters (the nest may override sparsity/anisotropy for itself,
-    # but the replay must reconstruct the parent's grids exactly).
-    parent_has_increments = "class_increments" in grp.groups
-    parent_is_nest = hasattr(grp, "parent_group")
-    parent_sparsity = tuple(int(v) for v in grp.sparsity_factors)
-    parent_anisotropy = grp.anisotropy if hasattr(grp, "anisotropy") else anisotropy
+    # A nest continues the parent's cascade STATE and re-weights its
+    # per-class increments; neither is recoverable from the written fields.
+    if ("h_perturbation" not in grp.variables
+            or "class_increments" not in grp.groups):
+        ds.close()
+        raise ValueError(
+            f"Parent group {parent_group!r} was not run with "
+            f"save_for_refinement=True, so it holds neither the cascade "
+            f"state nor the per-class increments a nest continues from."
+        )
 
     ds.close()
 
@@ -2917,111 +2997,62 @@ def refine(
         )
     z_coords_slice = z_coords[z_indices]
 
-    # The cascade state to continue is the PERTURBATION. Where the parent
-    # stored it (save_perturbations=True) it is picked up untouched; where it
-    # did not, it is recovered by subtracting the mean profile off h, which
-    # costs the last few bits of the parent's state (the mean is ~1e5 times
-    # the perturbation) and so forfeits exact identity with an unnested run.
+    # The cascade state to continue is the PERTURBATION as the parent's loop
+    # left it -- uncompensated and unprojected. The written h is not that
+    # field and cannot be turned back into it, so a refinement parent must
+    # have been run with save_for_refinement=True.
     ds = netCDF4.Dataset(parent_path, "r")
     grp = ds if parent_group == '/' else ds[parent_group]
-    stored_perturbation = "h_perturbation" in grp.variables
-    if stored_perturbation:
-        h_pert_pad = _read_parent_slab(grp.variables["h_perturbation"],
-                                       x_indices, y_indices, z_indices)
-        qt_pert_pad = _read_parent_slab(grp.variables["qt_perturbation"],
-                                        x_indices, y_indices, z_indices)
-    else:
-        h_pert_pad = _read_parent_slab(grp.variables["h"],
-                                       x_indices, y_indices, z_indices)
-        qt_pert_pad = _read_parent_slab(grp.variables["qt"],
-                                        x_indices, y_indices, z_indices)
+    h_pert_pad = _read_parent_slab(grp.variables["h_perturbation"],
+                                   x_indices, y_indices, z_indices)
+    qt_pert_pad = _read_parent_slab(grp.variables["qt_perturbation"],
+                                    x_indices, y_indices, z_indices)
     flux_pad = _read_parent_slab(grp.variables["flux"], x_indices, y_indices, z_indices)
     ds.close()
 
     h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
     qt_mean_1d = np.interp(z_coords_slice, z_profile, qt_profile).astype(np.float32)
-    if not stored_perturbation:
-        h_pert_pad -= h_mean_1d[np.newaxis, np.newaxis, :]
-        qt_pert_pad -= qt_mean_1d[np.newaxis, np.newaxis, :]
 
-    # Re-scale inherited per-class content to the NEST's interpolation-
-    # compensation reference (Thomas's ruling, 2026-07-28). f(k/dx) is a
-    # property of the run's own output resolution, so content the parent
-    # deposited with f(k/dx_parent) is too weak when re-read at the nest's
-    # finer dx: without correction the parent's finest class arrives
-    # ~2.2x low, right in the parent-nest seam octaves. When the parent
-    # stored its per-class increments (simulate(save_class_increments=
-    # True)), add the delta (f_nest/f_parent - 1) * increment per class,
-    # replaying each increment down the parent's own regrid chain exactly
-    # as the cascade carried it. Classes with ratio ~ 1 (all the
-    # well-resolved ones) are skipped, so only the parent's finest few
-    # classes are replayed.
-    if parent_has_increments and INTERPOLATION_COMPENSATION:
-        if parent_is_nest:
-            print("WARNING: parent is itself a nest; its stored class "
-                  "increments cover only its own classes, not content it "
-                  "inherited in turn. Skipping the compensation "
-                  "re-scaling of inherited content.")
-        else:
-            parent_grids = _compute_all_grids(
-                np.asarray(k_values_parent, dtype=np.float64),
-                parent_nx * parent_dx, parent_ny * parent_dy,
-                domain_height, parent_sparsity,
-                spheroscale_profile, z_profile, z_min=parent_z_min,
-                anisotropy=parent_anisotropy,
-            )
-            ds_inc = netCDF4.Dataset(parent_path, "r")
-            inc_root = (ds_inc if parent_group == '/'
-                        else ds_inc[parent_group])["class_increments"]
-            n_par = len(k_values_parent)
-            ls_slice = np.interp(z_coords_slice, z_profile,
-                                 spheroscale_profile)
-            flux_mean_0 = float(flux_pad.mean(dtype=np.float64))
-            for j in range(n_par):
-                k_j = float(k_values_parent[j])
-                # Per-level ratio composed over the nest's own regrid
-                # chain, regime by regime (sub-spheroscale nest classes
-                # take isotropic hop retentions).
-                ratio_z = _nest_continuation_ratio(
-                    k_j, parent_dx, k_values, ls_slice, anisotropy)
-                if float(np.max(np.abs(ratio_z - 1.0))) < 1e-3:
-                    continue
-                delta_z = (ratio_z - 1.0).astype(np.float32)
-                targets = [("h", h_pert_pad), ("qt", qt_pert_pad)]
-                if "flux" in inc_root[f"c{j:02d}"].variables:
-                    targets.append(("flux", flux_pad))
-                for name, pert_pad in targets:
-                    inc = np.asarray(
-                        inc_root[f"c{j:02d}"].variables[name][:],
-                        dtype=np.float32)
-                    for m in range(j + 1, n_par):
-                        inc = zoom_trilinear(
-                            inc, (int(parent_grids['nx'][m]),
-                                  int(parent_grids['ny'][m]),
-                                  int(parent_grids['nz'][m])))
-                    pert_pad += (delta_z[np.newaxis, np.newaxis, :]
-                                 * inc[np.ix_(x_indices, y_indices,
-                                              z_indices)])
-                    del inc
-            ds_inc.close()
-            # Scaling content up can push the fields past their limits;
-            # restore the scalar bounds with the mean-preserving
-            # projection once, and the flux's positivity with a clip
-            # whose bias is corrected by restoring the volume mean the
-            # region carried before the correction (the same corrector
-            # philosophy as _advance_flux).
-            _project_onto_bounds(h_pert_pad, h_mean_1d, h_min, h_max)
-            _project_onto_bounds(qt_pert_pad, qt_mean_1d, qt_min, qt_max)
-            np.maximum(flux_pad, np.float32(0.0), out=flux_pad)
-            flux_mean_1 = float(flux_pad.mean(dtype=np.float64))
-            if flux_mean_1 > 0:
-                flux_pad *= np.float32(flux_mean_0 / flux_mean_1)
-    elif INTERPOLATION_COMPENSATION and not parent_has_increments:
-        print("NOTE: parent stored no class_increments; inherited content "
-              "keeps the parent's interpolation-compensation reference "
-              "(finest inherited class ~2.2x weak at the nest's "
-              "resolution). Rerun the parent with "
-              "save_class_increments=True to enable the re-scaling.")
+    # What the INHERITED classes owe the nest's OUTPUT. f is a function of
+    # (class, output grid) alone, so class j of the ancestry contributes
+    # (f_j(nest's output grid) - 1) times the increment it actually added --
+    # accumulated by the same recursion the cascade uses, down the same
+    # regrid chain, and cropped to this nest's slab at the end. The parent's
+    # own output used f_j(parent's grid); the nest never sees that number,
+    # because it starts from the state, which carries no f at all. Well
+    # resolved classes have f = 1 and contribute nothing, which is why the
+    # accumulator does not exist until the ladder reaches the classes that
+    # do -- exactly as in cascade_loop.
+    ds_inc = netCDF4.Dataset(parent_path, "r")
+    inc_root = (ds_inc if parent_group == '/'
+                else ds_inc[parent_group])["class_increments"]
+    k_inherited = root_outer_scale / size_class_gap_factor ** np.arange(
+        n_classes_consumed)
+    z_inherited = [np.asarray(inc_root[f"c{j:02d}"].variables["z"][:],
+                              dtype=np.float64)
+                   for j in range(n_classes_consumed)]
+    comp_inherited = _compensation_profiles(
+        np.concatenate([k_inherited, k_values]), z_inherited,
+        spheroscale_profile, z_profile, anisotropy)
+
+    inherited_deficit = {}
+    for name in ("h", "qt"):
+        accumulated = None
+        for j in range(n_classes_consumed):
+            deficit_j = comp_inherited[j] - np.float32(1.0)
+            if accumulated is None and not np.any(deficit_j):
+                continue
+            increment = np.asarray(
+                inc_root[f"c{j:02d}"].variables[name][:], dtype=np.float32)
+            if accumulated is None:
+                accumulated = np.zeros_like(increment)
+            elif accumulated.shape != increment.shape:
+                accumulated = zoom_trilinear(accumulated, increment.shape)
+            accumulated += deficit_j[np.newaxis, np.newaxis, :] * increment
+        inherited_deficit[name] = (
+            None if accumulated is None
+            else accumulated[np.ix_(x_indices, y_indices, z_indices)])
+    ds_inc.close()
 
     # Note: the nest's flux anomaly needs no explicit bookkeeping. Each class
     # restores the volume mean the flux entered that class with (_advance_flux),
@@ -3095,12 +3126,13 @@ def refine(
         child_seeds = np.random.SeedSequence(seed).spawn(n_classes)
 
     increment_dir = None
-    if save_class_increments:
+    if save_for_refinement:
         import tempfile
         increment_dir = Path(tempfile.mkdtemp(prefix="steam_class_inc_",
                                               dir=parent_path.parent))
 
-    h_pert_refined, qt_pert_refined, flux_refined, final_grid = cascade_loop(
+    (h_pert_refined, qt_pert_refined, flux_refined,
+     deficit_h, deficit_qt, final_grid) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -3113,6 +3145,8 @@ def refine(
         h_perturbation=h_pert_pad,
         qt_perturbation=qt_pert_pad,
         flux=flux_pad,
+        deficit_h=inherited_deficit["h"],
+        deficit_qt=inherited_deficit["qt"],
         inner_windows=inner_windows,
         turbulon_shape=turbulon_shape,
         # Turbulon centers are suppressed at the DOMAIN surface and top, not
@@ -3143,9 +3177,13 @@ def refine(
     inner = (slice(window_x_start, window_x_stop),
              slice(window_y_start, window_y_stop),
              slice(z_trim_start, z_trim_stop))
-    h_pert_inner = h_pert_refined[inner]
-    qt_pert_inner = qt_pert_refined[inner]
+    h_pert_inner = np.ascontiguousarray(h_pert_refined[inner])
+    qt_pert_inner = np.ascontiguousarray(qt_pert_refined[inner])
     flux_inner = np.ascontiguousarray(flux_refined[inner])
+    deficit_h_inner = None if deficit_h is None else np.ascontiguousarray(
+        deficit_h[inner])
+    deficit_qt_inner = None if deficit_qt is None else np.ascontiguousarray(
+        deficit_qt[inner])
 
     z_final = z_full[z_trim_start:z_trim_stop].astype(np.float32)
     dz_final = dz_full[z_trim_start:z_trim_stop].astype(np.float32)
@@ -3153,15 +3191,10 @@ def refine(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    h_3d_out = np.ascontiguousarray(
-        h_mean_final[np.newaxis, np.newaxis, :] + h_pert_inner)
-    qt_3d_out = np.ascontiguousarray(
-        qt_mean_final[np.newaxis, np.newaxis, :] + qt_pert_inner)
-    # The per-class bounded amplitude-preserving add guarantees the bounds
-    # over the nest exactly as in simulate(); clamp only the ~1 ulp float32
-    # rounding residue of the (perturbation + mean) reassembly.
-    np.clip(h_3d_out, np.float32(h_min), np.float32(h_max), out=h_3d_out)
-    np.clip(qt_3d_out, np.float32(qt_min), np.float32(qt_max), out=qt_3d_out)
+    h_3d_out = _compose_output(h_pert_inner, deficit_h_inner, h_mean_final,
+                               h_min, h_max)
+    qt_3d_out = _compose_output(qt_pert_inner, deficit_qt_inner, qt_mean_final,
+                                qt_min, qt_max)
 
     nx_out = h_3d_out.shape[0]
     ny_out = h_3d_out.shape[1]
@@ -3262,15 +3295,20 @@ def refine(
         group=output_group,
         compress=compress,
         flux_3d=flux_inner,
-        h_pert_3d=(np.ascontiguousarray(h_pert_inner)
-                   if save_perturbations else None),
-        qt_pert_3d=(np.ascontiguousarray(qt_pert_inner)
-                    if save_perturbations else None),
+        h_pert_3d=h_pert_inner if save_for_refinement else None,
+        qt_pert_3d=qt_pert_inner if save_for_refinement else None,
     )
     if increment_dir is not None:
         from .output import write_class_increments
         import shutil
-        write_class_increments(parent_path, increment_dir, grids,
+        write_class_increments(parent_path, increment_dir,
+                               _stage_nest_increments(
+                                   increment_dir, parent_path, parent_group,
+                                   n_classes_consumed, n_classes, grids,
+                                   inner_windows, z_trim_start, z_trim_stop,
+                                   x_start, x_stop, y_start, y_stop,
+                                   parent_nx, parent_ny, periodic_x, periodic_y,
+                                   z_min, z_max),
                                group=output_group, compress=compress)
         shutil.rmtree(increment_dir, ignore_errors=True)
     return parent_path
