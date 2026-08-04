@@ -181,17 +181,20 @@ def test_refine_reproducible_under_fixed_seed(parent_nc):
         np.testing.assert_array_equal(r0.variables["flux"][:], r1.variables["flux"][:])
 
 
-def test_refine_auto_seed_is_process_independent(parent_nc):
-    """The auto-derived seed must not depend on str hashing, which numpy's
-    SeedSequence would happily accept but which is salted per process."""
+def test_refine_auto_seed_continues_the_root_stream(parent_nc):
+    """seed=None continues the root's per-class seed stream, so a nest depends
+    on nothing but the root seed and the class index — in particular not on
+    the output group name, and not on anything salted per process."""
     geometry = _parent_geometry(parent_nc)
     half = geometry['nx'] // 2
     new_dx = geometry['k_finest'] / 4
     refine(parent_nc, 0, half, 0, half, new_dx, new_dx, output_group="a")
+    refine(parent_nc, 0, half, 0, half, new_dx, new_dx, output_group="b")
     with netCDF4.Dataset(parent_nc, "r") as ds:
-        seed = int(ds.groups["a"].seed)
-    import zlib
-    assert seed == 42 + zlib.crc32(b"a") % (2 ** 31)
+        a = np.asarray(ds.groups["a"].variables["h"][:])
+        b = np.asarray(ds.groups["b"].variables["h"][:])
+        assert int(ds.groups["a"].n_classes_consumed) > int(ds.n_classes_consumed)
+    np.testing.assert_array_equal(a, b)
 
 
 def test_refine_tiny_inner_keeps_grid_bounded(parent_nc):
@@ -219,12 +222,11 @@ def test_nest_with_zero_amplitude_reproduces_the_parent_field(parent_nc):
     projection, trim) from the cascade itself.
 
     A doubly-spanning nest is used so there is no halo to complicate the
-    comparison. The nest inherits its amplitude ladder from the parent's
-    stored C_{Phi,k}, so zeroing those stored arrays zeroes every nest class.
+    comparison. The nest re-derives its amplitude ladder from the parent's
+    mean profile and lambda, so zeroing lambda zeroes every nest class.
     """
     with netCDF4.Dataset(parent_nc, "r+") as ds:
-        ds.variables["C_h_k"][:] = 0.0
-        ds.variables["C_qt_k"][:] = 0.0
+        ds.lambda_haar_to_mhat = np.float64(0.0)
     geometry = _parent_geometry(parent_nc)
     new_dx = geometry['k_finest'] / 4
 

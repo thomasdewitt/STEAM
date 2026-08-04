@@ -98,14 +98,20 @@ def test_taper_zero_buffer_is_indicator_of_strict_interior():
 # _bound_buffers
 # ---------------------------------------------------------------------------
 
-def test_bound_buffers_sum_current_and_smaller_classes():
-    z = np.arange(4, dtype=np.float64)
-    z_arrays = [z, z, z]
+def test_bound_buffers_close_the_whole_remaining_ladder():
+    """b_i sums the current class and ALL smaller ones — including the classes
+    below the run's own finest, which is what makes the taper independent of
+    where the run stops. The sum is geometric with ratio 2^(-H_h/n_c)."""
+    from steam.constants import hurst_horizontal as H_h
     C_k = [np.full(4, c, dtype=np.float32) for c in (4.0, 2.0, 1.0)]
-    b_k = _bound_buffers(C_k, z_arrays)
-    np.testing.assert_allclose(b_k[0], BOUND_BUFFER_MULTIPLE * 7.0)
-    np.testing.assert_allclose(b_k[1], BOUND_BUFFER_MULTIPLE * 3.0)
-    np.testing.assert_allclose(b_k[2], BOUND_BUFFER_MULTIPLE * 1.0)
+    b_k = _bound_buffers(C_k, 1)
+    tail = 1.0 / (1.0 - 2.0 ** -H_h)
+    for i, c in enumerate((4.0, 2.0, 1.0)):
+        np.testing.assert_allclose(b_k[i], BOUND_BUFFER_MULTIPLE * tail * c,
+                                   rtol=1e-6)
+    # Two classes per dyad halve the per-class amplitude step, so more of the
+    # ladder is still to come and the buffer is wider.
+    assert _bound_buffers(C_k, 2)[0][0] > b_k[0][0]
 
 
 # ---------------------------------------------------------------------------

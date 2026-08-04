@@ -9,7 +9,7 @@ from steam.simulate import _compute_normalization, HAAR_TO_MHAT
 def _norm_profile(profile, k_z_L, z, k_values=(1000.0,), outer_scale=1000.0):
     z_arrays = {'z_arrays': [z]}
     return _compute_normalization(
-        profile, np.full(z.size, k_z_L), np.asarray(k_values), outer_scale,
+        profile, z, np.full(z.size, k_z_L), np.asarray(k_values), outer_scale,
         z_arrays,
     )
 
@@ -27,10 +27,9 @@ def test_linear_profile_gives_gradient_times_half_window():
     C = _norm_profile(100.0 + slope * z, k_z_L, z)
     mid = float(C[0][n // 2])
     expected = HAAR_TO_MHAT * slope * k_z_L / 2
-    # Discrete half-window means give slope * (m+1) * dz instead of
-    # slope * k_zL / 2: an O(dz / k_zL) discretization excess.
-    assert mid == pytest.approx(expected, rel=2 * dz / k_z_L + 1e-6)
-    assert mid > expected  # discretization bias is one-sided (window widens)
+    # The half-window means are exact integrals of the profile's own
+    # piecewise-linear interpolant, so this is exact, not approximate.
+    assert mid == pytest.approx(expected, rel=1e-6)
 
 
 def test_constant_profile_gives_zero():
@@ -50,9 +49,10 @@ def test_resolution_independence():
         vals.append(float(C[0][n // 2]))
     coarse, fine = vals
     expected = HAAR_TO_MHAT * slope * k_z_L / 2
-    # Both within the discretization envelope, and the finer grid closer.
-    assert abs(fine - expected) < abs(coarse - expected)
-    assert fine == pytest.approx(expected, rel=0.05)
+    # Not "converges toward" but "is already there": the exact half-window
+    # means make the response the same number on any grid.
+    assert coarse == pytest.approx(expected, rel=1e-6)
+    assert fine == pytest.approx(coarse, rel=1e-6)
 
 
 def test_hurst_scaling_across_classes():
@@ -63,7 +63,7 @@ def test_hurst_scaling_across_classes():
     z_arrays = {'z_arrays': [z, z]}
     k_values = np.array([1000.0, 500.0])
     C = _compute_normalization(
-        100.0 + 2.0 * z, np.full(n, 400.0), k_values, 1000.0, z_arrays,
+        100.0 + 2.0 * z, z, np.full(n, 400.0), k_values, 1000.0, z_arrays,
     )
     mid = n // 2
     ratio = float(C[1][mid] / C[0][mid])

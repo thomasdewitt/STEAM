@@ -1,6 +1,5 @@
 """Core STEAM cascade algorithm."""
 
-import zlib
 import numpy as np
 import netCDF4
 import torch
@@ -1859,13 +1858,14 @@ def _compute_normalization(profile, z_profile, k_z_L_on_profile,
     per-octave variance is invariant under s ~ n_c^{-1/alpha}). Not verified
     for all scalar statistics; unity at the production n_c = 1.
 
-    The Haar response is measured on the INPUT PROFILE's own z-grid, not on
-    the cascade's finest grid. C_{Phi,L}(z) is then a property of the input
-    profile alone, independent of the resolution the run happens to stop at
-    — which is what makes a nest's amplitude ladder agree exactly with the
-    ladder of a root run taken straight to the nest's resolution (the
-    half-window MEANS already make the response nearly resolution-free; this
-    removes the residual rounding of the window to a whole number of cells).
+    The response is measured on the INPUT PROFILE's own z-grid, and over the
+    exact half-windows rather than a whole number of cells, so C_{Phi,L}(z)
+    is a property of the input profile alone: independent of the profile's
+    own spacing AND of the resolution the run happens to stop at. Both
+    matter — the first is a standing invariant of the model (see
+    tests/test_sanity.py), the second is what lets a nest's amplitude ladder
+    agree exactly with the ladder of a root run taken straight to the nest's
+    resolution.
 
     Parameters
     ----------
@@ -1897,23 +1897,35 @@ def _compute_normalization(profile, z_profile, k_z_L_on_profile,
     lambda_used = (HAAR_TO_MHAT if haar_to_mhat is None
                    else float(haar_to_mhat))
 
-    dz_prof = float(np.mean(np.diff(z_profile)))
-    n_p = profile.size
+    # The two half-window means, over the EXACT windows [z, z + k_z,L/2] and
+    # [z - k_z,L/2, z]. The profile is read as the piecewise-linear function
+    # its own samples define, and the means are that function's exact
+    # integrals over the windows, so the response is the same number on any
+    # grid the profile is expressed on -- no rounding of the window to a
+    # whole number of cells, and none of the one-sided widening bias that
+    # rounding used to leave. Outside the profile the function is extended
+    # by its end values (the old np.pad(mode='edge')).
+    z_profile = np.asarray(z_profile, dtype=np.float64)
+    profile = np.asarray(profile, dtype=np.float64)
+    integral = np.concatenate([[0.0], np.cumsum(
+        0.5 * (profile[1:] + profile[:-1]) * np.diff(z_profile))])
 
-    # Per-level Haar half-window k_z,L(z)/2 in profile cells (>= 1 cell).
-    n_half = np.maximum(1, np.round(
-        0.5 * np.asarray(k_z_L_on_profile) / dz_prof).astype(int))
-    n_max = int(n_half.max())
-    padded = np.pad(np.asarray(profile, dtype=np.float64),
-                    (n_max, n_max), mode='edge')
+    def integral_to(x):
+        """Integral of the profile from z_profile[0] up to each x."""
+        j = np.clip(np.searchsorted(z_profile, x, side='right') - 1,
+                    0, len(z_profile) - 2)
+        inside = (integral[j] + 0.5 * (profile[j] + np.interp(
+            x, z_profile, profile)) * (x - z_profile[j]))
+        below = integral[0] - profile[0] * (z_profile[0] - x)
+        above = integral[-1] + profile[-1] * (x - z_profile[-1])
+        return np.where(x < z_profile[0], below,
+                        np.where(x > z_profile[-1], above, inside))
 
-    response = np.empty(n_p)
-    for i in range(n_p):
-        m = int(n_half[i])
-        center = i + n_max
-        upper = padded[center + 1: center + m + 1].mean()
-        lower = padded[center - m: center].mean()
-        response[i] = lambda_used * abs(upper - lower)
+    half = 0.5 * np.asarray(k_z_L_on_profile, dtype=np.float64)
+    centre = integral_to(z_profile)
+    upper = (integral_to(z_profile + half) - centre) / half
+    lower = (centre - integral_to(z_profile - half)) / half
+    response = lambda_used * np.abs(upper - lower)
     C_k = []
     for i, k in enumerate(k_values):
         hurst_scale = float((k / outer_scale) ** H_h_used) * n_scale_classes_per_dyad ** (-1.0 / FLUX_ALPHA)
@@ -2640,8 +2652,6 @@ def refine(
     qt_profile = grp.variables["qt_profile"][:]
     z_profile = np.asarray(grp.variables["z_profile"][:], dtype=np.float64)
     k_values_parent = grp.variables["k_values"][:]
-    C_h_k_parent = grp.variables["C_h_k"][:]
-    C_qt_k_parent = grp.variables["C_qt_k"][:]
     spheroscale_profile = np.asarray(
         grp.variables["spheroscale_profile"][:], dtype=np.float64)
 
@@ -2650,7 +2660,6 @@ def refine(
     domain_height = float(grp.domain_height)
     profile_dz = float(grp.profile_dz)
     surface_pressure = float(grp.surface_pressure)
-    parent_seed = int(grp.seed) if int(grp.seed) != -1 else None
     h_min = float(grp.h_min)
     h_max = float(grp.h_max)
     qt_min = float(grp.qt_min)
@@ -2739,9 +2748,14 @@ def refine(
     # use.
     new_outer_scale = (root_outer_scale
                        / size_class_gap_factor ** (n_classes_consumed - 1))
-    n_classes = int(np.floor(
-        np.log(new_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
-    ))
+    # Class count by the SAME rule simulate() uses -- the ladder is rounded so
+    # its finest class sits nearest 2*dx -- minus what is already spent. Doing
+    # it any other way (floor of the nest's own span, say) puts the nest's
+    # finest class a rounding step off the class a root run reaching this deep
+    # would have finished on.
+    n_classes = int(round(
+        np.log(root_outer_scale / (2 * dx)) / np.log(size_class_gap_factor)
+    )) + 1 - n_classes_consumed
     if n_classes < 1:
         raise ValueError(
             f"Refinement cannot add any classes: new_outer_scale="

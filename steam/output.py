@@ -154,8 +154,10 @@ def write_netcdf(
             var.units = units
             var.long_name = f"{name} as the cascade left it (mean not added)"
 
-    # Profile variables
-    zp_var = ds.createVariable("z_profile", "f4", ("z_profile",))
+    # Profile variables. z_profile and spheroscale_profile are float64: a
+    # nest rebuilds its grids from them, and a float32 round-trip of the
+    # spheroscale would move every class's dz by a rounding step.
+    zp_var = ds.createVariable("z_profile", "f8", ("z_profile",))
     zp_var[:] = z_profile
     zp_var.units = "m"
 
@@ -170,8 +172,8 @@ def write_netcdf(
     qtp_var.long_name = "input qt profile"
 
     if 'spheroscale_profile' in simulation_params:
-        lsp_var = ds.createVariable("spheroscale_profile", "f4", ("z_profile",))
-        lsp_var[:] = np.asarray(simulation_params['spheroscale_profile'], dtype=np.float32)
+        lsp_var = ds.createVariable("spheroscale_profile", "f8", ("z_profile",))
+        lsp_var[:] = np.asarray(simulation_params['spheroscale_profile'], dtype=np.float64)
         lsp_var.units = "m"
         lsp_var.long_name = "spheroscale profile on input profile grid"
 

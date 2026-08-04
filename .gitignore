@@ -16,3 +16,4 @@ pytest-of-thomas/
 tests/regression_data/
 
 .codex
+scratch/
