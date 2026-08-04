@@ -37,6 +37,7 @@ def write_netcdf(
     flux_3d=None,
     h_pert_3d=None,
     qt_pert_3d=None,
+    flux_state_3d=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -153,6 +154,19 @@ def write_netcdf(
             var[:] = field
             var.units = units
             var.long_name = f"{name} as the cascade left it (mean not added)"
+
+    # The flux state the cascade left, before the interpolation-compensation
+    # composition (the written `flux` is composed, like h and qt). A nest
+    # continues from this, for the same reason as the perturbations above.
+    if flux_state_3d is not None:
+        var = ds.createVariable(
+            "flux_state", "f4", ("x", "y", "z"), chunksizes=field_chunks,
+            **compression_kwargs(compress, field_chunks),
+        )
+        var[:] = flux_state_3d
+        var.units = "1"
+        var.long_name = ("dimensionless conserved flux as the cascade left "
+                         "it (no interpolation compensation)")
 
     # Profile variables. z_profile and spheroscale_profile are float64: a
     # nest rebuilds its grids from them, and a float32 round-trip of the
@@ -293,12 +307,13 @@ def write_class_increments(output_path, increment_dir, class_grids,
                            group=None, compress=None):
     """Append per-class added increments to an existing STEAM output file.
 
-    Stores, for each size class j of the WHOLE root ladder, the h and qt
-    increments the cascade actually added (post bounded add) on that
-    class's own grid, under ``class_increments/c{j:02d}``. Each class
-    subgroup carries its own (x, y, z) dimensions, its z-coordinate array,
-    and attributes k, dx, dy. Total size is a geometric pyramid, ~1.14x one
-    output-grid field per scalar before compression.
+    Stores, for each size class j of the WHOLE root ladder, the h, qt and
+    flux increments the cascade actually added (post bounded add; for the
+    flux, the state difference across the advance) on that class's own
+    grid, under ``class_increments/c{j:02d}``. Each class subgroup carries
+    its own (x, y, z) dimensions, its z-coordinate array, and attributes
+    k, dx, dy. Total size is a geometric pyramid, ~1.14x one output-grid
+    field per stored field before compression.
 
     A nest stores the ladder whole -- the classes it inherited, carried
     through from its parent, followed by its own -- so that a nest of a
@@ -330,7 +345,7 @@ def write_class_increments(output_path, increment_dir, class_grids,
     for j, class_grid in enumerate(class_grids):
         sub = inc_root.createGroup(f"c{j:02d}")
         arrays = {name: np.load(increment_dir / f"c{j:02d}_{name}.npy")
-                  for name in ("h", "qt")}
+                  for name in ("h", "qt", "flux")}
         nx_j, ny_j, nz_j = arrays["h"].shape
         sub.createDimension("x", nx_j)
         sub.createDimension("y", ny_j)
@@ -339,7 +354,7 @@ def write_class_increments(output_path, increment_dir, class_grids,
         z_var = sub.createVariable("z", "f8", ("z",))
         z_var[:] = np.asarray(class_grid['z'], dtype=np.float64)
         z_var.units = "m"
-        for name, units in (("h", "J/kg"), ("qt", "kg/kg")):
+        for name, units in (("h", "J/kg"), ("qt", "kg/kg"), ("flux", "1")):
             v = sub.createVariable(
                 name, "f4", ("x", "y", "z"), chunksizes=class_chunks,
                 **compression_kwargs(compress, class_chunks),

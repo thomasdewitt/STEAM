@@ -97,10 +97,15 @@ SUPPORT_FACTOR = 3
 # FLUX_SCALE is set so the realized flux C1 = 0.1, the measured TWPICE
 # horizontal-wind intermittency; C1 = 1.681 c^1.8 from calibration
 # (turbulon-analysis/calibration, re-fit 2026-07-28 with the
-# interpolation compensation applied to the flux increments; free
-# exponent 1.751 vs the alpha-stable prediction 1.8, R^2 0.998), so
+# interpolation compensation applied IN-CASCADE to the flux increments;
+# free exponent 1.751 vs the alpha-stable prediction 1.8, R^2 0.998), so
 # c = (0.1/1.681)^(1/1.8) = 0.2085. Production runs targeting C1 = 0.05
 # override this with c = 0.1419.
+# PROVENANCE CAVEAT (2026-08-04): the compensation has since moved out of
+# the cascade -- the flux state runs raw and the written flux is composed
+# at the output (_compose_flux_output). The realized C1 of the composed
+# output has not been re-fit under this convention; re-fit before final
+# production numbers.
 FLUX_SCALE = 0.2085
 FLUX_ALPHA = 1.8
 
@@ -159,13 +164,18 @@ TAPER_SLAB_BYTES = 64 * 1024**2
 # under-compensated by the ~1%/octave residual leak -- no production
 # config goes deeper).
 #
-# WHERE f IS APPLIED (settled 2026-08-03). f depends on the OUTPUT grid,
-# so it is applied when the output is composed and nowhere else. The
-# cascade's running state -- the field the advective weight and the bound
-# taper read, and the field a nest continues from -- carries no f at all,
-# and is therefore the same field however deep the run goes. The output
-# is state + sum_i (f_i - 1) * (class i's added increment), carried down
-# the same regrid chain and projected onto the physical bounds last.
+# WHERE f IS APPLIED (settled 2026-08-03; extended to the flux
+# 2026-08-04). f depends on the OUTPUT grid, so it is applied when the
+# output is composed and nowhere else. The cascade's running state -- the
+# fields the advective weight and the bound taper read, the flux, and
+# everything a nest continues from -- carries no f at all, and is
+# therefore the same field however deep the run goes. Each output is
+# state + sum_i (f_i - 1) * (class i's added increment), carried down
+# the same regrid chain; the scalars are then projected onto their
+# physical bounds, and the flux clipped at zero with its volume mean
+# restored (_compose_output / _compose_flux_output). A refinement parent
+# stores the states themselves (h_perturbation, qt_perturbation,
+# flux_state) beside the composed outputs.
 #
 # The alternative, damping each class's deposit inside the cascade, made
 # a run that stops coarse advect a different field from one that carries
@@ -825,9 +835,12 @@ def simulate(
     # price of composing the interpolation compensation at the output rather
     # than damping the cascade's own state, and they are live over exactly
     # the classes where the peak is -- the last nine, where f != 1.
+    # 2026-08-04: +1 for the flux deficit (the flux output is compensated
+    # too), and the transient flux_before copy at the flux advance rides
+    # inside the same envelope (the flux step was never the peak).
     nx_f, ny_f, nz_f = int(grids['nx'][-1]), int(grids['ny'][-1]), int(grids['nz'][-1])
     field_bytes = nx_f * ny_f * nz_f * 4
-    peak_bytes = int(9.5 * field_bytes)
+    peak_bytes = int(10.5 * field_bytes)
     if device != 'cuda':
         peak_bytes += fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
     available = available_memory_bytes()
@@ -886,7 +899,7 @@ def simulate(
                                     anisotropy)
 
     (h_pert, qt_pert, flux_field,
-     deficit_h, deficit_qt, final_grid) = cascade_loop(
+     deficit_h, deficit_qt, deficit_flux, final_grid) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -912,7 +925,8 @@ def simulate(
     qt_3d = _compose_output(qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max)
     del deficit_h, deficit_qt
 
-    flux_3d = np.ascontiguousarray(flux_field)
+    flux_3d = _compose_flux_output(flux_field, deficit_flux)
+    del deficit_flux
 
     nx_final_val = h_3d.shape[0]
     ny_final_val = h_3d.shape[1]
@@ -980,6 +994,7 @@ def simulate(
         flux_3d=flux_3d,
         h_pert_3d=h_pert if save_for_refinement else None,
         qt_pert_3d=qt_pert if save_for_refinement else None,
+        flux_state_3d=flux_field if save_for_refinement else None,
     )
     if increment_dir is not None:
         from .output import write_class_increments
@@ -1008,6 +1023,7 @@ def cascade_loop(
     flux=None,
     deficit_h=None,
     deficit_qt=None,
+    deficit_flux=None,
     inner_windows=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
@@ -1068,7 +1084,7 @@ def cascade_loop(
     flux : ndarray or None
         Existing dimensionless flux field for nested simulations, on the same
         grid as h_perturbation. If None, initialized to one.
-    deficit_h, deficit_qt : ndarray or None
+    deficit_h, deficit_qt, deficit_flux : ndarray or None
         Running compensation deficits, sum over classes so far of
         (f_i(z) - 1) times the increment that class actually added, carried
         down the same regrid chain as the state. None (a root, or a nest
@@ -1101,8 +1117,9 @@ def cascade_loop(
     h_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
     qt_perturbation : ndarray, shape (nx_finest, ny_finest, nz_finest)
     flux : ndarray
-        Final dimensionless unit-mean flux.
-    deficit_h, deficit_qt : ndarray or None
+        Final dimensionless unit-mean flux (the cascade state, no
+        interpolation compensation — see _compose_flux_output).
+    deficit_h, deficit_qt, deficit_flux : ndarray or None
         The accumulated compensation deficits on the finest grid. None if
         no class carried one (every class well resolved, or the
         compensation table is empty).
@@ -1189,11 +1206,11 @@ def cascade_loop(
             if flux is None:
                 flux = np.ones(h_perturbation.shape, dtype=np.float32)
             # Everything the cascade carries between classes: the two scalar
-            # states, the flux, and the two compensation deficits. The
+            # states, the flux, and the three compensation deficits. The
             # deficits ride the IDENTICAL regrid chain, since that chain is
             # exactly what they compensate.
             carried = [h_perturbation, qt_perturbation, flux,
-                       deficit_h, deficit_qt]
+                       deficit_h, deficit_qt, deficit_flux]
             # Crop-before-zoom when padded extent shrinks between classes.
             # Cropping happens in physical units at the previous class's
             # resolution, centered on the inner region.
@@ -1225,7 +1242,8 @@ def cascade_loop(
                 carried = [f if f is None
                            else zoom_trilinear(f, (nx_k, ny_k, nz_k))
                            for f in carried]
-            h_perturbation, qt_perturbation, flux, deficit_h, deficit_qt = carried
+            (h_perturbation, qt_perturbation, flux,
+             deficit_h, deficit_qt, deficit_flux) = carried
 
         # Interpolate mean profiles to current vertical grid
         h_mean_1d = np.interp(z_k, z_profile, h_profile).astype(np.float32)
@@ -1237,19 +1255,43 @@ def cascade_loop(
         else:
             rng = seeds_or_rng
 
+        # This class's compensation deficit, f_i(z) - 1. Zero for every
+        # well-resolved class, so the deficit fields are not allocated until
+        # the cascade reaches the classes that carry one (the last nine).
+        deficit_i = comp_k[i] - np.float32(1.0)
+        class_has_deficit = bool(np.any(deficit_i))
+        if class_has_deficit:
+            if deficit_h is None:
+                deficit_h = np.zeros_like(h_perturbation)
+                deficit_qt = np.zeros_like(qt_perturbation)
+            if deficit_flux is None:
+                deficit_flux = np.zeros_like(flux)
+
+        # The flux's actually-added increment, as the difference of the state
+        # across the advance (clip and volume-mean restore included) — the
+        # exact flux analogue of the scalars' record_applied increment, and
+        # the only thing the interpolation compensation ever multiplies
+        # (2026-08-04 ruling: the flux OUTPUT is compensated like the
+        # scalars'; the state still carries no f). Materialized only when a
+        # deficit accumulates or a parent is recording increments: one
+        # transient field, at the same classes where the peak already is.
+        need_flux_increment = class_has_deficit or increment_dir is not None
+        flux_before = flux.copy() if need_flux_increment else None
         S_k, _ = _advance_flux(
             flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
             device=device, window=window,
         )
-
-        # This class's compensation deficit, f_i(z) - 1. Zero for every
-        # well-resolved class, so the deficit fields are not allocated until
-        # the cascade reaches the classes that carry one (the last nine).
-        deficit_i = comp_k[i] - np.float32(1.0)
-        if np.any(deficit_i) and deficit_h is None:
-            deficit_h = np.zeros_like(h_perturbation)
-            deficit_qt = np.zeros_like(qt_perturbation)
+        if need_flux_increment:
+            np.subtract(flux, flux_before, out=flux_before)
+            flux_increment = flux_before
+            del flux_before
+            if class_has_deficit:
+                deficit_flux += deficit_i[np.newaxis, np.newaxis, :] * flux_increment
+            if increment_dir is not None:
+                np.save(Path(increment_dir) / f"c{i:02d}_flux.npy",
+                        flux_increment)
+            del flux_increment
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           computing G, convolutions...', end='\r')
 
@@ -1362,7 +1404,7 @@ def cascade_loop(
         'z': z_k,
     }
     return (h_perturbation, qt_perturbation, flux,
-            deficit_h, deficit_qt, final_grid_info)
+            deficit_h, deficit_qt, deficit_flux, final_grid_info)
 
 
 def _inner_view(field, window):
@@ -1416,9 +1458,11 @@ def _advance_flux(
     halo. Both the volume means above and the mean absolute multiplier noise
     are taken over it; None means the whole array, as for a root.
 
-    Returns ``(scalar_amplitude, diagnostics)``. The flux carries no
-    interpolation compensation: it is a cascade STATE, and the compensation
-    belongs to the output composition (see the HOP_RETENTION note).
+    Returns ``(scalar_amplitude, diagnostics)``. The flux STATE carries no
+    interpolation compensation; the compensation belongs to the output
+    composition (_compose_flux_output, fed by a deficit accumulated in
+    cascade_loop from the state differences across this call — see the
+    HOP_RETENTION note).
     """
     s_x, s_y, s_z = sparsity_factors
     # Captured before the increment: this is what the renormalization restores.
@@ -1456,8 +1500,8 @@ def _advance_flux(
     mean_abs = np.abs(noise_inner).sum() / max(np.count_nonzero(noise_inner), 1)
     # The multiplier noise times the entering flux, formed once: the signed
     # scalar amplitude is that same product scaled to unit mean absolute
-    # value, and the flux increment is that same product damped by the
-    # interpolation compensation.
+    # value, and the flux increment is that same product convolved,
+    # undamped (the compensation composes at the output).
     noise *= flux
     if mean_abs > 0:
         scalar_amplitude = noise * np.float32(1.0 / mean_abs)
@@ -1581,10 +1625,12 @@ def simulate_flux_only(
             flux = zoom_trilinear(flux, shape)
 
         rng = np.random.default_rng(seeds[i])
-        # No interpolation compensation, matching the full model: the
-        # compensation is applied when the OUTPUT is composed, never to the
-        # cascade's own state, and the flux is a state (see the
-        # HOP_RETENTION note).
+        # No interpolation compensation: this cheap path returns the raw
+        # cascade state. The full model composes a compensated flux OUTPUT
+        # (2026-08-04, _compose_flux_output) but never compensates the
+        # state; a calibration against the full model's written flux must
+        # account for the composition (see the FLUX_SCALE provenance
+        # caveat).
         scalar_amplitude, advance = _advance_flux(
             flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
             n_zero, zero_bottom, zero_top,
@@ -2531,7 +2577,7 @@ def _stage_nest_increments(increment_dir, parent_path, parent_group,
         x0, x1, y0, y1 = inner_windows[i]
         z_i = grids['z_arrays'][i]
         keep_z = np.where((z_i >= z_min - 1e-6) & (z_i < z_max - 1e-6))[0]
-        for name in ("h", "qt"):
+        for name in ("h", "qt", "flux"):
             staged = increment_dir / f"c{i:02d}_{name}.npy"
             inner = np.load(staged)[x0:x1, y0:y1,
                                     keep_z[0]:keep_z[-1] + 1].copy()
@@ -2558,7 +2604,7 @@ def _stage_nest_increments(increment_dir, parent_path, parent_group,
             index = np.arange(first, first + count)
             keep.append(index % size if periodic
                         else np.clip(index, 0, size - 1))
-        for name in ("h", "qt"):
+        for name in ("h", "qt", "flux"):
             np.save(increment_dir / f"c{j:02d}_{name}.npy",
                     np.asarray(sub.variables[name][:], dtype=np.float32)[
                         np.ix_(keep[0], keep[1], keep_z)])
@@ -2600,6 +2646,41 @@ def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None):
     # -1e-9 on qt). Clamp that rounding residue only — at most one ulp, not a
     # physics clip.
     np.clip(output, np.float32(phi_min), np.float32(phi_max), out=output)
+    return np.ascontiguousarray(output)
+
+
+def _compose_flux_output(state, deficit, window=None):
+    """The flux that gets written: state + deficit, clipped, mean restored.
+
+    The flux analogue of _compose_output (2026-08-04 ruling: the flux output
+    is compensated like the scalars'). Its bounds discipline is the flux's
+    own rather than the scalars': the physical constraint is positivity, and
+    the mean convention is the volume mean the state carries (one for a
+    root; the inherited regional anomaly for a nest) — so after adding the
+    deficit the composition is clipped at zero and restored to the state's
+    volume mean by one multiplicative scalar, exactly the clip-and-restore
+    that _advance_flux applies within each class (audit ruling B14).
+
+    Like _compose_output, this is the LAST thing that happens and touches
+    nothing the cascade or a descendant nest reads: a nest continues from
+    the state, which is what save_for_refinement stores (``flux_state``).
+
+    ``deficit`` is consumed (its buffer becomes the output) and must not be
+    used again; ``state`` is left intact for the caller to store. None
+    deficit means every class was well resolved and the state is already
+    the output.
+    """
+    if deficit is None:
+        return np.ascontiguousarray(state)
+    entering_mean = float(_inner_view(state, window).mean(dtype=np.float64))
+    deficit += state
+    output = deficit
+    np.maximum(output, np.float32(0.0), out=output)
+    realized_mean = float(_inner_view(output, window).mean(dtype=np.float64))
+    if realized_mean > 0:
+        output *= np.float32(entering_mean / realized_mean)
+    else:
+        output[...] = np.float32(entering_mean)
     return np.ascontiguousarray(output)
 
 
@@ -2725,12 +2806,14 @@ def refine(
     ds = netCDF4.Dataset(parent_path, "r")
     grp = ds if parent_group == '/' else ds[parent_group]
 
-    if "flux" not in grp.variables:
+    if "flux_state" not in grp.variables:
         ds.close()
         raise ValueError(
-            f"Parent group {parent_group!r} has no flux field; the nest cannot "
-            f"continue the flux cascade. Regenerate the parent with the "
-            f"current version of simulate()."
+            f"Parent group {parent_group!r} has no flux_state field; the nest "
+            f"cannot continue the flux cascade. The written flux is the "
+            f"compensated composition, not the state (2026-08-04). Regenerate "
+            f"the parent with the current version of simulate() and "
+            f"save_for_refinement=True."
         )
     # h, qt and flux themselves are NOT read here: the nest keeps only the
     # region plus its halo (a 2048 x 22 x 115 pad against a 2048^2 x 115
@@ -3013,7 +3096,8 @@ def refine(
                                    x_indices, y_indices, z_indices)
     qt_pert_pad = _read_parent_slab(grp.variables["qt_perturbation"],
                                     x_indices, y_indices, z_indices)
-    flux_pad = _read_parent_slab(grp.variables["flux"], x_indices, y_indices, z_indices)
+    flux_pad = _read_parent_slab(grp.variables["flux_state"],
+                                 x_indices, y_indices, z_indices)
     ds.close()
 
     h_mean_1d = np.interp(z_coords_slice, z_profile, h_profile).astype(np.float32)
@@ -3042,7 +3126,7 @@ def refine(
         spheroscale_profile, z_profile, anisotropy)
 
     inherited_deficit = {}
-    for name in ("h", "qt"):
+    for name in ("h", "qt", "flux"):
         accumulated = None
         for j in range(n_classes_consumed):
             deficit_j = comp_inherited[j] - np.float32(1.0)
@@ -3062,7 +3146,9 @@ def refine(
 
     # Note: the nest's flux anomaly needs no explicit bookkeeping. Each class
     # restores the volume mean the flux entered that class with (_advance_flux),
-    # so the mean this region carried in the parent simply propagates.
+    # so the mean this region carried in the parent simply propagates. The
+    # flux compensation deficit above IS explicit bookkeeping, but of the
+    # output composition only — the state the anomaly rides never sees it.
 
     grids = _compute_all_grids(
         k_values, inner_extent_x, inner_extent_y, nest_height,
@@ -3138,7 +3224,7 @@ def refine(
                                               dir=parent_path.parent))
 
     (h_pert_refined, qt_pert_refined, flux_refined,
-     deficit_h, deficit_qt, final_grid) = cascade_loop(
+     deficit_h, deficit_qt, deficit_flux, final_grid) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -3153,6 +3239,7 @@ def refine(
         flux=flux_pad,
         deficit_h=inherited_deficit["h"],
         deficit_qt=inherited_deficit["qt"],
+        deficit_flux=inherited_deficit["flux"],
         inner_windows=inner_windows,
         turbulon_shape=turbulon_shape,
         # Turbulon centers are suppressed at the DOMAIN surface and top, not
@@ -3190,6 +3277,8 @@ def refine(
         deficit_h[inner])
     deficit_qt_inner = None if deficit_qt is None else np.ascontiguousarray(
         deficit_qt[inner])
+    deficit_flux_inner = None if deficit_flux is None else np.ascontiguousarray(
+        deficit_flux[inner])
 
     z_final = z_full[z_trim_start:z_trim_stop].astype(np.float32)
     dz_final = dz_full[z_trim_start:z_trim_stop].astype(np.float32)
@@ -3201,6 +3290,9 @@ def refine(
                                h_min, h_max)
     qt_3d_out = _compose_output(qt_pert_inner, deficit_qt_inner, qt_mean_final,
                                 qt_min, qt_max)
+    # The halo is already discarded, so the composition's volume mean is the
+    # nest's own inherited anomaly.
+    flux_3d_out = _compose_flux_output(flux_inner, deficit_flux_inner)
 
     nx_out = h_3d_out.shape[0]
     ny_out = h_3d_out.shape[1]
@@ -3300,9 +3392,10 @@ def refine(
         simulation_params,
         group=output_group,
         compress=compress,
-        flux_3d=flux_inner,
+        flux_3d=flux_3d_out,
         h_pert_3d=h_pert_inner if save_for_refinement else None,
         qt_pert_3d=qt_pert_inner if save_for_refinement else None,
+        flux_state_3d=flux_inner if save_for_refinement else None,
     )
     if increment_dir is not None:
         from .output import write_class_increments
