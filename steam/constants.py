@@ -6,6 +6,8 @@ gravity = 9.81                          # g [m/s²]
 gas_constant_dry_air = 287.04           # Rd [J/(kg·K)]
 
 hurst_horizontal = 0.5               # H_h, Kolmogorov/Corrsin-Obukhov
+                                     # (0.45 alternative: see haar_to_mhat --
+                                     # the two MUST be changed together)
 hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
 
 # lambda, the delivery amplitude in the paper: the factor converting the mean
@@ -51,6 +53,13 @@ hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
 # of 1, where H_h = 0.45 still had headroom (0.969). The anchored-from-below
 # definition is unaffected (it reads the fitted line, not the curve), but the
 # top of the vertical range no longer scales cleanly.
+#
+# To go back to H_h = 0.45, BOTH lines must move together -- a lambda from
+# one H_h under another is exactly what the warning above forbids:
+#     hurst_horizontal = 0.45      (line 8)
+#     haar_to_mhat = 0.25518       (far-bounds refit, 2026-08-04, same
+#                                   procedure and geometry as the value below;
+#                                   NOT the 0.28927 that shipped before)
 haar_to_mhat = 0.19691
 
 # NetCDF output default: whether h, qt, diagnostic variables, and p_bottom
