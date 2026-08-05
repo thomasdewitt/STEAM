@@ -24,8 +24,8 @@ def _root_grids():
 
 
 def test_flux_cascade_default_scale():
-    # c = (0.1 / 1.681)^(1/1.8): the 2026-07-28 re-fit with the
-    # interpolation compensation applied to the flux increments.
+    # c, the flux noise amplitude. A free parameter; this pins the default so
+    # it cannot drift silently.
     assert sm.FLUX_SCALE == 0.2085
     assert sm.FLUX_ALPHA == 1.8
 

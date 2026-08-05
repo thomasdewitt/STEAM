@@ -91,21 +91,16 @@ SUPPORT_FACTOR = 3
 # skewed too; the extremal generator is heavy-tailed on the low-multiplier
 # side, giving the h'/qt' interior a convective right-skew.
 #
-# Realized intermittency calibrates as  C1 = A * FLUX_SCALE**alpha  (fit in
-# turbulon-analysis/calibration); at alpha=2 the generator is Gaussian and the
-# whole scheme reduces to the lognormal cascade.
-# FLUX_SCALE is set so the realized flux C1 = 0.1, the measured TWPICE
-# horizontal-wind intermittency; C1 = 1.681 c^1.8 from calibration
-# (turbulon-analysis/calibration, re-fit 2026-07-28 with the
-# interpolation compensation applied IN-CASCADE to the flux increments;
-# free exponent 1.751 vs the alpha-stable prediction 1.8, R^2 0.998), so
-# c = (0.1/1.681)^(1/1.8) = 0.2085. Production runs targeting C1 = 0.05
-# override this with c = 0.1419.
-# PROVENANCE CAVEAT (2026-08-04): the compensation has since moved out of
-# the cascade -- the flux state runs raw and the written flux is composed
-# at the output (_compose_flux_output). The realized C1 of the composed
-# output has not been re-fit under this convention; re-fit before final
-# production numbers.
+# FLUX_SCALE is the noise amplitude c: the scale of the extremal Levy
+# generator, and so the single knob setting how intermittent the flux
+# becomes. Larger c means a more intermittent flux; c = 0 gives a uniform
+# flux of one. At alpha = 2 the generator is Gaussian and the whole scheme
+# reduces to the lognormal cascade.
+#
+# It is a free parameter of the model, specified directly. Runs that want a
+# different intermittency pass their own value rather than deriving one --
+# any mapping from c onto a measured intermittency belongs to the analysis
+# that measures it, not here.
 FLUX_SCALE = 0.2085
 FLUX_ALPHA = 1.8
 
