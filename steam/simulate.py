@@ -655,7 +655,7 @@ def simulate(
     haar_to_mhat : float or None
         Override for the module constant HAAR_TO_MHAT (lambda). None uses
         the constant. Both overrides exist for the lambda calibration in
-        turbulon-analysis/lambda_calibration/, which needs lambda = 1 runs
+        calibration/, which needs lambda = 1 runs
         at two H_h values without editing the model.
 
     Returns
@@ -1921,7 +1921,7 @@ def _compute_normalization(profile, z_profile, k_z_L_on_profile,
     hurst_horizontal : float or None
         Override for the module constant H_h. None uses the constant.
         Exists so the lambda calibration can sweep H_h without editing
-        steam.constants (turbulon-analysis/lambda_calibration/).
+        steam.constants (calibration/).
     haar_to_mhat : float or None
         Override for the module constant HAAR_TO_MHAT (lambda). None uses
         the constant. Same purpose: the calibration runs at lambda = 1.

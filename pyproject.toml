@@ -29,3 +29,9 @@ include = ["steam*"]
 dev = [
     "pytest>=8.3.5",
 ]
+# calibration/ only: not needed to run the model, and deliberately
+# not runtime dependencies of the steam package.
+calibration = [
+    "matplotlib",
+    "scaleinvariance",
+]

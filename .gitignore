@@ -1,5 +1,6 @@
 *.nc
 *.png
+*.npz
 *.tex
 *.pdf
 *.pyc

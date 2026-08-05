@@ -32,7 +32,7 @@ hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
 # WARNING: lambda is calibrated AT a specific hurst_horizontal and is not
 # transferable -- the ratio varies systematically with H_h. Changing
 # hurst_horizontal above INVALIDATES this value; recalibrate with
-# turbulon-analysis/lambda_calibration/calibrate_lambda.py.
+# calibration/calibrate_lambda.py.
 #
 # Converged 2026-08-04 at H_h = 0.5, under the 2026-08-03 far-bounds
 # procedure (calibration bounds pushed beyond any reachable value, so the
