@@ -18,3 +18,4 @@ tests/regression_data/
 
 .codex
 scratch/
+*.egg-info/
