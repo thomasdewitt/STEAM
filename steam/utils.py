@@ -1,5 +1,7 @@
 """Convolution utilities for periodic x/y and zero-padded z."""
 
+from math import gcd
+
 import numpy as np
 import torch
 from numba import njit, prange
@@ -425,7 +427,84 @@ def convolve_fft_xy_oa_z(field, kernel, device='cpu'):
     return trimmed.cpu().numpy()
 
 
-def zoom_trilinear(field, target_shape):
+# Above this many target cells, a wrapped pad that grows the working array
+# by more than 25% is refused rather than paid for silently.
+VOLUME_GUARD_CELLS = 8_000_000
+
+
+def _wrap_plan(source_shape, target_shape, periodic):
+    """Per-axis source pad and target crop that make the resample periodic.
+
+    torch's interpolate clamps at the array boundary: the outermost half
+    source cell is replicated rather than continued, so a periodic field
+    stops being periodic the moment it is resampled. Padding the source by
+    one cell of wrapped data first, then cropping the matching margin, makes
+    the interpolant see the true periodic continuation.
+
+    Under align_corners=False one source cell is exactly r = n_out/n_in
+    target cells. Writing r as a reduced fraction a/b, padding by b source
+    cells extends the extent by exactly a target cells, so the crop is a
+    whole number for ANY ratio -- a dyadic ladder just makes b = 1. What a
+    non-dyadic ladder costs is memory, since b (and hence the pad) grows as
+    the greatest common divisor shrinks; that is what the error below
+    guards.
+    """
+    pads, crops, big = [], [], []
+    for axis, (n_in, n_out, per) in enumerate(
+            zip(source_shape, target_shape, periodic)):
+        if not per:
+            pads.append(0)
+            crops.append(0)
+            big.append(n_out)
+            continue
+        if n_out < n_in:
+            raise NotImplementedError(
+                f"Periodic resampling downsamples on axis {axis} "
+                f"({n_in} -> {n_out}). Wrapped padding is written for the "
+                f"cascade's refinement hops, which only ever go finer, and "
+                f"downsampling additionally wants an anti-aliasing filter "
+                f"that this function does not apply.")
+        common = gcd(n_in, n_out)
+        pads.append(n_in // common)
+        crops.append(n_out // common)
+        big.append(n_out + 2 * (n_out // common))
+
+    target_volume = int(np.prod(target_shape))
+    padded_volume = int(np.prod(big))
+    if target_volume > VOLUME_GUARD_CELLS and padded_volume > 1.25 * target_volume:
+        raise NotImplementedError(
+            f"Periodic resampling would need a {padded_volume / target_volume:.2f}x "
+            f"larger working array for {tuple(source_shape)} -> "
+            f"{tuple(target_shape)}.\n"
+            f"Why: torch's interpolate clamps at the array edge, which "
+            f"destroys periodicity at every class hop and leaves a "
+            f"domain-scale ramp in the delivered field. The fix pads the "
+            f"source with wrapped data and crops the margin afterwards, and "
+            f"the pad is one source cell only when the grid ratio is an "
+            f"integer. Here it is not, so the pad is "
+            f"{[p for p in pads]} cells and the array grows accordingly. On a "
+            f"grid this large that is not worth paying silently. Use a dyadic "
+            f"class ladder (n_scale_classes_per_dyad = 1 gives ratio 2 at "
+            f"every hop), or implement a fractional-offset resample that "
+            f"wraps natively.")
+    return pads, crops, tuple(big)
+
+
+def _zoom(field, target_shape, periodic, mode):
+    field = np.ascontiguousarray(field, dtype=np.float32)
+    pads, crops, big = _wrap_plan(field.shape, target_shape, periodic)
+    if any(pads):
+        field = np.pad(field, [(p, p) for p in pads], mode="wrap")
+    t = torch.from_numpy(field)[None, None]
+    out = torch.nn.functional.interpolate(
+        t, size=big, mode=mode, align_corners=False,
+    )[0, 0].numpy()
+    if any(crops):
+        out = out[tuple(slice(c, c + n) for c, n in zip(crops, target_shape))]
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
+def zoom_trilinear(field, target_shape, periodic=(True, True, False)):
     """Resample a 3D float32 field to target_shape with trilinear interpolation.
 
     Cell-consistent sampling (torch's align_corners=False): source and
@@ -441,21 +520,24 @@ def zoom_trilinear(field, target_shape):
     production ladder — which no per-class scalar compensation can absorb.
     Here the delivered peak is 76.2% at EVERY domain position and the
     per-hop dilation is exactly 1.0 (measured 2026-07-31).
+
+    Periodicity (2026-08-05). The default matches the cascade: x and y wrap,
+    z does not. align_corners=False fixed the corner-alignment ramp but left
+    the boundary CLAMPED, so each hop replicated the outer half cell and the
+    delivered field was not periodic at all — measured as an end-to-end mean
+    ramp of 0.2 to 3 times the field's own standard deviation, worst where
+    the coarsest class grid is only a few cells across. The wrapped pad below
+    fixes that. In a partial nest the cascade array carries a halo and the
+    convolution already treats it as periodic; wrapping here makes the same
+    approximation in the same place, and the halo is discarded either way.
     """
-    t = torch.from_numpy(field)[None, None]  # NCDHW
-    out = torch.nn.functional.interpolate(
-        t, size=tuple(target_shape), mode="trilinear", align_corners=False,
-    )
-    return out[0, 0].numpy().astype(np.float32)
+    return _zoom(field, target_shape, periodic, "trilinear")
 
 
-def zoom_bilinear(field, target_shape):
+def zoom_bilinear(field, target_shape, periodic=(True, True)):
     """Resample a 2D float32 field to target_shape with bilinear interpolation.
 
-    Cell-consistent (torch's align_corners=False), matching zoom_trilinear.
+    Cell-consistent (torch's align_corners=False), matching zoom_trilinear,
+    and periodic on both axes by default for the same reason.
     """
-    t = torch.from_numpy(field.astype(np.float32))[None, None]  # NCHW
-    out = torch.nn.functional.interpolate(
-        t, size=tuple(target_shape), mode="bilinear", align_corners=False,
-    )
-    return out[0, 0].numpy().astype(np.float32)
+    return _zoom(field, target_shape, periodic, "bilinear")

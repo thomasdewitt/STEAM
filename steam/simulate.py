@@ -3323,7 +3323,10 @@ def refine(
         if p_bottom_inner.shape == (nx_out, ny_out):
             p_bottom_field = p_bottom_inner.astype(np.float32)
         else:
-            p_bottom_field = zoom_bilinear(p_bottom_inner, (nx_out, ny_out))
+            # Unlike the cascade arrays this carries no halo, so it wraps
+            # only on the axes the nest actually spans.
+            p_bottom_field = zoom_bilinear(p_bottom_inner, (nx_out, ny_out),
+                                           periodic=(periodic_x, periodic_y))
     else:
         p_bottom_field = None
 
