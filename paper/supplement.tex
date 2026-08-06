@@ -78,8 +78,10 @@ sparsity factors, and so the cascade always terminates at the class nearest
 $k = 2dx$. The sparsity factors
 instead set how finely each class is resolved on its own working grid
 as described in the following section. At $s = 1$ the finest class works directly on the
-output grid, while for $s > 1$ it is computed on a grid finer than the
-output and restricted to the output grid afterward.
+output grid, while for $s > 1$ every class works on a
+correspondingly finer grid and the output is written on the finest
+working grid, at spacing $dx/s_x$, rather than restricted back to the
+requested spacing.
 
 \subsection{Normalization}\label{ssect:normalization}
 
@@ -218,9 +220,12 @@ to undo.
 The flux is then advanced by one size class. A sparse field $\gamma$ of
 independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables with
 $\alpha = 1.8$ is drawn at the turbulon centers every $s_x, s_y, s_z$
-cells, i.e. every $k/2$ in physical space. No centers are placed within
-$m\, k_z(k)$ of the surface or of the domain top, where $m$ is defined in
-Table \ref{tab:steam inputs} and has default 1. The L\'evy noise is scaled by
+cells --- every $k/2$ in physical space horizontally, and
+approximately so vertically, where the common rescaling of the
+vertical grid (working-grids section) makes the spacing at most
+$k_z/2$. No centers are placed within $2 s_z m$ vertical cells of the
+surface or of the domain top --- approximately $m\, k_z(k)$, with $m$
+defined in Table \ref{tab:steam inputs} (default 1). The L\'evy noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly. This can be seen by writing $\gamma_0$ for the unscaled
@@ -246,6 +251,9 @@ central differences in $x$ and $y$ and with one-sided differences at the
 vertical boundaries (central in the interior). The gradient weight is computed as $W_{\Phi,k} =
 |\nabla_h f| + (k_z/k)|\partial f/\partial z|$. The overall weighing factor $g_\Phi W_{\Phi,k} S_k$ is divided
 by its mean absolute value over the turbulon centers at each level.
+The mean is taken over the centers where the product is nonzero: a
+center pinned to zero by the bound taper, or with vanishing gradient
+weight, drops out of the denominator rather than diluting it.
 Finally, the normalized product
 is multiplied by $C_{\Phi,k}(z)$, giving the amplitude field
 $A_\Phi$.
