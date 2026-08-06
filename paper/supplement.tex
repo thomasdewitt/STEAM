@@ -101,7 +101,12 @@ $\lambda$ is set by the consistency requirement of Appendix A: the
 vertical Haar fluctuation of the simulated fields at the vertical outer
 scale must equal that of the mean profile. It is calibrated by running
 the full algorithm on linear mean profiles for both scalars, on a domain
-whose vertical extent contains one vertical outer scale. The mean
+whose vertical extent contains one vertical outer scale. The
+calibration runs place the scalar bounds far beyond any value the
+fields can reach, so the bound projection never engages: the constant
+is meant to be a property of the delivery chain alone, whereas the
+bounds are case-specific, and the same $\lambda$ is applied to
+subvolumes whose bounds are never approached. The mean
 absolute vertical Haar fluctuation of the simulated columns is computed
 at logarithmically spaced lags. A line of fixed slope $H_v = H_h/H_z$ is
 anchored to the fluctuation at the second-smallest lag (the smallest,
@@ -113,15 +118,19 @@ and the criterion concerns the cascade amplitude alone. The ratio of
 the profile's Haar fluctuation at $k_{z,L}$ to the extrapolated value,
 averaged geometrically over the two scalars, multiplies $\lambda$, and
 the calibration is repeated until the ratio converges to one. The
-iteration is needed because the bound projection makes the response to
-$\lambda$ slightly sublinear, so a single pass under-corrects. Because
+iteration is needed because the response to $\lambda$ is slightly
+sublinear, so a single pass under-corrects. The sublinearity persists
+under the far bounds, so it belongs to the delivery chain --- the
+advective weighting and the column fluctuation at the anchor lag carry
+$\lambda$-independent terms from the mean-profile gradients --- rather
+than to the bound projection. Because
 the same Haar operator is applied to the profile and to the simulated
 field, the envelope amplitude convention and the reference-resolution
 convention of the interpolation-compensation factors below are absorbed
 into $\lambda$. The fluctuation amplitude the cascade realizes from a
 given $C_{\Phi,L}$ grows systematically with the horizontal Hurst
 exponent, so $\lambda$ is calibrated at the production $H_h$ and does
-not transfer across it; for $H_h = 0.45$, $\lambda = 0.28927$. The scale-dependent amplitudes
+not transfer across it; for $H_h = 0.45$, $\lambda = 0.25518$. The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 as described in Appendix A and are interpolated
 to each size class's vertical grid.
@@ -150,7 +159,8 @@ appendix.
 The horizontal dimensions $n_{x,k} = L_x/\Delta x_k$ and $n_{y,k} =
 L_y/\Delta y_k$ are exact integers provided $L_x$ and $L_y$ are integer
 multiples of $L$. A domain axis narrower than the outer scale (the
-strip nests of Sect.~\ref{ssect:strip diagnostics}) is also admitted.
+channel-geometry runs of Sect.~\ref{ssect:steam config}) is also
+admitted.
 Grid counts along it are rounded to at least one cell, and any turbulon
 envelope wider than the extent is periodically folded onto it.
 
@@ -161,7 +171,7 @@ or overshoots the domain top, with the overshooting cell retained. The resulting
 $\le 1$ so that they tile $L_z$ exactly. For a constant spheroscale this reduces
 to a uniform grid at least as fine as the Nyquist target.
 
-As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. Neither the coarse sampling nor the interpolation preserves the mean absolute value of the turbulon perturbations: a size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the \emph{output} is composed, never inside the cascade itself. The cascade's running state carries no compensation, so it is the same field however deep the run goes; this matters because the gradient weighting and the bound factor read the running state, and a nested refinement continues from it. Instead, the cascade accumulates a compensation deficit field for each scalar, $\sum_i (\digamma_i - 1)\,\Delta_i$, where $\Delta_i$ is the increment class $i$ actually added. The deficit is interpolated between classes together with the state, and the output is the sum of the two (final-fields section below). The flux accumulates a deficit in the same way, from the change in its state across each class's advance. The retentions underlying $\digamma$ are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
+As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. The interpolation is cell-consistent --- source and target cells tile the same extent, with values sampled at cell centers --- and treats $x$ and $y$ as periodic: the source is padded with wrapped cells and the exact margin cropped afterward, so the resample honors the same period as the convolutions. The vertical, which the convolutions zero-pad, is not periodic. Neither the coarse sampling nor the interpolation preserves the mean absolute value of the turbulon perturbations: a size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the \emph{output} is composed, never inside the cascade itself. The cascade's running state carries no compensation, so it is the same field however deep the run goes; this matters because the gradient weighting and the bound factor read the running state, and a nested refinement continues from it. Instead, the cascade accumulates a compensation deficit field for each scalar, $\sum_i (\digamma_i - 1)\,\Delta_i$, where $\Delta_i$ is the increment class $i$ actually added. The deficit is interpolated between classes together with the state, and the output is the sum of the two (final-fields section below). The flux accumulates a deficit in the same way, from the change in its state across each class's advance. The retentions underlying $\digamma$ are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
 
 Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the sampled points on the envelope curve land preferentially near the envelope peaks; at the extreme $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $1/0.337 \approx 3\times$ the amplitude of a well-resolved one. Second, at large $k/\Delta x$, each regrid resamples the piecewise-linear field at points that do not exactly coincide with the previous ones, especially in the vertical direction where upsampling occurs by a non-integer factor $2^{H_z}$. This removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the largest class used by any simulation in this work. The choice of reference is a single overall constant and is absorbed into the calibration factor $\lambda$ above.
 
@@ -441,247 +451,337 @@ stream and forfeits the identity with such a run. Output is
 written as a NetCDF group inside the parent's file, as described in
 the previous section.
 
-\section{Complete specification of the LES-ensemble comparison}
-\label{ssect:rcemip analysis}
+\section{Complete specification of the comparison analysis}
+\label{sect:comparison analysis}
 
 This section specifies, in full, the analysis behind the comparison of
-STEAM to the RCEMIP cloud-resolving ensemble
-\citep[][]{wing2018,wing2020}. The intent is that the comparison could be
-reproduced exactly from this description alone. The comparison is
-against the elongated-channel (\texttt{RCE\_large300}) configurations of
-nine models, used for the profile, distribution, and
-correlation-dimension statistics; object size distributions, for which
-the channel geometry is too narrow, are instead computed from a
-wide-domain STEAM ensemble with no direct hydrodynamic counterpart, as
-described below.
+STEAM to hydrodynamic simulations and to satellite observations, with
+the intent that it could be reproduced exactly from this description
+together with the two repositories. The hydrodynamic references are
+eleven hosts: the elongated-channel (\texttt{RCE\_large300})
+configurations of nine models from the RCEMIP cloud-resolving ensemble
+\citep{wing2018,wing2020}, and two SAM large-eddy simulations, TWP-ICE
+and GATE. These enter through matched profile statistics, single-level
+distributions, and horizontal scaling functions. The cloud-geometry
+metrics are computed on a separate square-domain STEAM ensemble and
+read against the two SAM cases and a MODIS retrieval.
 
 \subsection{Comparison data}
-\label{ssect:rcemip data}
+\label{ssect:comparison data}
 
-Nine models provide usable
-three-dimensional snapshot output for the 300~K channel configuration:
-SAM, CM1, three Met Office Unified Model variants (CASIM, RA1-T,
-RA1-T-nocloud), SCALE, UCLA-CRM, and two ICON variants (LEM and NWP).
-Domains are channels of approximately $6000\times 400$~km$^2$ at 3~km
-horizontal spacing ($1984$--$2048$ cells long, $128$--$144$ cells wide),
-with model-specific stretched vertical grids ($74$--$98$ levels to
-$33$--$39.5$~km). Each model supplies three snapshots separated by ten
-days (days 80, 90, and 100 of the simulation; days 93, 103, and 113 for
-the UM variants; days 80, 90, and 99 for ICON-LEM). Two archived models
-are excluded: ICON-AES, because its output contains neither a height
-coordinate nor pressure, so moist static energy cannot be constructed;
-and MESONH, because its archived three-dimensional specific humidity is
-a documented data error in the RCEMIP archive (Known RCEMIP Bugs
-document, Sect.~17: the field is ``much too small in the lower
-troposphere'' by a height-dependent factor), while its column-integrated
-water and remaining fields are physically normal --- the corruption is
-in the archived field, not the simulation, but it contaminates every
-vapor-dependent statistic used here.
+Nine models provide usable three-dimensional snapshot output for the
+300~K channel configuration: SAM, CM1, three Met Office Unified Model
+variants (CASIM, RA1-T, RA1-T-nocloud), SCALE, UCLA-CRM, and two ICON
+variants (LEM and NWP). Domains are channels of approximately
+$6000\times 400$~km$^2$ at 3~km horizontal spacing ($1984$--$2048$
+cells long, $128$--$144$ cells wide), with model-specific stretched
+vertical grids ($74$--$98$ levels to $33$--$39.5$~km; through the free
+troposphere the spacing is 500~m, or 250~m for the three UM variants).
+Each model supplies three snapshots separated by ten days near the end
+of the integration. The mean profiles that drive STEAM average all
+three; the comparison statistics use each model's first snapshot,
+because the figures they enter are about the inter-model spread, which
+is far larger than the spread among a model's own snapshots. Two
+archived models are excluded: ICON-AES, because its output contains
+neither a height coordinate nor pressure, so moist static energy
+cannot be constructed; and MESONH, because its archived
+three-dimensional specific humidity is a documented data error in the
+RCEMIP archive (Known RCEMIP Bugs document, Sect.~17: the field is
+``much too small in the lower troposphere'' by a height-dependent
+factor), while its column-integrated water and remaining fields are
+physically normal --- the corruption is in the archived field, not the
+simulation, but it contaminates every vapor-dependent statistic used
+here.
 
-All humidities are converted to mixing
-ratios before any further computation. Most models archive specific
-quantities (mass per unit moist air, CMOR names \texttt{hus},
-\texttt{clw}, \texttt{cli}); these are converted as $r = q/(1-q)$, with
-the vapor-only denominator (the neglected condensate contribution to
-moist-air mass changes $r$ by ${\lesssim}2\%$ where condensate is
-largest). SAM archives vapor as a mixing ratio directly. Cloud liquid
-and ice are taken from \texttt{clw} and \texttt{cli} (UCLA names ice
-\texttt{ice}); precipitating condensate is excluded everywhere, because
-several models do not archive it.
+All humidities are converted to mixing ratios before any further
+computation. Most models archive specific quantities (mass per unit
+moist air, CMOR names \texttt{hus}, \texttt{clw}, \texttt{cli}); these
+are converted as $r = q/(1-q)$, with the vapor-only denominator (the
+neglected condensate contribution to moist-air mass changes $r$ by
+${\lesssim}2\%$ where condensate is largest). SAM archives vapor as a
+mixing ratio directly. Cloud liquid and ice are taken from
+\texttt{clw} and \texttt{cli} (UCLA names ice \texttt{ice});
+precipitating condensate is excluded everywhere, because several
+models do not archive it. Total water is $q_t = r_v + r_c + r_i$ and
+moist static energy is $h = c_p T + g z + L_v r_v$ with
+$c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$, $g = 9.81$~m\,s$^{-2}$,
+$L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's constants, applied
+identically to every model).
 
-Total water is $q_t = r_v + r_c + r_i$ and moist static energy is
-$h = c_p T + g z + L_v r_v$ with $c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$,
-$g = 9.81$~m\,s$^{-2}$, $L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's
-constants, applied identically to every model).
+Two archives require special handling. (i)~The ICON files carry only a
+level \emph{index} (top-down) as their vertical coordinate; physical
+height is recovered by inverting the frozen moist static energy field
+distributed alongside them, $z = (f_{\mathrm{mse}} - 1004.64\,T -
+2500800\,q_v + 333700\,q_i)/9.80665$ (the constants of that archive,
+used only for this recovery), averaged horizontally at one snapshot;
+the level-wise horizontal standard deviation of the recovered height
+is required to be below 50~m. (ii)~UCLA-CRM stores height as the
+fastest dimension and includes a below-ground ghost level, which is
+dropped. Where a model archives no pressure (SCALE, UCLA-CRM), the
+RCEMIP analytic-sounding surface pressure of 1014.8~hPa is used to
+initialize STEAM; otherwise the horizontal mean of the model's
+lowest-level pressure is used. Kelvin-scale fields are cast to double
+precision on read, and all reductions of single-precision fields use
+double-precision accumulators.
 
-Two archives require special
-handling. (i)~The ICON files carry only a level \emph{index} (top-down)
-as their vertical coordinate; physical height is recovered by inverting
-the frozen moist static energy field distributed alongside them,
-$z = (f_{\mathrm{mse}} - 1004.64\,T - 2500800\,q_v + 333700\,q_i)/9.80665$
-(the constants of that archive, used only for this recovery), averaged
-horizontally at one snapshot; the level-wise horizontal standard
-deviation of the recovered height is required to be below 50~m.
-(ii)~UCLA-CRM stores height as the fastest dimension and includes a
-below-ground ghost level, which is dropped. Where a model archives no
-pressure (SCALE, UCLA-CRM), the RCEMIP analytic-sounding surface
-pressure of 1014.8~hPa is used to initialize STEAM; otherwise the
-horizontal mean of the model's lowest-level pressure is used. All
-reductions of single-precision fields use double-precision accumulators.
+The two large-eddy cases are SAM simulations on the same geometry,
+$2048^2$ cells at 100~m horizontal spacing over 204.8~km, with
+stretched vertical grids of ${\sim}255$ levels (50~m near the surface
+through 100~m across the free troposphere). One snapshot is used from
+each. TWP-ICE is a driven, sheared deep-convection case; the last
+archived snapshot (model day 20) is used. SAM archives its
+(non-frozen) moist static energy directly, in temperature units, so
+$h$ is $c_p$ times the archived field with nothing reconstructed;
+vapor and condensate are mixing ratios in g\,kg$^{-1}$, and $q_t$
+excludes the archived precipitating species by the same convention as
+above. GATE is idealized maritime deep convection; hour 23 is used,
+the last hour with complete data. GATE archives only the combined
+condensate, so its liquid/ice split is reconstructed with SAM's own
+linear partition --- all liquid at 0$^\circ$C, all ice at
+$-38\,^\circ$C, linear between --- applied at native resolution before
+any coarsening, because the clipped ramp is nonlinear in temperature
+and does not commute with averaging. GATE's $h$ is built as
+$c_p T + g z + L_v r_v$ from the archived temperature.
 
 \subsection{STEAM configuration}
-\label{ssect:rcemip steam config}
+\label{ssect:steam config}
 
 One deliberately untuned configuration is used throughout; nothing is
-calibrated to any individual host. The spheroscale profile decreases
-linearly from 100~m at the surface to 1~m at the domain top, with
-turbulons isotropic below it
-(\texttt{piecewise\_isotropic\_below\_spheroscale}); the horizontal Hurst
-exponent is $H_h = 0.45$ and the vertical-anisotropy exponent
-$H_z = 5/9$; turbulons use the Mexican-hat envelope; one scale class per
-octave ($n_c = 1$). The turbulon flux component is active: flux
-increments drawn from extremal ($\beta = -1$) L\'evy noise with $\alpha
-= 1.8$ and noise amplitude $c = 0.142$, targeting a realized flux
-intermittency of $C_1 = 0.05$ through the calibration $C_1 =
-1.681\,c^{1.8}$ (box-coarse-grained $K(2)$ on the flux-only cascade,
-re-fit 2026-07-28; \texttt{turbulon-analysis/calibration}).
-% NOTE (Claude, 2026-08-04): that fit applied the interpolation
-% compensation in-cascade to the flux increments, a convention since
-% superseded -- the flux state now runs raw and the written flux is
-% composed at the output. The mapping c -> C_1 of the composed output
-% has not been re-fit; re-fit before final production numbers.
+calibrated to any individual host. The spheroscale is a constant 10~m,
+with turbulons isotropic below it
+(\texttt{piecewise\_isotropic\_below\_spheroscale}); the Hurst
+exponents, $\lambda$, the turbulon envelope, the cascade density, and
+the flux noise parameters $\alpha$ and $\beta$ are those of
+Sect.~\ref{ssect:steam algorithm spec}. The one swept parameter is the
+flux noise amplitude: every comparison is run, and every figure drawn,
+at both $c = 0.05$ and $c = 0.17$. The simulated depth is 20~km and
+the input profiles are sampled at 50~m.
+% NOTE (Claude, 2026-08-06): H_h and lambda are read from
+% steam.constants at run time and are an active work area (the H_h
+% 0.45/0.5 sweep and the far-bounds lambda ledger); the mapping from c
+% to a realized C_1 was last fit 2026-07-28 under the superseded
+% in-cascade flux compensation -- refit before quoting C_1 values for
+% these runs.
 
-For the channel comparison STEAM runs on a $2048\times 128$ grid at
-$\Delta x = 3$~km ($6144\times 384$~km$^2$, matching the host geometry
-class) with outer scale $L = 96$~km, giving five scale classes (96, 48,
-24, 12, 6~km). The domain is periodic; the 384~km cross-channel extent
-holds four outer-scale tiles. The simulated depth is 20~km.
-
-Each STEAM run is initialized from one host snapshot: the host's
-horizontal-mean $h(z)$ and $q_t(z)$, interpolated to a uniform 50~m
-profile grid, plus its surface pressure as above. The scalar bounds are
-anchored to the prescribed 300~K sea surface temperature, which every
-realization sees: $q_t \in [0,\ q_{\mathrm{sat}}(300\,\mathrm{K},
-p_s)]$, since no parcel can acquire more vapor than saturated contact
-with the sea surface provides, and $h \in [\min_z \langle h \rangle(z)
-- c_p \Delta T_{\max},\ \max(c_p \cdot 300\,\mathrm{K} + L_v\,
+The scalar bounds are anchored to a 300~K sea surface --- the
+prescribed sea surface temperature of the channel configuration,
+applied to all hosts: $q_t \in [0,\
+q_{\mathrm{sat}}(300\,\mathrm{K}, p_s)]$, since no parcel can acquire
+more vapor than saturated contact with the sea surface provides, and
+$h \in [\min_z \langle h \rangle(z) - c_p \Delta T_{\max},\
+\max(c_p \cdot 300\,\mathrm{K} + L_v\,
 q_{\mathrm{sat}}(300\,\mathrm{K}, p_s),\ \max_z \langle h
 \rangle(z))]$, where the upper bound is the larger of the surface
 saturation moist static energy and the mean-profile maximum (the $gz$
 term places the stratospheric mean above any surface value), and the
-lower bound allows a maximum temperature deficit of $\Delta T_{\max} =
-10$~K below the coldest point of the mean profile. One realization is run per host
-snapshot (three per model), with a distinct seed per snapshot, so host
-and STEAM sample counts match by construction.
-% NOTE (Claude, 2026-08-04, replacing the stale 07-27 note): the run
-% configuration described in this section is Thomas's active work area
-% (matched-resolution policy, TWPICE-led framing, 2026-08-03 rulings)
-% and was deliberately excluded from the 2026-08-04 code audit. Before
-% the FINAL set: lambda refit at production config, c -> C_1 refit
-% under the output-composed flux (notes above), and regeneration under
-% the merged nest-identity code.
+lower bound allows a maximum temperature deficit of
+$\Delta T_{\max} = 10$~K below the coldest point of the mean profile.
+% NOTE (Claude, 2026-08-06): the 300 K anchor is what the code applies
+% to TWP-ICE and GATE as well; if a host-specific surface temperature
+% is preferred for those two, generate.py is the place.
 
-For size distributions and
-large-domain fractal dimensions, additional STEAM runs use a square
-$2048\times 2048$ grid at $\Delta x = 3$~km ($6144\times 6144$~km$^2$)
-with outer scale $L = L_x/4 = 1536$~km, initialized from ICON-LEM
-snapshot profiles with distinct seeds. These runs have no direct
-hydrodynamic counterpart; they exist because the channel geometry
-cannot constrain size-distribution exponents (Sect.~\ref{ssect:rcemip
-fractal}), and the square geometry maximizes the usable lag range.
-% NOTE (Claude, 2026-08-04, replacing the 07-27 note): member count and
-% final configuration are Thomas's active work area (excluded from the
-% code audit); the square set regenerates with the channel set.
+One matched run is made per host per amplitude, on the host's own
+domain at twice its horizontal spacing, driven by that host's mean
+profiles and surface pressure; nothing else varies across the set. The
+channels are pinned to a single $1024\times 64$ grid at
+$\Delta x = 6$~km ($6144\times 384$~km$^2$): the hosts differ by at
+most 3\% in extent, and a dyadic grid keeps the class ladder landing
+on $2\Delta x$ exactly. TWP-ICE and GATE run at $1024^2$ cells at
+200~m, matching the 204.8~km host extent exactly. The outer scale is
+one quarter of the long dimension for the channels ($L = 1536$~km)
+and half for the LES cases ($L = 102.4$~km). The channels' 384~km
+cross-channel extent is narrower than their $L$, so the coarsest
+classes are periodically folded onto it (working-grids section). The
+vertical spacing is not a free choice: with a constant spheroscale it
+follows from $\Delta x$ through the aspect-ratio scaling, giving
+256.8~m (78 levels) for the channels and 38.8~m (516 levels) for the
+LES cases. Each run has a distinct fixed seed, recorded in the
+generation script.
 
-\subsection{Profile statistics and anomaly distributions}
-\label{ssect:rcemip stats}
+The cloud-geometry ensemble is ten members per amplitude on a square
+$2048^2$ grid at $\Delta x = 1$~km ($2048\times 2048$~km$^2$), outer
+scale $L = 1024$~km (half the domain side), driven by the UM RA1-T
+profile --- the least cloudy of the comparison set. The two amplitude
+sets share seeds member for member, so they differ only in $c$. Each
+member additionally carries two nested refinements
+(Sect.~\ref{sect:nested refinement}): a centered $32\times 32$~km nest
+at $\Delta x = 62.5$~m over the full depth, and within it an
+$8\times 8$~km nest at 7.8125~m spanning 1--5~km, whose finest class
+approaches the 10~m spheroscale. The archived product per member is
+the condensate ($q_c$, $q_i$) of the parent and both nests, plus the
+parent's two-dimensional vertically integrated optical depth
+(Sect.~\ref{ssect:albedo masks}), stored unthresholded.
 
-Per-level statistics are computed on each case's native vertical grid:
-horizontal mean and variance of $h$ and $q_t$, and cloud fraction
-defined as the areal fraction with non-precipitating condensate
-$q_c + q_i > 0.01$~g\,kg$^{-1}$. For comparison across grids all
-profiles are linearly interpolated to a common 100~m grid spanning
-0--20~km (levels outside a model's native range are excluded, not
-extrapolated), and snapshot-averaged.
+Two small, finely resolved domains exist for visualization only:
+$20.48\times 7.68$~km at $\Delta x = 10$~m from the surface to 5~km,
+outer scale 20.48~km, on the same profile, one run per amplitude.
+They enter no statistic.
 
-Differences are presented as $\Delta = $ STEAM $-$ host, one curve per
-model. The yardstick shading is built from the \emph{pairwise}
-inter-host differences: for each level, all ordered pairs
-host$_i$ $-$ host$_j$ ($i \neq j$; 72 pairs for nine models) are formed
-from the snapshot-averaged profiles, and the shading shows their full
-range and interquartile (25--75\%) range. Pairwise differences, rather
-than deviations from the ensemble mean, are the like-for-like reference
-for a pairwise quantity such as $\Delta$; deviations from the mean are
-smaller by roughly $\sqrt{2}$ and would overstate STEAM's exceedances.
+\subsection{Profile statistics and distributions}
+\label{ssect:matched stats}
 
-Anomaly probability densities are computed at the model level nearest
-4~km and 10~km: at each level the horizontal mean of that snapshot is
-subtracted, all snapshots of a case are pooled, and the pooled sample is
-histogrammed in 150 equal-width bins spanning the pooled sample's full
-range (no percentile capping, which would truncate the tails that are
-precisely the point of the comparison), normalized to a density.
+Profiles and distributions are compared at matched resolution.
+Horizontally, the host is block-averaged $2\times 2$ onto STEAM's
+spacing. Vertically, neither grid is free to move --- STEAM's follows
+from $\Delta x$ and the host's is stretched --- so a per-level rule is
+applied: at each host level, whichever field is locally finer is
+block-averaged over the nearest integer number of its own levels that
+brings the two spacings closest together. The factor varies with
+height and can point at either field. For TWP-ICE and GATE, STEAM is
+the finer field everywhere and is averaged over one level near the
+surface and three through the free troposphere; for the channels the
+host is averaged near the surface and STEAM aloft. The residual
+mismatch left by the nearest integer stays within about $1.5\times$.
+Comparison levels are the host's own, clipped to STEAM's 20~km top.
 
-\subsection{Strip-nest multifractal diagnostics}
-\label{ssect:strip diagnostics}
+The per-level statistics are the horizontal standard deviations of
+$h$, $q_t$, $q_c$, and $q_i$, and cloud fraction, defined as the areal
+fraction of cells holding at least 0.01~g\,kg$^{-1}$ of
+non-precipitating condensate. The threshold is applied after
+coarsening: the coarsened cell value is what the resolved field says
+is there. For the channels, one curve per host and per run is drawn;
+the comparison is against the spread the nine hosts show among
+themselves.
 
-The scaling diagnostics for the multifractal-parameter appendix are
-computed on thin nested strips refined from the square-domain runs
-(Sect.~\ref{ssect:steam algorithm spec}, nested refinement): each strip
-spans the full 6144~km $x$-extent (periodic, with the parent extent as
-period), is 48~km wide in $y$, and is refined from $\Delta x = 3$~km to
-$\Delta x = 375$~m --- three size classes below the parent's finest.
+Distributions are drawn at the levels nearest 5~km and 10~km. For $h$
+and $q_t$, the samples at a level are histogrammed in 80 equal-width
+bins spanning the pooled range of every case in the panel (no
+percentile capping, which would truncate the tails that are precisely
+the point of the comparison), normalized to a density. For the
+condensates, only cloudy cells enter, in 50 logarithmic bins upward
+from the cloud threshold: most cells hold no condensate at all, and a
+density over everything would be a spike at zero with no visible
+shape.
 
-The fluctuation measure is the mean absolute Haar fluctuation: at lag
+\subsection{Scaling functions}
+\label{ssect:scaling functions}
+
+The horizontal scaling functions are computed at native resolution on
+both sides, deliberately and unlike the statistics above: coarsening
+would discard exactly the small-scale structure a scaling function
+measures. The host and STEAM curves therefore begin at different
+smallest lags --- 200~m against 400~m for TWP-ICE, 6~km against 12~km
+for the channels --- and where they overlap they measure the same
+physical scales. They are computed for TWP-ICE and the nine channels.
+
+The fluctuation measure is the order-one Haar fluctuation: at lag
 $\ell$, the mean of the field over the upper half of an $\ell$-wide
-window minus the mean over the lower half, with $\hat{M}_q(\ell) =
-\langle |\Delta\Phi_\ell|^q \rangle$ pooled over all window positions.
-Horizontal windows run along $x$ at dyadic lags from $2\Delta x$ to a
-quarter of the domain and wrap periodically; vertical windows run along
-$z$ (uniform grid for a constant spheroscale) at dyadic lags up to
-16~km, either over the full domain or with window centers restricted to
-the 6--8~km mid-level band. The normalization test overlays the
-field's vertical $\hat{M}_1(\ell)$ against the same operator applied to
-the input mean profile: by the $C_{\Phi,L}$ construction
-(Sect.~\ref{ssect:steam algorithm spec}, Normalization) the two must
-agree at the vertical outer scale, in the same sense as the $\lambda$
-calibration: a power law fitted to the field's fluctuations below the
-outer scale and extrapolated to $k_{z,L}$ reproduces the profile
-fluctuation there. The directly measured curve departs from the power
-law near $k_{z,L}$, where the profile and the turbulence mix. Moment-scaling exponents $\xi(q)$
-are least-squares slopes of $\ln \hat{M}_q$ against $\ln \ell$ over
-lags up to 6~km (the nest's own classes plus one inherited octave), for
-$q$ from 0.2 to 3; for the flux the moment scaling $K(q)$ is also
-computed directly from one-dimensional box means along $x$ over the
-same lags, $\langle \mathcal{F}_\lambda^q \rangle \sim
-\lambda^{-K(q)}$. All accumulations are double precision.
+window minus the mean over the lower half, with
+$F_1(\ell) = \langle |\Delta\Phi_\ell| \rangle$. For $h$ and $q_t$ at
+the level nearest 5~km and 10~km, the transform runs along the longer
+horizontal axis, periodically, with the shorter axis pooled as
+independent rows in a single call (the estimator is not linear, so
+transforming per row and averaging would give a different answer). The
+level mean is subtracted first, and the computation is in double
+precision: the Haar kernel is zero-mean, so the subtraction changes
+nothing analytically, but $h$ is $O(3\times 10^5)$~J\,kg$^{-1}$ while
+its fluctuations are $O(10^3)$, and differencing half-window means at
+that ratio is where single precision fails. The local slope shown
+alongside each curve is the least-squares slope of $\log_{10} F_1$
+against $\log_{10}\ell$ over the half-decade window centered on each
+lag.
 
-\subsection{Optical-depth masks, correlation dimension, and size
-distributions}
-\label{ssect:rcemip fractal}
+\subsection{Cloud masks and albedo thresholds}
+\label{ssect:albedo masks}
 
-Cloud masks are built from vertically integrated optical depth computed
-from the liquid and ice water paths with the SAM bulk-optics
-relationships (as implemented in the \texttt{cloudyview} package);
-precipitating species are excluded as above. A column is cloudy where
-$\tau > 1$. The same masks and estimators are applied to the
-square-domain runs, with correlation lags extended to one third of the
-6144~km domain; at high $\tau>1$ cover the mask percolates into a
-single spanning component, degrading the area-distribution estimate
-(the correlation dimension is unaffected). Masks are binary arrays on
-each case's native horizontal
-grid; the three masks of a case are always analyzed together as one
-ensemble, never averaged one-at-a-time.
+Cloud masks are thresholds of visual albedo. Column optical depth
+$\tau$ is computed from the vertically integrated liquid and ice water
+with the SAM bulk-optics relationships (as implemented in the
+\texttt{cloudyview} package), precipitating species excluded, and
+converted to the conservative-scattering two-stream albedo for an
+overhead sun, $A = \tau/(\tau + 2/(1-g))$ with asymmetry parameter
+$g = 0.85$. A column is cloudy where $A$ exceeds a threshold $R$, at
+each of $R = 0.1$, $0.2$, $0.3$ --- the reflectance thresholds of the
+satellite retrievals of \citet{dewitt2026acp}, so the exponents below
+are directly comparable to that paper's. $A$ is monotonic in $\tau$,
+so the three masks are equivalently $\tau > 1.48$, $3.33$, $5.71$.
+Every metric is computed independently at each threshold. The STEAM
+masks are on the square campaign's 1~km output grid; the SAM masks are
+at the native 100~m --- the same native-resolution reasoning as the
+scaling functions, at the cost that the two mask sets span different
+scale ranges.
 
-The ensemble correlation dimension $D_2$ is computed with
-\texttt{objscale} \citep{dewitt2026acp} using the sandbox estimator at
-R\'enyi order $q = 2$ on the one-sided edge set of the masks --- the
-Grassberger--Procaccia correlation integral --- with pair separations
-binned between a minimum of two pixels (6~km) and a maximum of one-third
-the narrow domain extent (${\approx}127$~km); sandbox centers are
-subsampled by a factor of ten. The two-pixel channel minimum admits
-pixel-scale discretization bias at the small end of the range and is the
-price of retaining one decade of scaling in a 128-cell-wide mask. The
-correlation integrals themselves are inspected for linearity in log--log
-space before the fitted slope is reported as a dimension.
+\subsection{Cloud-geometry metrics}
+\label{ssect:cloud geometry}
 
-Object size distributions use the truncation-corrected estimator of
-\citet{dewitt2024acp}: objects are 4-connected components of the mask;
-areas (and summed perimeters) are binned logarithmically; bins in which
-more than half the objects touch the domain boundary, or which hold
-fewer than 30 objects, are excluded; the power-law exponent is the
-least-squares slope of $\log_{10}$ counts against $\log_{10}$ size over
-the surviving bins. Domains are periodic, but boundary-touching objects
-are treated as truncated rather than wrapped --- a conservative choice
-that discards, rather than reconnects, objects crossing the seam. For
-the channel geometry the surviving range is only ${\approx}1.5$ decades
-of area and the nine hosts' fitted exponents disagree by a factor of
-four (0.6--2.3), so the channel ensemble does not constrain the exponent
-at this domain size --- consistent with the finite-domain analysis of
-\citet{dewitt2024acp}. Size distributions are therefore computed from
-the wide-domain STEAM ensemble (all nine masks analyzed at once), along
-with the individual fractal dimension (filled perimeter against filled
-area) and the ensemble correlation dimension at the same estimator
-settings, with sandbox centers subsampled by a factor of one hundred.
+Four metrics are computed from each mask set, as defined in the main
+text: the individual fractal dimension $D_f$, from the scaling of
+perimeter against size across objects; the ensemble fractal dimension
+$D_e$, the correlation dimension of the cloud-edge point set; and the
+area and nested-perimeter size-distribution exponents
+$\tau_{\mathrm{area}}$ and $\tau_{\mathrm{per}}$. All four are
+computed with \texttt{objscale} \citep{dewitt2026acp} at its default
+parameters throughout, following \citet{dewitt2024acp}; no fitting
+range, bin count, or threshold is overridden.
+
+The ten members of a campaign set are pooled into one ensemble and
+passed to \texttt{objscale} in a single call per metric. These
+estimators are regressions, not linear reductions, so computing per
+member and then averaging would give a different, and wrong, answer.
+The correlation-integral sampling is thinned by a factor of ten for
+the pooled set, which already oversamples the domain; the SAM cases
+are not thinned. Wherever \texttt{objscale} warns that a fit rests on
+too few populated bins or too narrow a range of scales, the warning is
+recorded beside that number and carried into the comparison table as
+italics. The two SAM cases rest on one snapshot each: the two
+dimensions are measured per object and survive that, while the size
+distributions are counts per size bin and do not, so every SAM
+size-distribution entry carries the italic caveat.
+
+The observational reference is recomputed rather than quoted. The 72
+MODIS granules behind Table~1 of \citet{dewitt2026acp} are run through
+the same \texttt{objscale} calls at the same thresholds, starting from
+the Level-1B files, with a reader written from the file specification
+rather than ported from that paper's code --- so these numbers are a
+reproduction of the published table, not a restatement of it. Band~1
+(0.645~$\mu$m) reflectance is read from the 250~m detectors aggregated
+onto the 1~km grid; geolocation, solar geometry, and per-pixel
+footprints come from the matching MOD03 granules. Footprints are
+measured as great-circle distances between neighboring pixel centers
+--- along-track only between rows of the same ten-detector scan,
+because adjacent scans overlap at the swath edge (the bow-tie effect)
+and a difference straddling a scan boundary measures the overlap
+rather than the pixel. A pixel at the swath edge covers about
+$4.8\times 2.0$~km against $1\times 1$~km at nadir, a factor the
+per-pixel size inputs of \texttt{objscale} exist to absorb. The swath
+is trimmed at $60^\circ$ sensor zenith, which is a contiguous column
+window, and the windows are intersected over the archive so that every
+granule enters on one common grid, as the ensemble estimators require.
+Saturated detectors become the largest representable reflectance ---
+the scene was brighter than the band records, which is a measurement
+--- while every other reserved code enters as missing data. The
+object-based estimators receive the missing cells as data boundaries,
+so an object touching one is dropped as truncated rather than counted
+as a small complete cloud; the correlation dimension has no notion of
+a data boundary and receives a zero-filled copy, which costs it only
+pairs it could never have counted.
+
+The stored L1B reflectance is $\rho\cos\theta_0$: the solar zenith
+angle is not divided out. Whether to divide it out is a real choice,
+and both conventions are computed. The corrected value is a
+bidirectional reflectance factor comparable to the overhead-sun albedo
+of the model masks, while the stored value is the convention of the
+published table. The exponents move by at most 0.03 between the two,
+while cloud cover moves by up to a factor of two --- the granules were
+taken at $60$--$69^\circ$ solar zenith --- so the comparison table
+uses the corrected convention, cloud cover being one of its columns.
+The reproduction check is always run uncorrected, like for like
+against the published values, and matches them to a mean absolute
+difference of 0.011 over the nine cells that paper reports; that check
+is what ties this pipeline to the published one. Pixels beyond
+$84^\circ$ solar zenith are excluded rather than corrected.
+
+The comparison table has one section per threshold, with the
+retrieval ruled off above the four simulated cases (the two SAM cases
+and STEAM at both amplitudes). Because the retrieval is recomputed,
+cloud fraction and the area exponent --- which the published table
+does not report --- are available, and no cell is empty. An italic
+entry is one whose fit \texttt{objscale} warned about. A bold entry is
+the simulated case closest to the retrieval in that column, together
+with any case within 0.01 of it, the table's display precision, below
+which a difference is not something to declare a winner on; distances
+are taken on the rounded values, so the rule can be checked against
+the printed page.
 
 \bibliographystyle{plainnat}
 \bibliography{sources}
