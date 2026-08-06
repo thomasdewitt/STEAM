@@ -109,7 +109,13 @@ spheroscale = 10                 # m
 n_seeds = 3
 column_subsample = 4             # every 4th column: the Haar analysis
                                  # allocates several float64 copies
-anisotropy = 'canonical'
+# Passed to simulate() and used for the local k_z computations. With the
+# 10 m spheroscale and dx = 5 km every class sits far above the
+# spheroscale, where the piecewise and canonical options coincide exactly,
+# so this matches production without changing any calibrated number.
+# (Before 2026-08-06 the simulate() call omitted it and inherited the
+# then-default 'canonical' -- same fields, for the same reason.)
+anisotropy = 'piecewise_isotropic_below_spheroscale'
 
 # Haar lag ladder. The scaleinvariance default 'powers of 1.2' stops at 66
 # grid units (15.3 km at dz = 232 m), short of k_z,L = 21.8 km; 1.05 reaches
@@ -167,6 +173,7 @@ def run_case(hurst_horizontal, haar_to_mhat):
                 h_min=h_profile.min() - 1e7, h_max=h_profile.max() + 1e7,
                 qt_min=-1e3, qt_max=1e3,
                 n_scale_classes_per_dyad=1,
+                anisotropy=anisotropy,
                 hurst_horizontal=hurst_horizontal,
                 haar_to_mhat=haar_to_mhat,
             )
