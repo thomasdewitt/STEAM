@@ -611,19 +611,29 @@ def test_nest_inherits_and_can_override_anisotropy(parent_nc):
     new_dx = geometry['k_finest'] / 16
     refine(parent_nc, 0, quarter, 0, quarter, new_dx, new_dx, seed=59)
     refine(parent_nc, 0, quarter, 0, quarter, new_dx, new_dx, seed=59,
-           anisotropy='piecewise_isotropic_below_spheroscale')
+           anisotropy='canonical')
     with netCDF4.Dataset(parent_nc, "r") as ds:
         r0 = ds.groups["refinements"].groups["r0"]
         r1 = ds.groups["refinements"].groups["r1"]
-        assert r0.anisotropy == "canonical"
-        assert r1.anisotropy == "piecewise_isotropic_below_spheroscale"
-        # The nest's classes lie below the 100 m spheroscale, so the
-        # piecewise branch is genuinely active: k_z = k there.
-        k_values = np.asarray(r1.variables["k_values"][:])
-        k_z_values = np.asarray(r1.variables["k_z_values"][:])
-        below = k_values < 100.0
-        assert below.any()
-        np.testing.assert_allclose(k_z_values[below], k_values[below], rtol=1e-5)
+        # r0 inherits the parent's anisotropy (the piecewise package
+        # default, 2026-08-06 ruling); r1 overrides it.
+        assert r0.anisotropy == "piecewise_isotropic_below_spheroscale"
+        assert r1.anisotropy == "canonical"
+        # The nests' classes lie below the 100 m spheroscale, which is
+        # where the two options differ at all: the inherited piecewise
+        # nest has k_z = k there, the canonical override does not.
+        for grp, expect_piecewise in ((r0, True), (r1, False)):
+            k_values = np.asarray(grp.variables["k_values"][:])
+            k_z_values = np.asarray(grp.variables["k_z_values"][:])
+            below = k_values < 100.0
+            assert below.any()
+            if expect_piecewise:
+                np.testing.assert_allclose(k_z_values[below],
+                                           k_values[below], rtol=1e-5)
+            else:
+                expected = 100.0 * (k_values[below] / 100.0) ** (5.0 / 9.0)
+                np.testing.assert_allclose(k_z_values[below], expected,
+                                           rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------

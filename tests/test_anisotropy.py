@@ -85,10 +85,14 @@ def test_simulate_piecewise_finite(tmp_path, profiles):
     np.testing.assert_allclose(k_z_values[above], canonical_above, rtol=1e-5)
 
 
-def test_simulate_canonical_unchanged(tmp_path, profiles):
-    """The default anisotropy must still be canonical — k_z obeys the old law."""
+def test_simulate_default_is_piecewise(tmp_path, profiles):
+    """The default anisotropy is piecewise-isotropic (2026-08-06 ruling).
+
+    Every class in this config sits above the spheroscale, so the k_z law
+    coincides with the canonical formula; the attribute pins the default.
+    """
     h, qt = profiles
-    out = tmp_path / "canonical.nc"
+    out = tmp_path / "default.nc"
     simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
              outer_scale=8000, spheroscale=100,
              domain_height=3000, profile_dz=30,
@@ -101,7 +105,7 @@ def test_simulate_canonical_unchanged(tmp_path, profiles):
     spheroscale_profile = ds.variables["spheroscale"][:]
     ds.close()
 
-    assert anisotropy_attr == 'canonical'
+    assert anisotropy_attr == 'piecewise_isotropic_below_spheroscale'
     spheroscale_mean = float(np.mean(spheroscale_profile))
     expected = spheroscale_mean * (k_values / spheroscale_mean) ** H_z
     np.testing.assert_allclose(k_z_values, expected, rtol=1e-5)

@@ -553,7 +553,7 @@ def simulate(
     qt_max=30 / 1000,
     min_distance_to_ground=1,
     turbulon_shape='mexican_hat',
-    anisotropy='canonical',
+    anisotropy='piecewise_isotropic_below_spheroscale',
     compress=None,
     device='cpu',
     save_for_refinement=False,
@@ -1655,7 +1655,7 @@ def _compute_all_grids(k_values, inner_extent_x, inner_extent_y, inner_height,
                        sparsity_factors, spheroscale_profile, z_profile, z_min=0.0,
                        pad_x_per_class=None, pad_y_per_class=None,
                        pad_z_below_per_class=None, pad_z_above_per_class=None,
-                       anisotropy='canonical'):
+                       anisotropy='piecewise_isotropic_below_spheroscale'):
     """Precompute grid dimensions and z-coordinate arrays for all scale classes.
 
     Each scale class has its own padded extent in x, y, and z. The inner
