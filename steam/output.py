@@ -210,11 +210,13 @@ def write_netcdf(
     for i, c in enumerate(C_h_k):
         chk[i, :len(c)] = c
     chk.long_name = "scale- and height-dependent h amplitude"
+    chk.units = "J kg-1"
 
     cqtk = ds.createVariable("C_qt_k", "f4", ("k", "nz_k_max"), fill_value=np.nan)
     for i, c in enumerate(C_qt_k):
         cqtk[i, :len(c)] = c
     cqtk.long_name = "scale- and height-dependent qt amplitude"
+    cqtk.units = "kg kg-1"
 
     # Scalar attributes on root group
     p = simulation_params
@@ -254,6 +256,8 @@ def write_netcdf(
     ds.qt_min = np.float64(p['qt_min'])
     ds.qt_max = np.float64(p['qt_max'])
     ds.min_distance_to_ground = np.int32(p['min_distance_to_ground'])
+    if 'bound_buffer_multiple' in p:
+        ds.bound_buffer_multiple = np.float64(p['bound_buffer_multiple'])
     if 'turbulon_shape' in p:
         ds.turbulon_shape = p['turbulon_shape']
     if 'anisotropy' in p:

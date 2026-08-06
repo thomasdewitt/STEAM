@@ -5,62 +5,15 @@ latent_heat_vaporization = 2.5e6        # Lv [J/kg]
 gravity = 9.81                          # g [m/s²]
 gas_constant_dry_air = 287.04           # Rd [J/(kg·K)]
 
-hurst_horizontal = 0.5               # H_h, Kolmogorov/Corrsin-Obukhov
+# The two constants below must be changed together
+# hurst_horizontal = 0.5               # H_h, Kolmogorov/Corrsin-Obukhov
+# haar_to_mhat = 0.19691
+hurst_horizontal = 0.45 
+haar_to_mhat = 0.25518 
                                      # (0.45 alternative: see haar_to_mhat --
                                      # the two MUST be changed together)
 hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
 
-# lambda, the delivery amplitude in the paper: the factor converting the mean
-# profile's vertical Haar fluctuation at the local outer scale into the
-# outer-class turbulon amplitude, C_{Phi,L}(z) = lambda * |Haar_{k_z,L}(<Phi>)|.
-#
-# Operational definition (2026-07-30, replaces the earlier unit-turbulon
-# measurement): lambda is FITTED end-to-end from the outer-scale crossover
-# criterion. Full STEAM runs on linear h and qt profiles give the vertical
-# Haar fluctuation of the 3D columns; a line of fixed slope H_v = H_h/H_z is
-# anchored at the second-smallest lag -- i.e. extrapolated from BELOW, where
-# the cascade scales cleanly -- and read at the vertical outer scale k_z,L.
-# lambda is the geometric mean over the h and qt panels of the ratio
-# (mean-profile fluctuation) / (column line) there, iterated to a fixed point:
-# the response is sublinear in lambda, and that sublinearity survived the
-# far-bounds change below, so it is a property of the delivery chain (the
-# mean-profile-gradient terms) rather than of the bound projection.
-# Extrapolating from below is deliberate: near k_z,L the profile and the
-# turbulence mix, which bends the measured curve, and the criterion is about
-# the cascade's amplitude, not the mixing.
-#
-# WARNING: lambda is calibrated AT a specific hurst_horizontal and is not
-# transferable -- the ratio varies systematically with H_h. Changing
-# hurst_horizontal above INVALIDATES this value; recalibrate with
-# calibration/calibrate_lambda.py.
-#
-# Converged 2026-08-04 at H_h = 0.5, under the 2026-08-03 far-bounds
-# procedure (calibration bounds pushed beyond any reachable value, so the
-# projection never clips: lambda is a geometric delivery constant, but the
-# bounds are case-specific). Residual 0.99726; per-field ratios at
-# convergence h = 0.9982, qt = 0.9963 -- the h/qt split of the old bounded
-# procedure (0.964 / 1.021) was the bound projection and is now gone.
-#
-# Ledger, same production geometry, for anyone comparing against the paper:
-#   H_h = 0.45, bounded procedure (pre-2026-08-03) : 0.28927
-#   H_h = 0.45, far bounds                         : 0.25518
-#   H_h = 0.50, far bounds                         : 0.19691  <- in use
-# So the change from the previously committed value is -11.8% procedure and
-# -22.8% H_h, not a single effect.
-#
-# CAVEAT at this H_h: H_v = H_h/H_z = 0.90, and the realized local slope of
-# the column Haar reaches 0.989 near k_z,L -- against the saturation ceiling
-# of 1, where H_h = 0.45 still had headroom (0.969). The anchored-from-below
-# definition is unaffected (it reads the fitted line, not the curve), but the
-# top of the vertical range no longer scales cleanly.
-#
-# To go back to H_h = 0.45, BOTH lines must move together -- a lambda from
-# one H_h under another is exactly what the warning above forbids:
-#     hurst_horizontal = 0.45      (line 8)
-#     haar_to_mhat = 0.25518       (far-bounds refit, 2026-08-04, same
-#                                   procedure and geometry as the value below;
-#                                   NOT the 0.28927 that shipped before)
-haar_to_mhat = 0.19691
 
 # NetCDF output default: whether h, qt, diagnostic variables, and p_bottom
 # are compressed at all. Overridden by an explicit compress= kwarg on

@@ -107,7 +107,7 @@ The mean
 absolute vertical Haar fluctuation of the simulated columns is computed
 at logarithmically spaced lags. A line of fixed slope $H_v = H_h/H_z$ is
 anchored to the fluctuation at the second-smallest lag (the smallest,
-at the grid spacing, is more affected by discretization) and extrapolated to
+at two grid cells, is more affected by discretization) and extrapolated to
 $k_{z,L}$. The criterion is evaluated on this extrapolated line rather
 than on the fluctuations measured at $k_{z,L}$ itself, because near the
 outer scale the Haar response contains contributions from both the fluctuations and the mean profile itself. The ratio of
@@ -192,7 +192,7 @@ $r_{\mathrm{iso}}(y)$ & 0.5401 & 0.8362 & 0.9587 & 0.9839 & 0.9956 & --- & --- &
 \begin{tabular}{lccccccccc}
 \hline
 $k/\Delta x$ & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 & 512 \\
-$\digamma$ & 0.337 & 0.595 & 0.798 & 0.894 & 0.925 & 0.951 & 0.975 & 0.988 & 1 \\
+$\digamma$ & 0.337 & 0.595 & 0.798 & 0.894 & 0.925 & 0.950 & 0.975 & 0.988 & 1 \\
 \hline
 \end{tabular}
 \caption{Compensation factors for the resolution dependence of mean absolute turbulon amplitudes, where $\Delta x$ is the final output grid resolution in the horizontal direction. Factors are measured on the full algorithm (\texttt{tests/heavy/interpolation\_compensation.py}) and normalized to the $k/\Delta x = 512$ reference; intermediate values are interpolated linearly in $\log_2(k/\Delta x)$.}\label{tab:interpolation compensation}
@@ -253,7 +253,11 @@ $A_\Phi$.
 The amplitude fields are then convolved with the turbulon envelope. The 3D
 Mexican hat defined in Appendix A is constructed
 with $\sigma = k/\pi$ isotropically in grid-index space and truncated at a distance $3k$ from its center along each
-axis. If the kernel exceeds
+axis. The envelope is zero-mean over continuum space by construction,
+but the coarse sampling does not resolve that cancellation, so a
+multiple of the envelope's own Gaussian factor is subtracted to make
+the sampled kernel sum exactly zero (at $s = 1$ this moves the kernel
+by about 1.7\% of its mean absolute value). If the kernel exceeds
 the field extent horizontally it is periodically folded by summation onto the field
 period. $A_\Phi$ is convolved with this kernel using a horizontally periodic and vertically zero-padded convolution to obtain a candidate perturbation field for
 $\widetilde{\Phi}_k$. 
@@ -301,7 +305,7 @@ states and their compensation deficits. Each scalar output is
 $$\Phi =
 \langle \Phi \rangle_t + \widetilde{\Phi} + \sum_i (\digamma_i - 1)
 \Delta_{\Phi,i},$$
-projected onto $[\Phi_{\min}, \Phi_{\max}]$ using the same projection algorithm described above. This final projection is needed because
+projected onto $[\Phi_{\min}, \Phi_{\max}]$ with each level's horizontal mean preserved: a violating level is replaced by the closest in-bounds field with the same mean, using the shift-and-clip construction of the bounded projection above without its amplitude condition (there is no separate target amplitude at this stage). This final projection is needed because
 adding the compensation $\sum_i (\digamma_i - 1)
 \Delta_{\Phi,i}$ can push the sum past
 bounds even after the per-class bounded projection. 
@@ -351,14 +355,14 @@ Variable & Dimensions & Units & Description \\
 \texttt{spheroscale\_profile} & $(z_p)$ & m & input spheroscale profile \\
 \hline
 \texttt{k\_values}, \texttt{k\_z\_values} & $(k)$ & m & horizontal and vertical size classes \\
-\texttt{C\_h\_k}, \texttt{C\_qt\_k} & $(k, z_k)$ & --- & per-class amplitude profiles \\
+\texttt{C\_h\_k}, \texttt{C\_qt\_k} & $(k, z_k)$ & J\,kg$^{-1}$, kg\,kg$^{-1}$ & per-class amplitude profiles \\
 \texttt{dz}, \texttt{spheroscale} & $(z)$ & m & cell heights and spheroscale, output grid \\
 \hline
 \texttt{p\_bottom} & $(x,y)$ & Pa & basal pressure (elevated nests only) \\
 \hline
 \texttt{h\_perturbation}, \texttt{qt\_perturbation} & $(x,y,z)$ & J\,kg$^{-1}$, kg\,kg$^{-1}$ & cascade states$^{\dagger}$ \\
 \texttt{flux\_state} & $(x,y,z)$ & --- & flux cascade state$^{\dagger}$ \\
-\texttt{class\_increments} & $(x,y,z)$ per class & --- & added $h$, $q_t$, flux increments$^{\dagger}$ \\
+\texttt{class\_increments} & group; one subgroup per class & --- & added $h$, $q_t$, flux increments, each on its class's working grid$^{\dagger}$ \\
 \hline
 \end{tabular}
 \caption{Contents of a STEAM output file. $^{\ast}$Diagnostic fields
@@ -383,7 +387,7 @@ from which its hydrostatic integration starts.
 
 \subsection{Nested refinement}\label{sect:nested refinement}
 
-A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The design requirement is that a nest be the same cascade carried further: identical, cell for cell, to a root run taken directly to the nest's resolution. The nest therefore continues from the stored cascade states of Table \ref{tab:output file}, extracted over the nest region and interpolated trilinearly onto the nest's grids. A parent intended for refinement must therefore store intermediate cascade states, because the final projection is not always invertible. The
+A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The design requirement is that a nest be the same cascade carried further: a nest spanning the full parent domain is identical, cell for cell, to a root run taken directly to the nest's resolution. A nest covering part of the domain deviates from that identity only in that the global statistics --- the advective-weight normalization, the mean absolute multiplier noise, and the flux volume means --- are evaluated over the nest's own region rather than the full domain. The nest therefore continues from the stored cascade states of Table \ref{tab:output file}, extracted over the nest region and interpolated trilinearly onto the nest's grids. A parent intended for refinement must therefore store intermediate cascade states, because the final projection is not always invertible. The
 amplitude profiles $C_{\Phi,k}$ are re-derived from the mean profile
 by exactly the computation the root performed, with the root's outer
 scale, $H_h$, and $\lambda$. Because the Haar response is evaluated
@@ -423,9 +427,11 @@ A nest that spans, or whose buffer would cross, a non-periodic parent
 boundary (e.g. a parent that is itself a nested simulation) is rejected. Vertically, the buffer is
 clipped at the ground and domain top.
 
-By default a nest draws no new seed. Output is
-written as a NetCDF group inside the parent's file as described in
-the previous section.
+By default a nest draws no new seed: its per-class seeds continue the
+root's stream where the parent left off. (A root run without a seed
+draws a random one and records it, so any root can be continued.)
+Output is written as a NetCDF group inside the parent's file as
+described in the previous section.
 
 \section{Complete specification of the comparison analysis}
 \label{sect:comparison analysis}
@@ -454,7 +460,7 @@ cells long, $128$--$144$ cells wide), with model-specific stretched
 vertical grids ($74$--$98$ levels to $33$--$39.5$~km; through the free
 troposphere the spacing is 500~m, or 250~m for the three UM variants).
 We consider three statistically independent snapshots separated by ten days near the end
-of the integration for each model. Mean profiles and comparison statistics use all three model snapshots. Two
+of the integration for each model. Mean profiles and comparison statistics use all three model snapshots: the driving profiles and the per-level statistics are averaged over the snapshots, and the distribution and scaling-function samples are pooled across them. Two
 archived models are excluded: ICON-AES, because its output contains
 neither a height coordinate nor pressure, and MESONH, because its archived
 three-dimensional specific humidity is a documented data error in the
@@ -483,9 +489,9 @@ is required to be below 50~m. (ii)~UCLA-CRM includes a below-ground ghost level,
 dropped. Where a model archives no pressure (SCALE, UCLA-CRM), the
 RCEMIP analytic-sounding surface pressure of 1014.8~hPa is used to
 initialize STEAM; otherwise the horizontal mean of the model's
-lowest-level pressure is used. Kelvin-scale fields are cast to double
-precision on read, and all reductions of single-precision fields use
-double-precision accumulators.
+lowest-level pressure is used. All reductions of single-precision
+fields use double-precision accumulators, and the comparison
+statistics cast kelvin-scale fields to double precision on read.
 
 The two large-eddy cases are SAM simulations on the same geometry,
 $2048^2$ cells at 100~m horizontal spacing over 204.8~km, with
@@ -495,7 +501,9 @@ each. For TWP-ICE, the last
 archived snapshot (model day 20) is used, while for GATE, hour 23 is used,
 the last hour with complete data. SAM archives its
 (non-frozen) moist static energy directly, in temperature units, so
-$h$ is $c_p$ times the archived field with nothing reconstructed;
+$h$ is $c_p$ times the archived field with nothing reconstructed (the
+input-profile builder inverts the same field to temperature and back,
+an algebraic identity);
 vapor and condensate are mixing ratios in g\,kg$^{-1}$, and $q_t$
 excludes the archived precipitating species by the same convention as
 above. GATE archives only the combined
@@ -580,7 +588,7 @@ the finer field everywhere and is averaged over one level near the
 surface and three through the free troposphere. For the channels the
 host is averaged near the surface and STEAM aloft. The residual
 mismatch left by the nearest integer stays within about $1.5\times$.
-Comparison levels are the host's own and are clipped to STEAM's 20~km domain top.
+Comparison levels are the host's own and are clipped to STEAM's uppermost stored level, just below the 20~km domain top.
 
 The per-level statistics are the horizontal standard deviations of
 $h$, $q_t$, $q_c$, and $q_i$, and cloud fraction, defined as the areal
@@ -590,8 +598,12 @@ coarsening.
 
 Distributions are drawn at single model levels nearest 5~km and 10~km. For $h$
 and $q_t$, the samples at a level are histogrammed in 80 equal-width
-bins spanning the pooled range of all compared cases and normalized to a density. For the
-condensates, only cloudy cells are binned using 50 logarithmically-spaced bins starting at $0.01\,\mathrm{g/kg}$.
+bins spanning the pooled range of all compared cases (for the channel
+figure, the pooled 0.01st--99.99th percentile range, which keeps every
+curve legible against outliers) and normalized to a density. For the
+condensates, cells holding at least $0.01\,\mathrm{g/kg}$ of that
+phase are binned using 50 logarithmically spaced bins upward from the
+threshold.
 
 \subsection{Scaling functions}
 \label{ssect:scaling functions}
@@ -657,13 +669,22 @@ at nadir, so footprints are passed to \texttt{objscale} per pixel,
 measured as great-circle distances between neighboring pixel centers.
 Along-track distances are taken only between rows of the same
 ten-detector scan. The swath is trimmed at $60^\circ$
-sensor zenith.
+sensor zenith. The ensemble estimators take a single footprint grid
+for every array, so the per-granule footprints are averaged over the
+72 granules; the scan geometry repeats granule to granule, and the
+spread about that mean is measured rather than assumed small.
 
-With the exception of the correlation dimension, for which missing data are set to zero, any missing data are passed to the \verb|objscale| function as \verb|nan|.
+Saturated detectors are kept at the largest representable reflectance
+--- the scene was brighter than the band records, which is a
+measurement, not a dropout. With the exception of the correlation dimension, for which missing data are set to zero, any other missing data are passed to the \verb|objscale| function as \verb|nan|.
 
 The stored L1B reflectance is $R\cos\theta_0$ where $R$ is reflectivity, and so we obtain $R$ by dividing the data product by the pixel-by-pixel cosine of the solar zenith angle. This is a departure from \citet{dewitt2026} who did not divide by this factor. The exponents move by at most 0.03 between the two methodologies,
 while cloud cover moves by up to a factor of two (the granules were
-taken at $60$--$69^\circ$ solar zenith). All granules have a solar zenith angle of at most $69^\circ$.
+taken at $60$--$69^\circ$ solar zenith). Both conventions are
+computed: the comparison table uses the corrected one, and the check
+against the published values is made under the uncorrected
+convention, reproducing the nine reported cells to a mean absolute
+difference of 0.011. All granules have a solar zenith angle of at most $69^\circ$.
 
 We do not report exponents for cases failing the statistical validity criteria proposed by \citet{dewitt2024b,dewitt2026}. These cases are simply identified when \verb|objscale| emits warnings.
 

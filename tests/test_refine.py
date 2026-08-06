@@ -732,3 +732,40 @@ def test_nest_output_is_the_state_damped_and_bounded(parent_with_increments,
     assert np.std(output_pert) < np.std(state - state.mean(axis=(0, 1))[None, None, :])
     assert h.min() >= h_min - 1e-3 and h.max() <= h_max + 1e-3
     assert qt.min() >= qt_min - 1e-9 and qt.max() <= qt_max + 1e-9
+
+
+def test_refine_inherits_parent_flux_scale(tmp_path):
+    """A nest's new classes use the PARENT's flux amplitude, not the global.
+
+    Regression for the 2026-08-06 fix: refine read the module FLUX_SCALE at
+    call time, which is how the production render nests once ran c=0.2085
+    against a c=0.1419 parent. Two refinements of the same parent, one with
+    the global left alone and one with it set to an absurd value, must be
+    identical -- and both must record the parent's value.
+    """
+    h, qt = _profiles()
+    parent = tmp_path / "parent.nc"
+    original = sm.FLUX_SCALE
+    try:
+        sm.FLUX_SCALE = 0.11
+        simulate(h, qt, nx=32, ny=32, dx=250, dy=250,
+                 outer_scale=8000, spheroscale=100,
+                 domain_height=PARENT_DOMAIN_HEIGHT,
+                 profile_dz=PARENT_PROFILE_DZ,
+                 output_path=parent, seed=7, save_for_refinement=True)
+        refine(parent, 0, 16, 0, 16, 125.0, 125.0,
+               output_group="refinements/control")
+        sm.FLUX_SCALE = 0.99
+        refine(parent, 0, 16, 0, 16, 125.0, 125.0,
+               output_group="refinements/mutated")
+    finally:
+        sm.FLUX_SCALE = original
+    with netCDF4.Dataset(parent) as ds:
+        control = ds.groups["refinements"].groups["control"]
+        mutated = ds.groups["refinements"].groups["mutated"]
+        assert float(control.flux_noise_scale) == 0.11
+        assert float(mutated.flux_noise_scale) == 0.11
+        np.testing.assert_array_equal(control.variables["qt"][:],
+                                      mutated.variables["qt"][:])
+        np.testing.assert_array_equal(control.variables["flux"][:],
+                                      mutated.variables["flux"][:])

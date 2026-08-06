@@ -559,6 +559,7 @@ def simulate(
     save_for_refinement=False,
     hurst_horizontal=None,
     haar_to_mhat=None,
+    bound_buffer_multiple=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -652,6 +653,11 @@ def simulate(
         the constant. Both overrides exist for the lambda calibration in
         calibration/, which needs lambda = 1 runs
         at two H_h values without editing the model.
+    bound_buffer_multiple : float or None
+        The bound-buffer multiple n_b of the taper widths (supplement,
+        Normalization). None (default) uses the module constant
+        BOUND_BUFFER_MULTIPLE = 3. Stored in the file; a nest inherits
+        the parent's value.
 
     Returns
     -------
@@ -661,6 +667,11 @@ def simulate(
     if compress is None:
         compress = constants.output_compress
     output_path = Path(output_path)
+    if seed is None:
+        # An unseeded run draws a random 31-bit seed and records it, so
+        # that any root can later be continued by a nest (the file stores
+        # the seed as int32; -1 is the no-seed sentinel).
+        seed = int(np.random.SeedSequence().generate_state(1)[0] >> 1)
     seed_sequence = np.random.SeedSequence(seed)
 
     # Input validation
@@ -873,8 +884,10 @@ def simulate(
         aspect_k.append((_k_z(anisotropy, k, ls_i) / k).astype(np.float32))
 
     # Per-class taper buffer widths b_{Phi,i}(z) (see _bound_buffers).
-    b_h_k = _bound_buffers(C_h_k, n_scale_classes_per_dyad, hurst_horizontal)
-    b_qt_k = _bound_buffers(C_qt_k, n_scale_classes_per_dyad, hurst_horizontal)
+    b_h_k = _bound_buffers(C_h_k, n_scale_classes_per_dyad, hurst_horizontal,
+                           bound_buffer_multiple)
+    b_qt_k = _bound_buffers(C_qt_k, n_scale_classes_per_dyad,
+                            hurst_horizontal, bound_buffer_multiple)
 
     child_seeds = seed_sequence.spawn(n_classes)
 
@@ -974,6 +987,9 @@ def simulate(
         'anisotropy': anisotropy,
         'flux_noise_scale': FLUX_SCALE,
         'flux_alpha': FLUX_ALPHA,
+        'bound_buffer_multiple': (BOUND_BUFFER_MULTIPLE
+                                  if bound_buffer_multiple is None
+                                  else float(bound_buffer_multiple)),
         'root_outer_scale': outer_scale,
         'root_seed': seed,
         'n_classes_consumed': n_classes,
@@ -982,7 +998,7 @@ def simulate(
     write_netcdf(
         output_path, h_3d, qt_3d,
         x_coords, y_coords, z_final,
-        h_profile, qt_profile, z_profile.astype(np.float32),
+        h_profile, qt_profile, z_profile,
         k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
         simulation_params,
         compress=compress,
@@ -1020,6 +1036,7 @@ def cascade_loop(
     deficit_qt=None,
     deficit_flux=None,
     inner_windows=None,
+    flux_noise_scale=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
     zero_top=True,
@@ -1273,7 +1290,9 @@ def cascade_loop(
         need_flux_increment = class_has_deficit or increment_dir is not None
         flux_before = flux.copy() if need_flux_increment else None
         S_k, _ = _advance_flux(
-            flux, rng, kernel, FLUX_SCALE, n_scale_classes_per_dyad,
+            flux, rng, kernel,
+            FLUX_SCALE if flux_noise_scale is None else flux_noise_scale,
+            n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
             device=device, window=window,
         )
@@ -2166,7 +2185,8 @@ def _advective_weight(field_3d, dx, dy, z_coords, aspect_z):
     return weight
 
 
-def _bound_buffers(C_k, n_scale_classes_per_dyad, hurst_horizontal=None):
+def _bound_buffers(C_k, n_scale_classes_per_dyad, hurst_horizontal=None,
+                   bound_buffer_multiple=None):
     """Per-class taper buffer widths b_{Phi,i}(z), one array per size class.
 
         b_{Phi,i}(z) = BOUND_BUFFER_MULTIPLE * sum_{j >= i} C_{Phi,j}(z)
@@ -2192,8 +2212,10 @@ def _bound_buffers(C_k, n_scale_classes_per_dyad, hurst_horizontal=None):
     Returns a list of n_classes float32 arrays parallel to C_k.
     """
     H_h_used = H_h if hurst_horizontal is None else float(hurst_horizontal)
+    n_b = (BOUND_BUFFER_MULTIPLE if bound_buffer_multiple is None
+           else float(bound_buffer_multiple))
     tail = 1.0 / (1.0 - 2.0 ** (-H_h_used / n_scale_classes_per_dyad))
-    return [(BOUND_BUFFER_MULTIPLE * tail * C_i).astype(np.float32)
+    return [(n_b * tail * C_i).astype(np.float32)
             for C_i in C_k]
 
 
@@ -2856,6 +2878,15 @@ def refine(
     n_classes_consumed = int(grp.n_classes_consumed)
     hurst_horizontal = float(grp.H_h)
     haar_to_mhat = float(grp.lambda_haar_to_mhat)
+    # The nest continues the parent's cascade, so its new classes use the
+    # parent's flux amplitude and buffer multiple, not whatever the module
+    # globals happen to be in this process. (Before 2026-08-06 refine used
+    # the current FLUX_SCALE global — the mechanism behind the production
+    # nests that ran c=0.2085 against a c=0.1419 parent.) getattr covers
+    # parents written before the attribute existed.
+    flux_noise_scale = float(getattr(grp, 'flux_noise_scale', FLUX_SCALE))
+    bound_buffer_multiple = float(getattr(grp, 'bound_buffer_multiple',
+                                          BOUND_BUFFER_MULTIPLE))
 
     if sparsity_factors is None:
         sparsity_factors = tuple(int(v) for v in grp.sparsity_factors)
@@ -3198,8 +3229,10 @@ def refine(
         spheroscale_i = np.interp(grids['z_arrays'][i], z_profile, spheroscale_profile)
         aspect_k.append((_k_z(anisotropy, k, spheroscale_i) / k).astype(np.float32))
 
-    b_h_k = _bound_buffers(C_h_k, parent_n_per_dyad, hurst_horizontal)
-    b_qt_k = _bound_buffers(C_qt_k, parent_n_per_dyad, hurst_horizontal)
+    b_h_k = _bound_buffers(C_h_k, parent_n_per_dyad, hurst_horizontal,
+                           bound_buffer_multiple)
+    b_qt_k = _bound_buffers(C_qt_k, parent_n_per_dyad, hurst_horizontal,
+                            bound_buffer_multiple)
 
     # Continue the root's per-class seed stream: SeedSequence.spawn hands out
     # children by index, so skipping the classes already spent gives each of
@@ -3236,6 +3269,7 @@ def refine(
         deficit_qt=inherited_deficit["qt"],
         deficit_flux=inherited_deficit["flux"],
         inner_windows=inner_windows,
+        flux_noise_scale=flux_noise_scale,
         turbulon_shape=turbulon_shape,
         # Turbulon centers are suppressed at the DOMAIN surface and top, not
         # at the nest's edges: a nest floating in the interior has centers
@@ -3356,7 +3390,11 @@ def refine(
         'C_h_L': C_h_L,
         'C_qt_L': C_qt_L,
         'n_large_turbulons': 0,   # a nest has no outer-scale turbulons of its own
-        'H_h': H_h,
+        # The values the nest actually ran with -- inherited from the
+        # parent, so a nest of this nest inherits them in turn. (Before
+        # 2026-08-06 the module defaults were written here, so a
+        # descendant of an overridden-H_h parent read the wrong exponent.)
+        'H_h': hurst_horizontal,
         'H_z': H_z,
         'h_min': h_min,
         'h_max': h_max,
@@ -3365,8 +3403,9 @@ def refine(
         'min_distance_to_ground': min_distance_to_ground,
         'turbulon_shape': turbulon_shape,
         'anisotropy': anisotropy,
-        'flux_noise_scale': FLUX_SCALE,
+        'flux_noise_scale': flux_noise_scale,
         'flux_alpha': FLUX_ALPHA,
+        'bound_buffer_multiple': bound_buffer_multiple,
         'parent_group': parent_group,
         'parent_x_slice': np.array([x_start, x_stop], dtype=np.int32),
         'parent_y_slice': np.array([y_start, y_stop], dtype=np.int32),
@@ -3385,7 +3424,7 @@ def refine(
     write_netcdf(
         parent_path, h_3d_out, qt_3d_out,
         x_out, y_out, z_final,
-        h_profile, qt_profile, z_profile.astype(np.float32),
+        h_profile, qt_profile, z_profile,
         k_values, k_z_values, C_h_k_stored, C_qt_k_stored,
         simulation_params,
         group=output_group,
