@@ -64,21 +64,20 @@ $n_c$ & cascade density & size classes per octave, default 1 \\
 \caption{Inputs to the STEAM algorithm.}\label{tab:steam inputs}
 \end{table}
 
-The implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ must be smaller than the domain height at every level.
-
+The implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ is enforced to be smaller than the domain height at every level.
 Logarithmically spaced size classes are defined as $k_i = L\, 2^{-i/n_c}$
 for $i = 0, 1, \dots, n$, proceeding from the outer scale down to the
 class nearest $k = 2dx$, the smallest turbulon that is Nyquist-sampled
-by the output grid: $n = \mathrm{round}[n_c\log_2(L/(2dx))]$. When the
+by the output grid such that $n = \mathrm{round}[n_c\log_2(L/(2dx))]$. When the
 outer scale is a power-of-two multiple of $dx$, the conventional
 configuration, the finest class is $2dx$ exactly. For each $k_i$ the vertical turbulon size is $k_{z,i}(z) =
-l_s(z)(k_i / l_s(z))^{H_z}$, evaluated with the local spheroscale;
-where the piecewise-isotropic option is selected, $k_{z,i} = k_i$ for
-$k_i < l_s(z)$. The list of size classes does not depend on the
-sparsity factors: the cascade always terminates at the class nearest
+l_s(z)(k_i / l_s(z))^{H_z}$, evaluated with the local spheroscale. The value of $H_z$ is set to $5/9$ for $k_i>l_s$ and 1 otherwise when the default ``piecewise isotropic'' scaling function is used. The ``canonical'' scaling function keeps $H_z=5/9$ for all sizes.
+
+The list of size classes does not depend on the
+sparsity factors, and so the cascade always terminates at the class nearest
 $k = 2dx$. The sparsity factors
 instead set how finely each class is resolved on its own working grid
-(next section): at $s = 1$ the finest class works directly on the
+as described in the following section. At $s = 1$ the finest class works directly on the
 output grid, while for $s > 1$ it is computed on a grid finer than the
 output and restricted to the output grid afterward.
 
@@ -92,7 +91,7 @@ a $k_{z,L}(z)$-wide window minus the mean over the lower half. The
 profile is read as the piecewise-linear function its samples define,
 and the two half-window means are its exact integrals over
 $[z, z + k_{z,L}/2]$ and $[z - k_{z,L}/2, z]$. Beyond its ends the
-function is extended by its end values. The windows are therefore not
+profile is extended by its end values. The windows are therefore not
 rounded to whole profile cells, which would otherwise bias the
 response high wherever a half-window spans only a few cells. The result is multiplied by the calibration
 constant $\lambda$ and taken in absolute value.
@@ -100,37 +99,28 @@ constant $\lambda$ and taken in absolute value.
 $\lambda$ is set by the consistency requirement of Appendix A: the
 vertical Haar fluctuation of the simulated fields at the vertical outer
 scale must equal that of the mean profile. It is calibrated by running
-the full algorithm on linear mean profiles for both scalars, on a domain
+a full simulation on linear mean profiles for both scalars, on a domain
 whose vertical extent contains one vertical outer scale. The
 calibration runs place the scalar bounds far beyond any value the
-fields can reach, so the bound projection never engages. The bounds
-are case-specific while $\lambda$ is a single constant, and the same
-$\lambda$ is used for subvolumes in which the bounds are never
-approached, so the constant should not absorb any particular bound
-geometry. The mean
+fields can reach, so the bound projection described in Appendix A never engages and the value of $\lambda$ does not depend on the bound configuration.
+The mean
 absolute vertical Haar fluctuation of the simulated columns is computed
 at logarithmically spaced lags. A line of fixed slope $H_v = H_h/H_z$ is
 anchored to the fluctuation at the second-smallest lag (the smallest,
-at the grid spacing, is affected by discretization) and extrapolated to
+at the grid spacing, is more affected by discretization) and extrapolated to
 $k_{z,L}$. The criterion is evaluated on this extrapolated line rather
 than on the fluctuations measured at $k_{z,L}$ itself, because near the
-outer scale the measured fluctuations mix the cascade with the profile,
-and the criterion concerns the cascade amplitude alone. The ratio of
+outer scale the Haar response contains contributions from both the fluctuations and the mean profile itself. The ratio of
 the profile's Haar fluctuation at $k_{z,L}$ to the extrapolated value,
 averaged geometrically over the two scalars, multiplies $\lambda$, and
-the calibration is repeated until the ratio converges to one. The
-iteration is needed because the response to $\lambda$ is slightly
-sublinear, so a single pass under-corrects. The sublinearity persists
-under the far bounds, so it comes from the mean-profile gradient
-terms in the advective weighting and in the column fluctuation at the
-second-smallest lag, not from the bound projection. Because
+the calibration is repeated until the ratio converges to one. Convergence to $\sim 0.1\%$ is typically achieved in three iterations. 
+
+Because
 the same Haar operator is applied to the profile and to the simulated
-field, the envelope amplitude convention and the reference-resolution
-convention of the interpolation-compensation factors below are absorbed
-into $\lambda$. The fluctuation amplitude the cascade realizes from a
-given $C_{\Phi,L}$ grows systematically with the horizontal Hurst
-exponent, so $\lambda$ is calibrated at the production $H_h$ and does
-not transfer across it; for $H_h = 0.45$, $\lambda = 0.25518$. The scale-dependent amplitudes
+field, conventions defining the envelope amplitude, the Haar definition, and the interpolation compensation factors described below are absorbed
+into $\lambda$. For unknown reasons the converged values for $\lambda$ depend on the value of the horizontal Hurst exponent. For the runs here $H_h = 0.45$ and $\lambda = 0.25518$. 
+
+The scale-dependent amplitudes
 follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
 as described in Appendix A and are interpolated
 to each size class's vertical grid.
@@ -142,7 +132,7 @@ as
 \end{align}
 the geometric sum, in closed form, of the mean absolute amplitudes of
 the current class and of every class the cascade could ever add below
-it. The sum deliberately extends past the classes a particular run
+it. The sum conservatively extends past the classes a particular run
 carries. Truncating it at a run's own finest class would make the
 buffer, and with it the realized field, depend on where the run stops,
 breaking the identity between a nested refinement and a deeper root
@@ -154,15 +144,12 @@ For computational efficiency, each size class works on its own grid
 with $\Delta x_k = k/(2s_x)$ and $\Delta y_k = k/(2s_y)$ --- coarser
 than the output grid for all but the finest classes. When $s = 1$, the
 spacing is half the turbulon size and the turbulon is represented
-coarsely, as shown in the discretized-turbulon figure of the main-text
-appendix.
+coarsely, as shown in Figure (GET FIG NUM) of Appendix A.
 The horizontal dimensions $n_{x,k} = L_x/\Delta x_k$ and $n_{y,k} =
 L_y/\Delta y_k$ are exact integers provided $L_x$ and $L_y$ are integer
-multiples of $L$. A domain axis narrower than the outer scale (the
-channel-geometry runs of Sect.~\ref{ssect:steam config}) is also
-admitted.
-Grid counts along it are rounded to at least one cell, and any turbulon
-envelope wider than the extent is periodically folded onto it.
+multiples of $L$. The horizontal outer scale is enforced to be the domain size or larger in at least one horizontal direction.
+Grid counts along a narrower dimension are rounded to at least one cell, and any turbulon
+envelope wider than the extent is periodically folded onto it by summation.
 
 The vertical grid requires more care because $k_z(z)$ varies with
 height. To compute $\Delta z$, cells are accumulated upward from the surface with local
@@ -171,18 +158,22 @@ or overshoots the domain top, with the overshooting cell retained. The resulting
 $\le 1$ so that they tile $L_z$ exactly. For a constant spheroscale this reduces
 to a uniform grid at least as fine as the Nyquist target.
 
-As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. The interpolation is cell-consistent: source and target cells tile the same extent, and values are sampled at cell centers. In $x$ and $y$ it is periodic --- the source is padded with wrapped cells and the margin cropped afterward --- matching the period of the convolutions. The vertical, which the convolutions zero-pad, is not periodic. Neither the coarse sampling nor the interpolation preserves the mean absolute value of the turbulon perturbations: a size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the \emph{output} is composed, never inside the cascade itself. The cascade's running state carries no compensation, so it is the same field however deep the run goes; this matters because the gradient weighting and the bound factor read the running state, and a nested refinement continues from it. Instead, the cascade accumulates a compensation deficit field for each scalar, $\sum_i (\digamma_i - 1)\,\Delta_i$, where $\Delta_i$ is the increment class $i$ actually added. The deficit is interpolated between classes together with the state, and the output is the sum of the two (final-fields section below). The flux accumulates a deficit in the same way, from the change in its state across each class's advance. The retentions underlying $\digamma$ are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
+As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. The interpolation is cell-consistent: source and target cells tile the same extent, and values are sampled at cell centers. In $x$ and $y$ the grid is periodic. To enforce this the source is padded with wrapped cells and the margin cropped after the convolution. In the vertical direction, the convolutions are not periodic and are instead zero-padded. 
 
-Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the sampled points on the envelope curve land preferentially near the envelope peaks; at the extreme $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $1/0.337 \approx 3\times$ the amplitude of a well-resolved one. Second, at large $k/\Delta x$, each regrid resamples the piecewise-linear field at points that do not exactly coincide with the previous ones, especially in the vertical direction where upsampling occurs by a non-integer factor $2^{H_z}$. This removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the largest class used by any simulation in this work. The choice of reference is a single overall constant and is absorbed into the calibration factor $\lambda$ above.
+Due to the coarseness of the grid, interpolation does not preserve the mean absolute value of the turbulon perturbations. A size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the output is composed, not inside the cascade itself, and therefore the gradient weighting and the bound factor are computed from the running, uncompensated state. 
 
-The compensation factors $\digamma$ are built from per-regrid ``retentions'', defined as the fraction of the mean absolute amplitude that survives one interpolation step. Retentions differ between the isotropic and anisotropic regimes because of the different vertical upsampling factors ($2$ versus $2^{H_z}$ per step), and were therefore measured separately in the two regimes (Table \ref{tab:hop retention}). A class's compensation factor is the delivery of the reference chain divided by the product of the retentions of the regrids that its perturbation field will undergo, each taken from the regime of that regrid's destination grid at each height level. A cascade crossing the spheroscale therefore composes isotropic retentions below it and anisotropic retentions above it, with the crossing step approximated by the regime of its destination grid.
+To keep track of the compensation factors, the cascade accumulates a compensation deficit field for each scalar, $\sum_i (\digamma_i - 1)\,\Delta_i$, where $\Delta_i$ is the increment class $i$ actually added. The deficit is interpolated between classes together with the state, and the output is the sum of the two as describedin in Sect. (FILL IN REF) below. The flux accumulates a deficit in the same way as well. The ``retention'' factors underlying $\digamma$, defined as the fraction of the mean absolute amplitude that survives one interpolation step, are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
+
+Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the sampled points on the envelope curve land preferentially near the envelope peaks; at the extreme $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $1/0.337 \approx 3\times$ the amplitude of a well resolved one. Second, at large $k/\Delta x$, each regrid resamples the piecewise linear field at points that do not exactly coincide with the previous ones, especially in the vertical direction where upsampling occurs by a non-integer factor $2^{H_z}$. This removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the largest class used by any simulation in this work. The choice of reference is a single overall constant and is absorbed into the calibration factor $\lambda$ above.
+
+Retentions differ between the isotropic and anisotropic regimes because of the different vertical upsampling factors ($2$ versus $2^{H_z}$ per step), and were therefore measured separately in the two regimes (Table \ref{tab:hop retention}). A class's compensation factor is computed from the retention factors for all regrids that its perturbation field will eventually undergo, each taken from the regime of that regrid's destination grid at each height level. A cascade crossing the spheroscale therefore composes isotropic retentions below it and anisotropic retentions above it, with the crossing step approximated by the regime of its destination grid.
 
 The specific rule is as follows. Write $r(y)$ for the retention of one regrid, with $y$ the class's value of $k/\Delta x$ on the grid the regrid starts from. A class's perturbation field is created at $y = 2$, on the class's own working grid, and $y$ doubles at each subsequent regrid. Intermediate $y$ (which arise for $n_c > 1$) are interpolated linearly in $\log_2 y$. A regrid at $y$ at or beyond twice the last tabulated value retains 1, the class being well resolved by then; between the last tabulated value and twice it, the last tabulated retention applies. At each level $z$, a class whose perturbation field has yet to traverse regrids $m = 1, 2, \dots$ carries
 \begin{align}
   \digamma(z) = D_{512} \Big/ \prod_m r_{\rho_m(z)}(y_m), \qquad
   D_{512} = \prod_{y = 2, 4, \dots, 256} r_{\mathrm{ani}}(y) \approx 0.337,
 \end{align}
-where $\rho_m(z)$ selects the column of Table \ref{tab:hop retention} by the regime of the $m$-th regrid's destination grid at that level, and $D_{512}$ is the delivery of the reference chain. The regrids reduce the class's perturbation field by exactly the product being divided by, so, once the deficit is added at the output, every class arrives with the same effective normalization $D_{512}$. For a run with no classes below the spheroscale this reduces to Table \ref{tab:interpolation compensation}.
+where $\rho_m(z)$ selects the column of Table \ref{tab:hop retention} by the regime of the $m$-th regrid's destination grid at that level, and $D_{512}$ is the delivery of the reference chain. The regrids reduce the class's perturbation field by exactly the product being divided by, so once the deficit is added at the output, every class arrives with the same effective normalization $D_{512}$. For a run with no classes below the spheroscale this reduces to Table \ref{tab:interpolation compensation}.
 
 \begin{table}
 \centering
@@ -193,7 +184,7 @@ $r_{\mathrm{ani}}(y)$ & 0.5664 & 0.7456 & 0.8926 & 0.9667 & 0.9730 & 0.9746 & 0.
 $r_{\mathrm{iso}}(y)$ & 0.5401 & 0.8362 & 0.9587 & 0.9839 & 0.9956 & --- & --- & --- \\
 \hline
 \end{tabular}
-\caption{Per-regrid retentions in the anisotropic and isotropic regimes, measured under the cell-consistent interpolation convention. Isotropic entries beyond $y = 32$ are unmeasured and treated as well resolved (the tabulated trend has converged to within measurement precision of 1).}\label{tab:hop retention}
+\caption{Per-regrid retention factors in the anisotropic and isotropic regimes, measured under the cell-consistent interpolation convention. Isotropic entries beyond $y = 32$ are unmeasured and treated as well resolved (the tabulated trend has converged to within measurement precision of 1).}\label{tab:hop retention}
 \end{table}
 
 \begin{table}
@@ -216,31 +207,29 @@ to small, performing the following sequence of operations at each class.
 
 First, the perturbation and flux fields are trilinearly interpolated
 from the previous class's grid to the current one, together with the
-compensation deficits of the working-grids section once they exist,
-and the mean profiles are linearly interpolated to the current
-vertical grid. The deficits pass through the same regrids as the
-states, since those regrids are exactly what they compensate.
+compensation deficit factors defined in Section (ADD REF) once they exist. (THOMAS: This reads as if the compensation deficit factors are interpolated themselves, which I'm pretty sure they are not?)
+The mean profiles are linearly interpolated to the current
+vertical grid. The deficit factors pass through the same regrids as the
+states, since those regrids are exactly what they compensate. (THOMAS: What does this sentence mean? very confusing.)
 
 The flux is then advanced by one size class. A sparse field $\gamma$ of
-independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables,
-$\alpha = 1.8$, is drawn at the turbulon centers every $s_x, s_y, s_z$
+independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables with
+$\alpha = 1.8$ is drawn at the turbulon centers every $s_x, s_y, s_z$
 cells, i.e. every $k/2$ in physical space. No centers are placed within
-$m\, k_z(k)$ of the surface or of the domain top ($m$ of
-Table \ref{tab:steam inputs}, default 1). This noise is scaled by
+$m\, k_z(k)$ of the surface or of the domain top, where $m$ is defined in
+Table \ref{tab:steam inputs} and has default 1. Th L\'evy noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
-e^\gamma \rangle = 1$ exactly: writing $\gamma_0$ for the unscaled
+e^\gamma \rangle = 1$ exactly. This can be seen by writing $\gamma_0$ for the unscaled
 draw, $\ln\langle e^{c_\mathcal{F}\gamma_0} \rangle =
 c_\mathcal{F}^\alpha/(\alpha-1)$ in closed form, the $\alpha$-stable
 generalization of the lognormal $-\sigma^2/2$. The expectation is
 finite because $\beta = -1$ places the heavy tail on the side the
-exponential suppresses. The flux is updated additively as
+exponential suppresses. 
+
+Once L\'evy noise is generated and scaled, the flux is updated additively as
 $\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$. After the addition, any negative values are set to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
-mean the field had before the perturbation was added. Level means are not
-individually constrained. The flux's compensation deficit accumulates
-the change in the field across this whole update, convolution, clip,
-and mean restoration included; the field itself carries no
-compensation.
+mean the field had before the perturbation was added.
 The signed scalar noise $S_k$ is defined as the increment $(e^\gamma -
 1)\mathcal{F}$, evaluated with the entering flux and normalized by the mean
 absolute value of $e^\gamma - 1$ over the turbulon centers. The scalar noise is shared
@@ -262,9 +251,9 @@ The amplitude fields are then convolved with the turbulon envelope. The 3D
 Mexican hat defined in Appendix A is constructed
 with $\sigma = k/\pi$ isotropically in grid-index space and truncated at a distance $3k$ from its center along each
 axis. If the kernel exceeds
-the field extent horizontally it is periodically folded onto the field
+the field extent horizontally it is periodically folded by summation onto the field
 period. $A_\Phi$ is convolved with this kernel using a horizontally periodic and vertically zero-padded convolution to obtain a candidate perturbation field for
-$\widetilde{\Phi}_k$.
+$\widetilde{\Phi}_k$. 
 
 Because the candidate perturbation field may cause the running sum $\sum_{k\ge k_i} \widetilde{\Phi_k}$ to exceed its bounds, it cannot be straightforwardly added to $\sum_{k > k_i} \widetilde{\Phi_k}$. Instead, 
 a bounded,
@@ -272,8 +261,7 @@ amplitude-preserving projection is used. At every level the added perturbation
 must satisfy three conditions: (i) zero horizontal mean; (ii) mean
 absolute amplitude as close as possible to that of the unclipped
 candidate field, so that the amplitude at each scale is set by the
-normalization above and the bounding neither enforces it a second
-time nor erodes it; and (iii) $\Phi_{\min} \le \Phi \le
+normalization factors alone; and (iii) $\Phi_{\min} \le \Phi \le
 \Phi_{\max}$ pointwise. These criteria are met iteratively.
 The added perturbation is taken from a two-parameter family: the
 candidate field $\delta_0$ is scaled by $s$, shifted by $\mu$, and
@@ -283,16 +271,12 @@ clipped to the bounds,
   \Phi),\; \Phi_{\max} - \Phi\big).
 \end{align}
 The shift enforces condition (i). At fixed $s$, the level mean of
-$\delta$ is a continuous, piecewise-linear, and non-increasing function
+$\delta$ is a continuous, piecewise linear, and non-increasing function
 of $\mu$, so the value of $\mu$ that produces a zero mean is unique and
 is found by bisection. The scale enforces condition (ii): the mean
 absolute value of $\delta$ increases monotonically with $s$, and a few
 multiplicative updates bring it to the target, each followed by
-subtracting the level mean and re-clipping. The bisection for $\mu$
-is performed once, at the end, to remove whatever mean this simple
-iteration leaves. The simple iteration cannot serve as the final step
-itself: its convergence rate is set by the fraction of clipped points,
-and it makes no progress on levels held at a bound.
+subtracting the level mean and re-clipping.
 
 The three conditions cannot always be met at once. A perturbation that
 has zero mean and keeps $\Phi$ within its bounds can have mean absolute
@@ -310,37 +294,37 @@ subsequent size classes see the gradients of the bounded field.
 \subsection{Final fields and output files}
 
 After the finest class, the outputs are composed from the cascade
-states and their compensation deficits. Each scalar output is $\Phi =
+states and their compensation deficits. Each scalar output is 
+$$\Phi =
 \langle \Phi \rangle_t + \widetilde{\Phi} + \sum_i (\digamma_i - 1)
-\Delta_{\Phi,i}$, projected onto $[\Phi_{\min}, \Phi_{\max}]$ with each
-level's horizontal mean preserved. The projection is needed because
-restoring amplitude to under-resolved classes can push the sum past
-bounds that the per-class bounded projection held the state inside.
-Each violating level is replaced by the closest in-bounds field with
-the same horizontal mean, using the same shift-before-clip
-construction as the cascade loop's bounded projection. The flux output is the flux field plus its deficit, clipped
+\Delta_{\Phi,i}$$,
+projected onto $[\Phi_{\min}, \Phi_{\max}]$ using the same projection algorithm described above. This final projection is needed because
+adding the compensation $\sum_i (\digamma_i - 1)
+\Delta_{\Phi,i}$ can push the sum past
+bounds even after the per-class bounded projection. 
+
+The flux output is the flux field plus its deficit, clipped
 at zero and rescaled to the volume mean of the uncompensated field,
-the same correction each class applies. The composition is the last
-operation and touches nothing the cascade or a descendant nest reads;
-a run whose classes are all well resolved ($\digamma \equiv 1$) skips
-it entirely. Temperature, water phases, and pressure are then
+following the same correction rescaling method that is applied at each class. The composition is the last
+operation and a descendant nested simulation does not read the compensated fields. A run whose classes are all well resolved ($\digamma \equiv 1$) skips
+compensation entirely. Finally, temperature, water phases, and pressure are
 recovered from the composed $h$ and $q_t$ by the saturation adjustment
-of the main-text appendix, in a separate pass.
+of the main-text appendix.
 
 Each simulation produces one NetCDF4 file, with the contents listed in
 Table \ref{tab:output file}. The three-dimensional fields are single
 precision. The input $z$ and spheroscale profiles are kept in double
-precision: a nest rebuilds its grids from them, and a single-precision
-round trip would move every class's spacing by a rounding step.
-Compression is optional (off by default): when enabled,
-the fields use the blosc-zstd filter (byte-shuffled, compression level
+precision given that the storage cost is negligible.
+Compression is optional and off by default. When enabled,
+the fields use the \verb|blosc-zstd filter| (byte-shuffled, compression level
 1), and chunks smaller than 16\,KiB are stored uncompressed. The
-inputs are stored alongside the outputs so that every file is
-self-describing, and scalar attributes record the full configuration:
+inputs are stored alongside the outputs and scalar attributes record the full configuration:
 grid dimensions and spacings, outer scale, domain height, bounds,
 sparsity factors, cascade density, surface pressure, random seed,
 $H_h$, $H_z$, $\lambda$, the flux parameters $c$ and $\alpha$, and
-the envelope and anisotropy options.
+the envelope and anisotropy options. 
+
+If nested simulations are to be performed, a flag PUT FLAG HERE is required which also stores the per-class fields LIST, so that nested simulations continue the cascade loop rather than reading the final compensated fields. This ensures that compensation is only done at final output resolution and not mid-cascade.
 
 \begin{table}[t]
 \centering
@@ -387,7 +371,7 @@ interpolated onto the output $z$ grid before storage.}\label{tab:output file}
 
 Nested refinements (next section) are stored as NetCDF groups inside
 the parent's file (e.g. \texttt{refinements/r0}) with the same layout.
-A nest's coordinates are world-absolute, and attributes record its
+A nest's coordinates are world-absolute and attributes record its
 parent group, its index range within the parent grid, and whether each
 of its horizontal axes is periodic. A nest whose base is elevated
 above the ground additionally stores the two-dimensional pressure
@@ -396,73 +380,62 @@ from which its hydrostatic integration starts.
 
 \subsection{Nested refinement}\label{sect:nested refinement}
 
-A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The design requirement is that a nest be the same cascade carried further: identical, cell for cell, to a root run taken directly to the nest's resolution (\texttt{tests/heavy/test\_nest\_identity.py} verifies this bit-exactly). The nest therefore continues from the stored cascade states of Table \ref{tab:output file}, extracted over the nest region and interpolated trilinearly onto the nest's grids; a parent intended for refinement must store them, because the written fields are composed and projected and cannot be turned back into the states. The
+A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The design requirement is that a nest be the same cascade carried further: identical, cell for cell, to a root run taken directly to the nest's resolution. The nest therefore continues from the stored cascade states of Table \ref{tab:output file}, extracted over the nest region and interpolated trilinearly onto the nest's grids. A parent intended for refinement must therefore store intermediate cascade states, because the final projection is not always invertible. The
 amplitude profiles $C_{\Phi,k}$ are re-derived from the mean profile
 by exactly the computation the root performed, with the root's outer
 scale, $H_h$, and $\lambda$. Because the Haar response is evaluated
-exactly on the profile's own grid (normalization section), this
-reproduces the root's amplitudes class by class, with no discontinuity
+exactly on the profile's own grid (Sect. ADD REF), this
+reproduces the root's amplitudes class by class with no discontinuity
 at the overlap scale. The
-flux anomaly requires no special handling: because the per-class
-renormalization restores the volume mean the field entered with, a
-nest keeps the regional flux anomaly it inherited.
+flux anomaly requires no special handling because the per-class
+renormalization restores the volume mean the field entered with. For a
+nest, flux fields are normalized to the regional flux mean, computed over the nested domain.
 
-The interpolation-compensation factors depend on the output grid, so
+The interpolation compensation factors depend on the final output grid, so
 the deficit belonging to the nest's output differs from the parent's.
 The parent therefore stores each class's added increments ($h$, $q_t$,
 and flux) on that class's own working grid, in the
-\texttt{class\_increments} group of Table \ref{tab:output file}; the
-working grids form a geometric pyramid, so the storage is about
-$1.14\times$ one output-grid field per stored field. From the stored
+\texttt{class\_increments} group of Table \ref{tab:output file}. Because the
+working grids are at coarsened resolution, the storage cost is only approximately 
+$1.14\times$ one output-grid field per stored field. 
+
+From the stored
 increments, the nest accumulates the deficit of its inherited classes
-with $\digamma_j$ evaluated on its own output grid, $\sum_j
+with $\digamma_j$ evaluated on its own output grid through $\sum_j
 (\digamma_j - 1) \Delta_j$, through the same sequence of regrids the
 cascade itself uses. Its cascade then continues the accumulation over
 the nest's own classes, and the composition at the nest's output is
 exactly a root's, because the composition is linear in the increments.
-Without the stored increments, the parent's finest class would arrive
-a factor $\digamma(16)/\digamma(2) \approx 2.7$ too weak in a nest
-three octaves finer. A nest stores the full set of classes, the
-inherited ones cut to its extent followed by its own, so that a nest
-of a nest inherits in exactly the same form as a nest of a root.
 
-The extraction carries a halo on each non-spanning horizontal side,
-of per-class physical width equal to the turbulon support at that
-class, so that turbulons centered outside the nest still reach into it.
-The halo provides context only. It is excluded from every statistic
+Parent fields are extracted including a bufferon each non-spanning horizontal side whose per-class physical width is equal to the turbulon support at that
+class. Turbulons centered outside the nest still reach into it are still simulated so that the component of such turbulons that extends into the interior of the domain is included.
+The buffer is excluded from every statistic
 evaluated over the simulated domain --- the advective-weight
 normalization, the mean absolute multiplier noise, the flux volume
 means, and the bounded projection --- and it is discarded on output.
-Bounds are still enforced across the halo, because the next class
-reads its gradients and its bound factor. Along any periodic axis the
-nest spans entirely, the parent's periodicity is
-preserved with the parent extent as the period, and no halo is used;
-a nest that spans, or whose halo would cross, a non-periodic parent
-boundary is rejected. The vertical is always aperiodic: the halo is
-clipped at the ground and domain top, and turbulon centers may lie
-anywhere between the domain surface and top, with their tails reaching
-into the nest.
+Bounds are still enforced across the buffer because the next class
+reads its gradients and its bound factor. Along any periodic axis, the
+nest spans the parent, and periodicity is
+preserved. A nest that spans, or whose buffer would cross, a non-periodic parent
+boundary (e.g. a parent that is itself a nested simulation) is rejected. Vertically, the buffer is
+clipped at the ground and domain top.
 
-By default a nest draws no new seed. Its per-class seeds continue the
-root's seed sequence where the parent left off, so each nest class
-draws exactly what a root run taken directly to the nest's resolution
-would have drawn. Supplying an explicit seed starts an independent
-stream and forfeits the identity with such a run. Output is
-written as a NetCDF group inside the parent's file, as described in
+By default a nest draws no new seed. Output is
+written as a NetCDF group inside the parent's file as described in
 the previous section.
 
 \section{Complete specification of the comparison analysis}
 \label{sect:comparison analysis}
 
-This section specifies, in full, the analysis behind the comparison of
+This section specifies the analysis behind the comparison of
 STEAM to hydrodynamic simulations and to satellite observations, with
 the intent that it could be reproduced exactly from this description
 together with the two repositories. The hydrodynamic references are
-eleven hosts: the elongated-channel (\texttt{RCE\_large300})
-configurations of nine models from the RCEMIP cloud-resolving ensemble
-\citep{wing2018,wing2020}, and two SAM large-eddy simulations, TWP-ICE
-and GATE. These enter through matched profile statistics, single-level
-distributions, and horizontal scaling functions. The cloud-geometry
+eleven hosts: the elongated channel configurations (\texttt{RCE\_large300})
+of nine models from the RCEMIP cloud-resolving ensemble
+\citep{wing2018,wing2020}, and two SAM large-eddy simulations with boundary conditions derived from the TWP-ICE
+and GATE field campaigns. These enter through matched profile statistics, single-level
+distributions, and horizontal scaling functions. The cloud geometry
 metrics are computed on a separate square-domain STEAM ensemble and
 read against the two SAM cases and a MODIS retrieval.
 
@@ -477,36 +450,24 @@ $6000\times 400$~km$^2$ at 3~km horizontal spacing ($1984$--$2048$
 cells long, $128$--$144$ cells wide), with model-specific stretched
 vertical grids ($74$--$98$ levels to $33$--$39.5$~km; through the free
 troposphere the spacing is 500~m, or 250~m for the three UM variants).
-Each model supplies three snapshots separated by ten days near the end
-of the integration. The mean profiles that drive STEAM average all
-three; the comparison statistics use each model's first snapshot,
-because the figures they enter are about the inter-model spread, which
-is far larger than the spread among a model's own snapshots. Two
+We consider three statistically independent snapshots separated by ten days near the end
+of the integration for each model. Mean profiles and comparison statistics use all three model snapshots. Two
 archived models are excluded: ICON-AES, because its output contains
-neither a height coordinate nor pressure, so moist static energy
-cannot be constructed; and MESONH, because its archived
+neither a height coordinate nor pressure, and MESONH, because its archived
 three-dimensional specific humidity is a documented data error in the
 RCEMIP archive (Known RCEMIP Bugs document, Sect.~17: the field is
 ``much too small in the lower troposphere'' by a height-dependent
-factor), while its column-integrated water and remaining fields are
-physically normal --- the corruption is in the archived field, not the
-simulation, but it contaminates every vapor-dependent statistic used
-here.
+factor).
 
 All humidities are converted to mixing ratios before any further
 computation. Most models archive specific quantities (mass per unit
-moist air, CMOR names \texttt{hus}, \texttt{clw}, \texttt{cli}); these
-are converted as $r = q/(1-q)$, with the vapor-only denominator (the
-neglected condensate contribution to moist-air mass changes $r$ by
-${\lesssim}2\%$ where condensate is largest). SAM archives vapor as a
+moist air, CMOR names \texttt{hus}, \texttt{clw}, \texttt{cli}). SAM archives vapor as a
 mixing ratio directly. Cloud liquid and ice are taken from
-\texttt{clw} and \texttt{cli} (UCLA names ice \texttt{ice});
-precipitating condensate is excluded everywhere, because several
-models do not archive it. Total water is $q_t = r_v + r_c + r_i$ and
+\texttt{clw} and \texttt{cli} (UCLA names ice \texttt{ice}).
+Precipitating condensate is excluded everywhere. Total water is $q_t = r_v + r_c + r_i$ and
 moist static energy is $h = c_p T + g z + L_v r_v$ with
 $c_p = 1004$~J\,kg$^{-1}$\,K$^{-1}$, $g = 9.81$~m\,s$^{-2}$,
-$L_v = 2.5\times 10^6$~J\,kg$^{-1}$ (STEAM's constants, applied
-identically to every model).
+$L_v = 2.5\times 10^6$~J\,kg$^{-1}$.
 
 Two archives require special handling. (i)~The ICON files carry only a
 level \emph{index} (top-down) as their vertical coordinate; physical
@@ -515,8 +476,7 @@ distributed alongside them, $z = (f_{\mathrm{mse}} - 1004.64\,T -
 2500800\,q_v + 333700\,q_i)/9.80665$ (the constants of that archive,
 used only for this recovery), averaged horizontally at one snapshot;
 the level-wise horizontal standard deviation of the recovered height
-is required to be below 50~m. (ii)~UCLA-CRM stores height as the
-fastest dimension and includes a below-ground ghost level, which is
+is required to be below 50~m. (ii)~UCLA-CRM includes a below-ground ghost level, which is
 dropped. Where a model archives no pressure (SCALE, UCLA-CRM), the
 RCEMIP analytic-sounding surface pressure of 1014.8~hPa is used to
 initialize STEAM; otherwise the horizontal mean of the model's
@@ -528,33 +488,30 @@ The two large-eddy cases are SAM simulations on the same geometry,
 $2048^2$ cells at 100~m horizontal spacing over 204.8~km, with
 stretched vertical grids of ${\sim}255$ levels (50~m near the surface
 through 100~m across the free troposphere). One snapshot is used from
-each. TWP-ICE is a driven, sheared deep-convection case; the last
-archived snapshot (model day 20) is used. SAM archives its
+each. For TWP-ICE, the last
+archived snapshot (model day 20) is used, while for GATE, hour 23 is used,
+the last hour with complete data. SAM archives its
 (non-frozen) moist static energy directly, in temperature units, so
 $h$ is $c_p$ times the archived field with nothing reconstructed;
 vapor and condensate are mixing ratios in g\,kg$^{-1}$, and $q_t$
 excludes the archived precipitating species by the same convention as
-above. GATE is idealized maritime deep convection; hour 23 is used,
-the last hour with complete data. GATE archives only the combined
-condensate, so its liquid/ice split is reconstructed with SAM's own
-linear partition --- all liquid at 0$^\circ$C, all ice at
-$-38\,^\circ$C, linear between --- applied at native resolution before
-any coarsening, because the clipped ramp is nonlinear in temperature
-and does not commute with averaging. GATE's $h$ is built as
+above. GATE archives only the combined
+condensate, so its liquid/ice split is reconstructed with a
+linear partition that is all liquid at 0$^\circ$C and all ice at
+$-38\,^\circ$C. This partitioning is applied at native resolution before
+any coarsening. GATE's $h$ is built as
 $c_p T + g z + L_v r_v$ from the archived temperature.
 
 \subsection{STEAM configuration}
 \label{ssect:steam config}
 
-One deliberately untuned configuration is used throughout; nothing is
+With the exception of the mean profiles, no STEAM inputs are
 calibrated to any individual host. The spheroscale is a constant 10~m,
 with turbulons isotropic below it
 (\texttt{piecewise\_isotropic\_below\_spheroscale}); the Hurst
 exponents, $\lambda$, the turbulon envelope, the cascade density, and
 the flux noise parameters $\alpha$ and $\beta$ are those of
-Sect.~\ref{ssect:steam algorithm spec}. The one swept parameter is the
-flux noise amplitude: every comparison is run, and every figure drawn,
-at both $c = 0.05$ and $c = 0.17$. The simulated depth is 20~km and
+Sect.~\ref{ssect:steam algorithm spec}. The two values $c = 0.05$ and $c = 0.17$ are used for the flux noise amplitude throughout the comparison. The simulated depth is 20~km and
 the input profiles are sampled at 50~m. The run sets are listed in
 Table~\ref{tab:steam runs}.
 
@@ -585,8 +542,7 @@ reach only 5~km depth.}\label{tab:steam runs}
 % in-cascade flux compensation -- refit before quoting C_1 values for
 % these runs.
 
-The scalar bounds are anchored to a 300~K sea surface --- the
-prescribed sea surface temperature of the channel configuration,
+The scalar bounds are anchored to a 300~K sea surface, prescribed by the RCEMIP channel configuration, and
 applied to all hosts: $q_t \in [0,\
 q_{\mathrm{sat}}(300\,\mathrm{K}, p_s)]$, since no parcel can acquire
 more vapor than saturated contact with the sea surface provides, and
@@ -594,131 +550,89 @@ $h \in [\min_z \langle h \rangle(z) - c_p \Delta T_{\max},\
 \max(c_p \cdot 300\,\mathrm{K} + L_v\,
 q_{\mathrm{sat}}(300\,\mathrm{K}, p_s),\ \max_z \langle h
 \rangle(z))]$, where the upper bound is the larger of the surface
-saturation moist static energy and the mean-profile maximum (the $gz$
-term places the stratospheric mean above any surface value), and the
-lower bound allows a maximum temperature deficit of
+saturation moist static energy and the mean-profile maximum. The
+lower bound for $h$ allows a maximum temperature deficit of
 $\Delta T_{\max} = 10$~K below the coldest point of the mean profile.
 % NOTE (Claude, 2026-08-06): the 300 K anchor is what the code applies
 % to TWP-ICE and GATE as well; if a host-specific surface temperature
 % is preferred for those two, generate.py is the place.
+% Thomas: yeah this is not ideal but fine. You can make note of this decision and then delete this comment.
 
-One matched run is made per host per amplitude, on the host's own
-domain at twice its horizontal spacing, driven by that host's mean
-profiles and surface pressure; nothing else varies across the set. The
-channels are pinned to a single grid rather than tracking each host's
-own $1984$--$2048 \times 128$--$144$ cells: the hosts differ by at
-most 3\% in extent, and the chosen extent makes $L$ a power-of-two
-multiple of $\Delta x$, so the finest size class is $2\Delta x$
-exactly. TWP-ICE and GATE match their hosts' 204.8~km extent. The
-outer scale is one quarter of the long dimension for the channels and
-half for the LES cases; the channels' 384~km cross-channel extent is
-narrower than their $L$, so the coarsest classes are periodically
-folded onto it (working-grids section). The vertical spacing is not a
-free choice: with a constant spheroscale it follows from $\Delta x$
-through the aspect-ratio scaling, giving 256.8~m (78 levels) for the
-channels and 38.8~m (516 levels) for the LES cases. Each run has a
-distinct fixed seed, recorded in the generation script.
 
-The square ensemble provides the cloud-geometry statistics: ten
-members per amplitude, driven by the UM RA1-T profile, the least
-cloudy of the comparison set. The two amplitude sets share seeds
-member for member, so they differ only in $c$. Each member carries
+The square ensemble provides the cloud geometry statistics reported in Sect. ADD REF using ten
+members per value for $c$, with mean profiles set by the UM RA1-T profile, which has the lowest cloud fraction of the hydrodynamic ensemble. The two flux amplitude sets share seeds
+member for member, so simulation pairs are created that differ only in $c$. For each square member, 
 the two nested refinements of Table~\ref{tab:steam runs}
-(Sect.~\ref{sect:nested refinement}), the inner one's finest class
-approaching the 10~m spheroscale. The archived product per member is
+(Sect.~\ref{sect:nested refinement}) are also simulated for visualization. The archived product per member is
 the condensate ($q_c$, $q_i$) of the parent and both nests, plus the
 parent's two-dimensional vertically integrated optical depth
-(Sect.~\ref{ssect:albedo masks}), stored unthresholded.
-
-The visualization runs enter no statistic; they exist to be looked at
-closely, with the finest class at 20~m one octave above the
-spheroscale.
+(Sect.~\ref{ssect:albedo masks}) and are stored unthresholded.
 
 \subsection{Profile statistics and distributions}
 \label{ssect:matched stats}
 
 Profiles and distributions are compared at matched resolution.
-Horizontally, the host is block-averaged $2\times 2$ onto STEAM's
-spacing. Vertically, neither grid is free to move --- STEAM's follows
-from $\Delta x$ and the host's is stretched --- so a per-level rule is
-applied: at each host level, whichever field is locally finer is
+Horizontally, the hydrodynamic host is block-averaged $2\times 2$ onto STEAM's
+spacing. Vertically, a per-level rule is
+applied to ensure consistent resolution. At each host level, whichever field is locally finer is
 block-averaged over the nearest integer number of its own levels that
 brings the two spacings closest together. The factor varies with
 height and can point at either field. For TWP-ICE and GATE, STEAM is
 the finer field everywhere and is averaged over one level near the
-surface and three through the free troposphere; for the channels the
+surface and three through the free troposphere. For the channels the
 host is averaged near the surface and STEAM aloft. The residual
 mismatch left by the nearest integer stays within about $1.5\times$.
-Comparison levels are the host's own, clipped to STEAM's 20~km top.
+Comparison levels are the host's own and are clipped to STEAM's 20~km domain top.
 
 The per-level statistics are the horizontal standard deviations of
 $h$, $q_t$, $q_c$, and $q_i$, and cloud fraction, defined as the areal
 fraction of cells holding at least 0.01~g\,kg$^{-1}$ of
-non-precipitating condensate. The threshold is applied after
-coarsening: the coarsened cell value is what the resolved field says
-is there. For the channels, one curve per host and per run is drawn;
-the comparison is against the spread the nine hosts show among
-themselves.
+non-precipitating condensate, with the threshold is applied after
+coarsening. 
 
-Distributions are drawn at the levels nearest 5~km and 10~km. For $h$
+Distributions are drawn at single model levels nearest 5~km and 10~km. For $h$
 and $q_t$, the samples at a level are histogrammed in 80 equal-width
-bins spanning the pooled range of all compared cases (no
-percentile capping, which would truncate the tails that are precisely
-the point of the comparison), normalized to a density. For the
-condensates, only cloudy cells enter, in 50 logarithmic bins upward
-from the cloud threshold: most cells hold no condensate at all, and a
-density over everything would be a spike at zero with no visible
-shape.
+bins spanning the pooled range of all compared cases and normalized to a density. For the
+condensates, only cloudy cells are binned using 50 logarithmically-spaced bins starting at $0.01\,\mathrm{g/kg}$.
 
 \subsection{Scaling functions}
 \label{ssect:scaling functions}
 
 The horizontal scaling functions are computed at native resolution on
-both sides, unlike the statistics above: coarsening
-would discard exactly the small-scale structure a scaling function
-measures. The host and STEAM curves therefore begin at different
+for all models. The host and STEAM curves therefore begin at different
 smallest lags --- 200~m against 400~m for TWP-ICE, 6~km against 12~km
 for the channels --- and where they overlap they measure the same
 physical scales. Scaling functions are computed for TWP-ICE and the
 nine channels.
 
-The fluctuation measure is the order-one Haar fluctuation: at lag
-$\ell$, the mean of the field over the upper half of an $\ell$-wide
-window minus the mean over the lower half, with
-$F_1(\ell) = \langle |\Delta\Phi_\ell| \rangle$. For $h$ and $q_t$ at
+The fluctuation measure is the one dimensional first order Haar fluctuation, defined for lag
+$\ell$ as the mean of the field over the upper half of an $\ell$-wide
+window minus the mean over the lower half:
+$$F_1(\ell) = \langle |\Delta\Phi_\ell| \rangle.$$
+For $h$ and $q_t$ at
 the level nearest 5~km and 10~km, the transform runs along the longer
-horizontal axis, periodically, with the shorter axis pooled as
-independent rows in a single call. The level mean is subtracted first
+horizontal axis with periodic boundary conditions. Ensemble means are computed over the orthogonal horizontal dimension and snapshot index. The level mean is subtracted first
 and the computation is done in double precision. The Haar kernel is
-zero-mean, so the subtraction changes nothing analytically; it
-matters because $h$ is $O(3\times 10^5)$~J\,kg$^{-1}$ while its
-fluctuations are $O(10^3)$, and differencing half-window means at
-that ratio is where single precision fails. The local slope shown
+zero-mean, so the subtraction changes nothing analytically but reduces numerical error. The local slope shown
 alongside each curve is the least-squares slope of $\log_{10} F_1$
 against $\log_{10}\ell$ over the half-decade window centered on each
-lag.
+lag. Haar computations use the \verb|scaleinvariance| function \verb|fluctuation_function|. %THOMAS: is this the right function name?
 
 \subsection{Cloud masks and albedo thresholds}
 \label{ssect:albedo masks}
 
 Cloud masks are thresholds of visual albedo. Column optical depth
 $\tau$ is computed from the vertically integrated liquid and ice water
-with the SAM bulk-optics relationships (as implemented in the
-\texttt{cloudyview} package), precipitating species excluded, and
-converted to the conservative-scattering two-stream albedo for an
-overhead sun, $A = \tau/(\tau + 2/(1-g))$ with asymmetry parameter
+using a parameterization implemented in the
+\texttt{cloudyview} package. Precipitating species are excluded. Optical depth is
+converted to two-stream albedo for an
+overhead sun using $A = \tau/(\tau + 2/(1-g))$ with asymmetry parameter
 $g = 0.85$. A column is cloudy where $A$ exceeds a threshold $R$, at
-each of $R = 0.1$, $0.2$, $0.3$ --- the reflectance thresholds of the
-satellite retrievals of \citet{dewitt2026acp}, so the exponents below
-are directly comparable to that paper's. $A$ is monotonic in $\tau$,
+each of $R = 0.1$, $0.2$, $0.3$. $A$ is monotonic in $\tau$,
 so the three masks are equivalently $\tau > 1.48$, $3.33$, $5.71$.
-Every metric is computed independently at each threshold. The STEAM
-masks are on the square ensemble's 1~km output grid; the SAM masks are
-at the native 100~m --- the same native-resolution reasoning as the
-scaling functions, at the cost that the two mask sets span different
-scale ranges.
+Every metric is computed independently at each threshold on the model's native grid resolution.
 
-\subsection{Cloud-geometry metrics}
+\subsection{Cloud geometry metrics}
 \label{ssect:cloud geometry}
 
 Four metrics are computed from each mask set, as defined in the main
@@ -727,78 +641,33 @@ perimeter against size across objects; the ensemble fractal dimension
 $D_e$, the correlation dimension of the cloud-edge point set; and the
 area and nested-perimeter size-distribution exponents
 $\tau_{\mathrm{area}}$ and $\tau_{\mathrm{per}}$. All four are
-computed with \texttt{objscale} \citep{dewitt2026acp} at its default
-parameters throughout, following \citet{dewitt2024acp}; no fitting
-range, bin count, or threshold is overridden.
+computed with \texttt{objscale} \citep{dewitt2025objscale} at its default
+parameters throughout, following \citet{dewitt2024acp} and \citet{dewitt2026acp}.
 
 The ten members of an amplitude set are pooled into one ensemble and
-passed to \texttt{objscale} in a single call per metric. These
-estimators are regressions, not linear reductions, so computing per
-member and then averaging would give a different, and wrong, answer.
-The correlation-integral sampling is thinned tenfold for the pooled
-square set and a hundredfold for the MODIS archive, both of which
-oversample their domains; the single-snapshot SAM cases are not
-thinned. Wherever \texttt{objscale} warns that a fit rests on
-too few populated bins or too narrow a range of scales, the warning is
-recorded beside that number and carried into the comparison table as
-italics. The two SAM cases rest on one snapshot each: the two
-dimensions are measured per object and survive that, while the size
-distributions are counts per size bin and do not, so every SAM
-size-distribution entry carries the italic caveat.
+passed to \texttt{objscale} in a single call per metric. 
+The correlation integral sampling is thinned tenfold for the pooled
+square set and a hundredfold for the MODIS archive, whereas the single-snapshot SAM cases are not
+thinned. 
 
-The observational reference is recomputed rather than quoted. The 72
-MODIS granules behind Table~1 of \citet{dewitt2026acp} are run through
-the same \texttt{objscale} calls at the same thresholds, starting from
-the Level-1B files, with a reader written from the file specification
-rather than ported from that paper's code, so these numbers reproduce
-the published table rather than restate it.
-
+The observational reference is recomputed using the same dataset and methodology used in \citet{dewitt2026acp}, with the exception of a reflectivity adjustment for viewing angle, described below. 
 Band~1 (0.645~$\mu$m) reflectance is read from the 250~m detectors
 aggregated onto the 1~km grid. Geolocation, solar geometry, and
-per-pixel footprints come from the matching MOD03 granules. A pixel at
+per-pixel footprints come from the matching \verb|MOD03| granules. A pixel at
 the swath edge covers about $4.8\times 2.0$~km against $1\times 1$~km
 at nadir, so footprints are passed to \texttt{objscale} per pixel,
 measured as great-circle distances between neighboring pixel centers.
 Along-track distances are taken only between rows of the same
-ten-detector scan: adjacent scans overlap at the swath edge (the
-bow-tie), and a difference across a scan boundary measures the
-overlap rather than the pixel. The swath is trimmed at $60^\circ$
-sensor zenith, a cut that is a contiguous column window; the windows
-are intersected over the archive so that every granule enters on one
-common grid, which the ensemble estimators require.
+ten-detector scan. The swath is trimmed at $60^\circ$
+sensor zenith.
 
-Saturated detectors are kept at the largest representable
-reflectance, since the scene was brighter than the band records;
-every other reserved code enters as missing data. The object-based
-estimators receive the missing cells as data boundaries, so an object
-touching one is dropped as truncated rather than counted as a small
-complete cloud. The correlation dimension has no notion of a data
-boundary and receives a zero-filled copy.
+With the exception of the correlation dimension, for which missing data are set to zero, any missing data are passed to the \verb|objscale| function as \verb|nan|.
 
-The stored L1B reflectance is $\rho\cos\theta_0$: the solar zenith
-angle is not divided out. Whether to divide it out is a real choice,
-and both conventions are computed. Dividing it out gives a
-bidirectional reflectance factor comparable to the overhead-sun
-albedo of the model masks; leaving it is the convention of the
-published table. The exponents move by at most 0.03 between the two,
+The stored L1B reflectance is $R\cos\theta_0$ where $R$ is reflectivity, and so we obtain $R$ by dividing the data product by the pixel-by-pixel cosine of the solar zenith angle. This is a departure from \citet{dewitt2026} who did not divide by this factor. The exponents move by at most 0.03 between the two methodologies,
 while cloud cover moves by up to a factor of two (the granules were
-taken at $60$--$69^\circ$ solar zenith), so the comparison table uses
-the corrected convention, cloud cover being one of its columns. The
-reproduction check runs uncorrected, like for like against the
-published values, and matches the nine cells that paper reports to a
-mean absolute difference of 0.011. Pixels beyond $84^\circ$ solar
-zenith are excluded rather than corrected.
+taken at $60$--$69^\circ$ solar zenith). All granules have a solar zenith angle of at most $69^\circ$.
 
-The comparison table has one section per threshold, with the
-retrieval ruled off above the four simulated cases (the two SAM cases
-and STEAM at both amplitudes). Because the retrieval is recomputed,
-cloud fraction and the area exponent, which the published table does
-not report, are filled in as well. An italic entry is one whose fit
-\texttt{objscale} warned about. A bold entry is the simulated case
-closest to the retrieval in that column, together with any case
-within 0.01 of it --- the table's display precision --- with
-distances taken on the rounded values, so the rule can be checked
-against the printed page.
+We do not report exponents for cases failing the statistical validity criteria proposed by \citet{dewitt2024b,dewitt2026}. These cases are simply identified when \verb|objscale| emits warnings.
 
 \bibliographystyle{plainnat}
 \bibliography{sources}
