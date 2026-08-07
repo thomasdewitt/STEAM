@@ -666,13 +666,12 @@ ten-detector scan. The swath is trimmed at $60^\circ$
 sensor zenith. The ensemble estimators take a single footprint grid
 for every array, so the per-granule footprints are averaged over the
 72 granules. The scan geometry repeats granule to granule, and the
-spread about that mean is measured to be negligible.
+spread about that mean is measured and found to be negligible.
 
-Saturated pixel detections, where pixels are brighter than the device is capable of recording, are set to value 1. With the exception of the correlation dimension, for which missing data are set to zero, missing data are passed to the \verb|objscale| function as \verb|nan|.
+Saturated pixel detections, where pixels are brighter than the device is capable of recording, are set to the maximum allowable reflectivity value. With the exception of the correlation dimension, for which missing data are set to zero, missing data are passed to the \verb|objscale| function as \verb|nan|.
 
-The stored L1B reflectance is $R\cos\theta_0$ where $R$ is reflectivity, and so we obtain $R$ by dividing the data product by the pixel-by-pixel cosine of the solar zenith angle. This is a departure from \citet{dewitt2026} who did not divide by this factor. The exponents move by at most 0.03 between the two methodologies,
-while cloud cover moves by up to a factor of two (the granules were
-taken at $60$--$69^\circ$ solar zenith). All granules have a solar zenith angle of at most $69^\circ$.
+The stored L1B reflectance is $R\cos\theta_0$ where $R$ is reflectivity, and so we obtain $R$ by dividing the data product by the pixel-by-pixel cosine of the solar zenith angle. This is a departure from \citet{dewitt2026} who did not divide by this factor. The exponents move by at most 0.04 between the two methodologies,
+while cloud cover moves by up to a factor of 2.1. All granules have a solar zenith angle of at most $69^\circ$.
 
 We do not report exponents for cases failing the statistical validity criteria proposed by \citet{dewitt2024b,dewitt2026}. These cases are simply identified when \verb|objscale| emits warnings.
 
