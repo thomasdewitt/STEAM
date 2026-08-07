@@ -533,6 +533,11 @@ def _k_z(anisotropy, k, spheroscale):
     )
 
 
+def _f32_ulp(value):
+    """One float32 ULP at `value` -- the most a cast to float32 can move it."""
+    return float(np.spacing(np.float32(abs(value))))
+
+
 def simulate(
     h_profile,
     qt_profile,
@@ -712,19 +717,26 @@ def simulate(
     h_profile_max = float(np.max(h_profile))
     qt_profile_min = float(np.min(qt_profile))
     qt_profile_max = float(np.max(qt_profile))
-    if h_min > h_profile_min:
+    # The cast above can move a level by half a float32 ULP, and it rounds
+    # outward as often as inward. A caller that sets its bounds from the
+    # float64 profile it holds -- which is what the anchored bounds of the
+    # comparison analysis do -- then lands a rounding step inside the cast
+    # profile's range and trips these guards on dust: 0.009 J/kg at
+    # h ~ 4e5, or 1e-8 K. One ULP of slack costs the guards nothing, since a
+    # genuinely misconfigured bound misses by orders more than this.
+    if h_min > h_profile_min + _f32_ulp(h_profile_min):
         raise ValueError(
             f"h_min ({h_min}) must be <= min(h_profile) ({h_profile_min})"
         )
-    if h_max < h_profile_max:
+    if h_max < h_profile_max - _f32_ulp(h_profile_max):
         raise ValueError(
             f"h_max ({h_max}) must be >= max(h_profile) ({h_profile_max})"
         )
-    if qt_min > qt_profile_min:
+    if qt_min > qt_profile_min + _f32_ulp(qt_profile_min):
         raise ValueError(
             f"qt_min ({qt_min}) must be <= min(qt_profile) ({qt_profile_min})"
         )
-    if qt_max < qt_profile_max:
+    if qt_max < qt_profile_max - _f32_ulp(qt_profile_max):
         raise ValueError(
             f"qt_max ({qt_max}) must be >= max(qt_profile) ({qt_profile_max})"
         )
