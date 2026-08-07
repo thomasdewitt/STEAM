@@ -534,13 +534,15 @@ LES-matched & $1024^2$ & 200~m & $204.8\times 204.8$~km$^2$ & 102.4~km & 2 hosts
 Square ensemble & $2048^2$ & 1~km & $2048\times 2048$~km$^2$ & 1024~km & 10 members $\times$ 2 amplitudes \\
 \quad nest A & $512^2$ & 62.5~m & $32\times 32$~km$^2$, full depth & --- & one per member \\
 \quad nest B & $1024^2$ & 7.8125~m & $8\times 8$~km$^2$, $z = 1$--5~km & --- & one per member \\
-Visualization & $2048\times 768$ & 10~m & $20.48\times 7.68$~km$^2$ & 20.48~km & 3 amplitudes \\
+Visualization & $2048\times 1024$ & 20~m & $40.96\times 20.48$~km$^2$ & 40.96~km & 3 amplitudes \\
+\quad nest & $512^2$ & 5~m & $2.56\times 2.56$~km$^2$, full depth & --- & one per amplitude \\
 \hline
 \end{tabular}
 \caption{STEAM run sets of the comparison analysis. Nests continue
 their parent's cascade and have no outer scale of their own. The
 visualization runs add a third, weaker amplitude ($c = 0.02$) and
-reach only 5~km depth.}\label{tab:steam runs}
+reach only 5~km depth; their nest is the one simulation whose finest
+size class, $2\Delta x = 10$~m, reaches the spheroscale.}\label{tab:steam runs}
 \end{table}
 % NOTE (Claude, 2026-08-06): H_h and lambda are read from
 % steam.constants at run time and are an active work area (the H_h
