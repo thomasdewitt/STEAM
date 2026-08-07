@@ -274,9 +274,17 @@ As an additional point of comparison, we compute the fractal metrics for a selec
 
 STEAM simulations are constructed with a domain geometry that is broadly similar to MODIS, using a $1\,\unit{km}$ horizontal grid spacing in a square domain spanning $2048\times 2048\,\unit{km}$. Both are comparable to the resolution and extent of the MODIS imagery, which has a nadir resolution of approximately $1\,\unit{km}$ and a domain size of (FILL THIS IN). For each value of the flux perturbation magnitude $c$, we simulate ten independent STEAM volumes.
 
-For both STEAM and the giga-LES volumes, simulated reflectivity fields are constructed by first computing a three-dimensional optical depth $\tau$ field using the following parameterization, the same used by \citet{dewitt2024}:
+For both STEAM and the giga-LES volumes, simulated albedo fields are constructed by first computing a three-dimensional optical depth field from the liquid and ice water contents using the bulk-optics relationships of SAM, as implemented in the \verb|cloudyview| package and matching the treatment of \citet{dewitt2024}:
+\begin{align}
+  \tau = (\text{PLACEHOLDER}). \label{eq:bulk optics}
+\end{align}
+% CLAUDE: placeholder -- the exact bulk-optics relationships live in cloudyview (glimpse.py / optics code) on the other machine; fill in the liquid and ice extinction formulas (LWP/IWP with effective radii) from there.
 
-From this three-dimensional optical depth field, two-stream albedo is computed using (citation):
+The optical depth is then summed vertically within each column to obtain a column optical depth $\tau_c$, from which visual albedo is computed using the two-stream approximation for a conservatively scattering cloud layer under an overhead sun \citep[e.g.,][]{petty2006}:
+\begin{align}
+  A = \frac{(1-g)\,\tau_c}{(1-g)\,\tau_c + 2}, \label{eq:two stream albedo}
+\end{align}
+with asymmetry parameter $g = 0.85$. With the solar zenith adjustment described in the supplement, MODIS reflectivity and model albedo are directly comparable for clouds. For both, cloud masks are defined by thresholding the albedo or reflectivity for thresholds $R \in \{0.1, 0.2, 0.3\}$, so that the masks are directly comparable to satellite cloud masks defined by thresholding reflectance \citep{dewitt2026}. Because $A$ increases monotonically with $\tau_c$, each albedo threshold is equivalent to a threshold in column optical depth, with the three values of $R$ corresponding to $\tau_c \approx 1.5$, $3.3$, and $5.7$.
 
 
 As shown in Fig. (), size distributions for individual cloud perimeters and areas follow a power-law distribution over the entire estimated range. Fitted exponents range from () to (), within the range observed for real clouds \citep{dewitt2024}. Fractal dimensions computed from the large domain simulations lie between () and () for the individual fractal dimension and () and () for the ensemble fractal dimension. Both are consistent with values obtained for real clouds in prior studies (citations). 
