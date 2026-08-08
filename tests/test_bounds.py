@@ -4,6 +4,8 @@ import importlib
 
 import numpy as np
 import netCDF4
+import pytest
+import torch
 
 sm = importlib.import_module("steam.simulate")
 
@@ -49,6 +51,85 @@ def test_projection_restores_bounds_and_preserves_level_means():
 
     # Levels with no violations are bit-identical
     np.testing.assert_array_equal(perturbation[:, :, 0], untouched)
+
+
+def _violating_projection_case(seed=3, shape=(96, 96, 24)):
+    """A float32 perturbation with most levels driven past a bound.
+
+    Shaped like the production qt field, which is what makes the projection
+    expensive: an amplitude ladder that grows with height against a lower
+    bound the levels aloft press hard on.
+
+    The ladder tops out at 0.3 of the bound span deliberately. Mean
+    preservation is only guaranteed while the field stays inside the
+    bisection's [-(hi-lo), +(hi-lo)] bracket, and the cascade's own bound
+    taper is what keeps a real field there; a synthetic field with several
+    spans of amplitude falls outside it and BOTH paths then lose the mean
+    identically, which tests nothing about the dispatch.
+    """
+    nx, ny, nz = shape
+    lo, hi = 0.0, 0.03
+    rng = np.random.default_rng(seed)
+    mean_1d = np.linspace(0.018, 0.0004, nz).astype(np.float32)
+    amp = np.linspace(0.05, 1.2, nz).astype(np.float32) * (hi - lo) * 0.25
+    perturbation = (rng.standard_normal(shape, dtype=np.float32) * amp
+                    ).astype(np.float32)
+    return perturbation, mean_1d, lo, hi
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_projection_cuda_matches_cpu_to_a_few_ulp():
+    """The GPU dispatch is the same answer, not a second one.
+
+    Both solves run in float64 — the point of paying that traffic on the card
+    — so they agree to a fraction of a float32 ULP of the field, and hold the
+    two properties the projection exists for: bounds pointwise, and each
+    level's horizontal mean unchanged.
+    """
+    perturbation, mean_1d, lo, hi = _violating_projection_case()
+    before = (perturbation.astype(np.float64)
+              + mean_1d.astype(np.float64)).mean(axis=(0, 1))
+
+    host = perturbation.copy()
+    _project_onto_bounds(host, mean_1d, lo, hi, device='cpu')
+    gpu = perturbation.copy()
+    _project_onto_bounds(gpu, mean_1d, lo, hi, device='cuda')
+
+    ulp = float(np.spacing(np.float32(hi)))
+    assert np.abs(host - gpu).max() <= 4 * ulp
+
+    for name, field in (('cpu', host), ('cuda', gpu)):
+        full = field.astype(np.float64) + mean_1d.astype(np.float64)
+        # One float32 ULP of slack, both paths: the solve clips in float64 to
+        # exactly the bound and the float32 store rounds it back out. That is
+        # the reassembly residue _compose_output clamps after this call, not a
+        # failure of the projection.
+        assert full.min() >= lo - ulp and full.max() <= hi + ulp, name
+        drift = np.abs(full.mean(axis=(0, 1)) - before) / (hi - lo)
+        assert drift.max() < 1e-8, f"{name}: level-mean drift {drift.max():.2e}"
+
+    # The case has to actually exercise the solve, or the assertions above
+    # are vacuous.
+    assert not np.array_equal(host, perturbation)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_projection_cuda_leaves_in_bounds_levels_bit_identical():
+    """Same guarantee the host path gives by taking its `continue`."""
+    perturbation, mean_1d, lo, hi = _violating_projection_case()
+    perturbation[:, :, :4] = 0.0          # four levels that cannot violate
+    gpu = perturbation.copy()
+    _project_onto_bounds(gpu, mean_1d, lo, hi, device='cuda')
+    np.testing.assert_array_equal(gpu[:, :, :4], perturbation[:, :, :4])
+    assert not np.array_equal(gpu[:, :, 4:], perturbation[:, :, 4:])
+
+
+def test_projection_cuda_without_gpu_raises(monkeypatch):
+    """device='cuda' with no usable GPU is an error, never a silent fallback."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    perturbation, mean_1d, lo, hi = _violating_projection_case(shape=(8, 8, 4))
+    with pytest.raises(RuntimeError, match="cuda"):
+        _project_onto_bounds(perturbation, mean_1d, lo, hi, device='cuda')
 
 
 def test_projection_noop_when_within_bounds():

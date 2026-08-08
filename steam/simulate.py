@@ -941,8 +941,10 @@ def simulate(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    h_3d = _compose_output(h_pert, deficit_h, h_mean_final, h_min, h_max)
-    qt_3d = _compose_output(qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max)
+    h_3d = _compose_output(h_pert, deficit_h, h_mean_final, h_min, h_max,
+                           device=device)
+    qt_3d = _compose_output(qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max,
+                            device=device)
     del deficit_h, deficit_qt
 
     flux_3d = _compose_flux_output(flux_field, deficit_flux)
@@ -2527,13 +2529,127 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
         list(pool.map(solve_level, range(nz)))
 
 
-def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=None):
+def _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min, phi_max,
+                              window=None):
+    """_project_onto_bounds on the GPU, a batch of z-levels at a time.
+
+    The same solve as the host path and in the same float64: the levels are
+    independent and every reduction is within a level, so the field goes to
+    the card a slab of levels at a time, exactly as _bounded_amplitude_add_cuda
+    does. The bisection is 60 passes over the slab — sub, clamp, reduce — so it
+    is memory-bound rather than FLOP-bound, and float64 costs 1.3-1.4x the
+    float32 form on this card while a float32 slab costs up to 2 ULP on 16% of
+    a qt field. Paying the traffic is the better trade, and it is what makes
+    this a dispatch rather than a second answer (measured 2026-08-07 at
+    2048^2 x 211: h bit-identical to the host, qt within 0.06 ULP on 0.25% of
+    cells, level-mean preservation identical to the host's 6.4e-10 of the
+    bound span).
+
+    Batch size comes from cuda_level_batch_size at itemsize 8, so it is a
+    function of the field shape alone and therefore reproducible; two slabs
+    are live (the field and one scratch) against the three it budgets.
+
+    Levels with no violation are left BIT-identical, as on the host, and they
+    are also skipped: the batch is compacted to its violating levels before
+    the bisection, so the 60 passes cost what the work is worth. Without that
+    the dispatch LOSES on h, whose levels are mostly interior — measured 5.10 s
+    on the host against 6.02 s on the card at the production square, while qt
+    over the same field went 82.90 -> 6.28 s.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "_project_onto_bounds: device='cuda' requested but torch.cuda "
+            "is unavailable"
+        )
+    # Return the caching allocator's reserved-but-idle blocks so mem_get_info
+    # sees the true free VRAM. This runs immediately after the cascade, which
+    # leaves several GiB reserved, and cuda_level_batch_size refuses a short
+    # batch rather than shrinking it (a smaller batch would change the
+    # realization) — without this it raises at the production square on
+    # memory nothing is actually using.
+    torch.cuda.empty_cache()
+    lo = float(phi_min)
+    hi = float(phi_max)
+    width = hi - lo
+    nx, ny, nz = perturbation_field.shape
+    levels_per_batch = cuda_level_batch_size(nx, ny, nz, 8)
+    for z_start in range(0, nz, levels_per_batch):
+        z_stop = min(z_start + levels_per_batch, nz)
+        _project_onto_bounds_cuda_levels(
+            perturbation_field[:, :, z_start:z_stop], mean_1d[z_start:z_stop],
+            lo, hi, width, window,
+        )
+
+
+def _project_onto_bounds_cuda_levels(perturbation_field, mean_1d,
+                                     lo, hi, width, window):
+    """One batch of z-levels of :func:`_project_onto_bounds_cuda`.
+
+    Every per-level scalar — the target mean, the bisection bracket, the
+    violation flag — is a (n_levels,) device vector, so the call synchronizes
+    with the host only at the write-back. The host path's early
+    ``mu_high - mu_low < 1e-12 * width`` break is not reproduced: it is a
+    per-level exit and the batch runs to 60 either way, which is the same
+    answer to well past float64 resolution (60 halvings of a 2*width bracket
+    leave 2e-18 * width).
+    """
+    mean_column = torch.from_numpy(
+        np.ascontiguousarray(mean_1d)).to('cuda').to(torch.float64)
+    e = torch.from_numpy(perturbation_field).to('cuda').to(torch.float64)
+    e += mean_column
+
+    # Which levels the host would not have taken its `continue` on. Computed
+    # on the same float64 field the host tests, so the two agree level for
+    # level. The batch is then compacted to those levels: everything below is
+    # per-level, so dropping the interior ones changes no answer and is the
+    # difference between winning and losing on a mostly-interior field.
+    violating = torch.nonzero(
+        (e.amin(dim=0).amin(dim=0) < lo) | (e.amax(dim=0).amax(dim=0) > hi),
+        as_tuple=True)[0]
+    if violating.numel() == 0:
+        return
+    if violating.numel() < e.shape[2]:
+        e = e.index_select(2, violating).contiguous()
+        mean_column = mean_column.index_select(0, violating)
+
+    scratch = torch.empty_like(e)
+    inner = _inner_view(e, window)
+    scratch_inner = _inner_view(scratch, window)
+    n_points = float(inner.shape[0] * inner.shape[1])
+    target = _level_mean(inner, n_points)
+
+    nz = e.shape[2]
+    mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
+    mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
+    for _ in range(60):
+        mu = 0.5 * (mu_lo + mu_hi)
+        torch.sub(e, mu, out=scratch).clamp_(lo, hi)
+        positive = _level_mean(scratch_inner, n_points) > target
+        mu_lo = torch.where(positive, mu, mu_lo)
+        mu_hi = torch.where(positive, mu_hi, mu)
+
+    torch.sub(e, 0.5 * (mu_lo + mu_hi), out=scratch).clamp_(lo, hi)
+    scratch -= mean_column
+    # Back to the caller's dtype the way the host path does it: the float64
+    # level is assigned into a float32 array, which rounds to nearest. Only
+    # the violating levels come back down, and only they are written.
+    projected = scratch.cpu().numpy().astype(perturbation_field.dtype)
+    perturbation_field[:, :, violating.cpu().numpy()] = projected
+
+
+def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max,
+                         window=None, device='cpu'):
     """Project onto [phi_min, phi_max] preserving each level's horizontal mean.
 
-    NOTE (2026-07-28): superseded in cascade_loop by
+    NOTE (2026-07-28, amended 2026-08-07): superseded in cascade_loop by
     _bounded_amplitude_add — this is its s = 1 special case (bounds and
-    mean, but no amplitude preservation). Retained for diagnostics and
-    the archaeology probes.
+    mean, but no amplitude preservation). It is NOT retired, though: it is
+    what _compose_output projects with, so it runs on the output of every
+    root and every nest. At the production square it is the single most
+    expensive call in the run (2048^2 x 211: 78 s of qt alone, whose levels
+    aloft sit against qt_min = 0 so nearly all of them violate; h, mostly
+    interior, takes the `continue` on most of its levels and costs 5 s).
+    Hence the ``device`` dispatch.
 
     For field = perturbation + mean, each level with any out-of-bounds value
     is replaced by clip(field - mu, phi_min, phi_max) with the scalar mu
@@ -2551,7 +2667,16 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max, window=N
     preserved. The bounds themselves are still enforced everywhere, halo
     included — an out-of-bounds halo would corrupt the bound taper and the
     gradients that the next size class reads from it.
+
+    ``device`` is the run's own device. On 'cuda' the solve runs on the GPU in
+    the same float64 (see _project_onto_bounds_cuda); on 'cpu' it runs here.
+    A real dispatch, not a fallback — a nest legitimately runs on the host.
     """
+    if device == 'cuda':
+        _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min,
+                                  phi_max, window)
+        return
+
     lo = float(phi_min)
     hi = float(phi_max)
     width = hi - lo
@@ -2643,7 +2768,8 @@ def _stage_nest_increments(increment_dir, parent_path, parent_group,
     return class_grids + own_grids
 
 
-def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None):
+def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None,
+                    device='cpu'):
     """The field that gets written: state + deficit + mean, then projected.
 
     The cascade's state carries no interpolation compensation; the output
@@ -2662,12 +2788,18 @@ def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None):
     ``deficit`` is consumed (its buffer becomes the output) and must not be
     used again. None means every class was well resolved, in which case the
     state is already the output.
+
+    ``device`` reaches only the projection, which is where the cost is (see
+    _project_onto_bounds). _compose_flux_output takes no device: its bounds
+    discipline is a clip and one scalar rescale, ~1 s at the production
+    square against qt's 78.
     """
     if deficit is None:
         output = state + mean_1d[np.newaxis, np.newaxis, :]
     else:
         deficit += state
-        _project_onto_bounds(deficit, mean_1d, phi_min, phi_max, window)
+        _project_onto_bounds(deficit, mean_1d, phi_min, phi_max, window,
+                             device=device)
         output = deficit
         output += mean_1d[np.newaxis, np.newaxis, :]
     # The bounds now hold up to float32 rounding of the (perturbation + mean)
@@ -3328,9 +3460,9 @@ def refine(
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
     h_3d_out = _compose_output(h_pert_inner, deficit_h_inner, h_mean_final,
-                               h_min, h_max)
+                               h_min, h_max, device=device)
     qt_3d_out = _compose_output(qt_pert_inner, deficit_qt_inner, qt_mean_final,
-                                qt_min, qt_max)
+                                qt_min, qt_max, device=device)
     # The halo is already discarded, so the composition's volume mean is the
     # nest's own inherited anomaly.
     flux_3d_out = _compose_flux_output(flux_inner, deficit_flux_inner)
