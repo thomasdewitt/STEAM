@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import netCDF4
+import torch
 from pathlib import Path
 
 from steam.simulate import (
@@ -622,4 +623,110 @@ def test_compute_diagnostics_parallel_matches_serial(tmp_path, simple_profiles):
             ds1.variables[name][:], ds2.variables[name][:],
             err_msg=f"{name} differs between n_workers=1 and n_workers=4"
         )
+    ds1.close(); ds2.close()
+
+
+def _diagnostics_inputs(nx=24, ny=64, nz=115, seed=0):
+    """h/qt with a ~30% saturated fraction, so both branches of the level
+    solve are exercised."""
+    z = np.linspace(0.0, 3000.0, nz)
+    rng = np.random.default_rng(seed)
+    h = ((340e3 - 20e3 * (z / 3000.0))[None, None, :]
+         + rng.normal(0, 2e3, (nx, ny, nz))).astype(np.float32)
+    qt = np.clip((0.018 - 0.016 * (z / 3000.0))[None, None, :]
+                 + rng.normal(0, 2e-3, (nx, ny, nz)), 0, None).astype(np.float32)
+    return h, qt, z
+
+
+def test_recover_diagnostics_pressure_accumulator_is_float64():
+    """The column march is 115 chained multiplies, so its float32 error
+    compounds; the float64 accumulator must hold p to the float32 storage
+    granularity of the output (~4e-3 Pa at ~1e5 Pa), not 25x worse.
+    """
+    h, qt, z = _diagnostics_inputs()
+    # Exact answer available from these float32 inputs
+    ref = recover_diagnostics(h.astype(np.float64), qt.astype(np.float64),
+                              z, 101325.0)
+    got = recover_diagnostics(h, qt, z, 101325.0)
+
+    storage_floor = np.abs(
+        ref["p"].astype(np.float32).astype(np.float64) - ref["p"]).max()
+    err = np.abs(got["p"].astype(np.float64) - ref["p"]).max()
+    assert err < 2 * storage_floor, (
+        f"pressure error {err:.3e} Pa exceeds twice the float32 storage "
+        f"floor {storage_floor:.3e} Pa -- the float64 column accumulator "
+        f"in recover_diagnostics has regressed"
+    )
+    assert got["p"].dtype == np.float32
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_recover_diagnostics_cuda_matches_cpu():
+    """The dispatch is not bit-identical (CUDA expf is not glibc's), but must
+    agree to the float32 granularity of what gets written."""
+    h, qt, z = _diagnostics_inputs()
+    cpu = recover_diagnostics(h, qt, z, 101325.0)
+    gpu = recover_diagnostics(h, qt, z, 101325.0, device='cuda')
+
+    saturated = float(np.mean(cpu["qc"] + cpu["qi"] > 0))
+    assert 0.05 < saturated < 0.95, (
+        f"test field is {saturated:.2f} saturated; it must exercise both "
+        f"branches of the level solve for this comparison to mean anything"
+    )
+    tol = {"T": 1e-3, "qv": 1e-6, "qc": 1e-6, "qi": 1e-6, "p": 1.0}
+    for name, atol in tol.items():
+        assert gpu[name].dtype == np.float32, name
+        np.testing.assert_allclose(gpu[name], cpu[name], atol=atol, rtol=0,
+                                   err_msg=f"{name} cpu vs cuda")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_recover_diagnostics_cuda_accepts_2d_surface_pressure():
+    """Elevated-bottom nests pass a 2D p_bottom rather than a scalar."""
+    h, qt, z = _diagnostics_inputs()
+    p_bottom = np.full(h.shape[:2], 101325.0, dtype=np.float32)
+    p_bottom += np.random.default_rng(1).normal(0, 500, h.shape[:2]).astype(np.float32)
+    cpu = recover_diagnostics(h, qt, z, p_bottom)
+    gpu = recover_diagnostics(h, qt, z, p_bottom, device='cuda')
+    np.testing.assert_allclose(gpu["T"], cpu["T"], atol=1e-3, rtol=0)
+    np.testing.assert_allclose(gpu["p"], cpu["p"], atol=1.0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_compute_diagnostics_cuda_matches_cpu(tmp_path, simple_profiles):
+    h, qt = simple_profiles
+    kw = dict(nx=16, ny=16, dx=500, dy=500, outer_scale=8000, spheroscale=100,
+              domain_height=3000, profile_dz=30, seed=42)
+    p_cpu = simulate(h, qt, output_path=tmp_path / "cpu.nc", **kw)
+    p_gpu = simulate(h, qt, output_path=tmp_path / "gpu.nc", **kw)
+    compute_diagnostics(p_cpu, chunk_nx=4)
+    compute_diagnostics(p_gpu, chunk_nx=4, device='cuda')
+    ds1 = netCDF4.Dataset(p_cpu, "r")
+    ds2 = netCDF4.Dataset(p_gpu, "r")
+    tol = {"T": 1e-3, "qv": 1e-6, "qc": 1e-6, "qi": 1e-6, "p": 1.0}
+    for name, atol in tol.items():
+        np.testing.assert_allclose(
+            ds2.variables[name][:], ds1.variables[name][:], atol=atol, rtol=0,
+            err_msg=f"{name} differs between device='cpu' and device='cuda'"
+        )
+    ds1.close(); ds2.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_compute_diagnostics_cuda_chunking_matches(tmp_path, simple_profiles):
+    """Chunking splits x, and columns are independent, so the cuda path is
+    bit-identical across chunk sizes even though it does not match the host."""
+    h, qt = simple_profiles
+    kw = dict(nx=16, ny=16, dx=500, dy=500, outer_scale=8000, spheroscale=100,
+              domain_height=3000, profile_dz=30, seed=42)
+    p1 = simulate(h, qt, output_path=tmp_path / "c1.nc", **kw)
+    p2 = simulate(h, qt, output_path=tmp_path / "c2.nc", **kw)
+    compute_diagnostics(p1, chunk_nx=2, device='cuda')
+    compute_diagnostics(p2, chunk_nx=9999, device='cuda')
+    ds1 = netCDF4.Dataset(p1, "r")
+    ds2 = netCDF4.Dataset(p2, "r")
+    for name in ("T", "qv", "qc", "qi", "p"):
+        np.testing.assert_array_equal(
+            ds1.variables[name][:], ds2.variables[name][:],
+            err_msg=f"{name} differs between chunk sizes on cuda")
     ds1.close(); ds2.close()
