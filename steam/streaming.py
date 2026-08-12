@@ -40,6 +40,9 @@ STATES and the ledger, which is what the fundamental test compares.
 
 from math import gcd
 from pathlib import Path
+import hashlib
+import json
+import os
 import shutil
 
 import numpy as np
@@ -47,18 +50,24 @@ import torch
 
 from .ledger import (
     BoundedAddLedger,
+    ClassLedger,
     FluxAdvanceLedger,
     FluxOutputLedger,
     MeanReduction,
     PatternLedger,
     ProjectionLedger,
     RunLedger,
+    load_class_ledger,
+    save_class_ledger,
 )
 
 # Field names the store carries between classes. The deficits are absent on
 # purpose: they exist only for the output composition (component 4), the cascade
 # state never reads them, and carrying them would need the pre-advance flux kept
 # live across the lazy rescale.
+PROGRESS_FILE = 'progress'
+MANIFEST_FILE = 'manifest.json'
+
 STATE_FIELDS = ('h_perturbation', 'qt_perturbation', 'flux')
 # Written within a class by pass 2 and consumed by pass 3.
 CANDIDATE_FIELDS = ('h_increment', 'qt_increment')
@@ -362,8 +371,38 @@ class TileStore:
         self._path(class_index, name).rename(target)
 
     def mark(self, class_index, phase):
-        """Progress marker per (class, phase), for resume."""
-        (self.directory / "progress").write_text(f"{class_index} {phase}\n")
+        """Record that (class, phase) COMPLETED. Appended, so the file is a log
+        rather than a single value: what resume needs is the last completed
+        phase, and an append cannot lose an earlier one to a partial write."""
+        with open(self.directory / PROGRESS_FILE, 'a') as handle:
+            handle.write(f"{class_index} {phase}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def completed(self):
+        """The set of (class_index, phase) pairs already finished."""
+        path = self.directory / PROGRESS_FILE
+        if not path.exists():
+            return set()
+        done = set()
+        for line in path.read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                done.add((int(parts[0]), parts[1]))
+        return done
+
+    def write_manifest(self, manifest):
+        (self.directory / MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=1, sort_keys=True))
+
+    def read_manifest(self):
+        path = self.directory / MANIFEST_FILE
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            return None
 
     def total_bytes(self):
         return sum(path.stat().st_size
@@ -493,7 +532,10 @@ def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
     # which has both classes live):
     #   previous class: 3 state + 3 deficit                 = 6 fields
     #   this class:     3 state + 3 deficit + 2 candidate
-    #                   + 1 flux double-buffer              = 9 fields
+    #                   + 1 flux double-buffer
+    #                   + 2 plane-pass companions           = 11 fields
+    # The plane-pass companions (state_next, deficit_next) exist one scalar at a
+    # time and are what makes a crashed pass re-runnable (component 5).
     # The deficits exist only from the first class with f != 1 onward, and the
     # candidates only within a class; counting them always is deliberate --
     # a planner that UNDER-predicts is worse than no planner, because the run
@@ -503,9 +545,9 @@ def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
     peak = 0
     for index in range(max(horizon, 1), n_classes):
         peak = max(peak, 6 * _field_bytes(grids, index - 1)
-                   + 9 * _field_bytes(grids, index))
+                   + 11 * _field_bytes(grids, index))
     if horizon == 0:
-        peak = max(peak, 9 * _field_bytes(grids, 0))
+        peak = max(peak, 11 * _field_bytes(grids, 0))
     if save_increments:
         # Three applied increments per class, kept until the output file is
         # written. A geometric pyramid over the ladder, not a per-class cost.
@@ -580,6 +622,8 @@ def streamed_cascade_loop(
     device='cpu',
     comp_k=None,
     increment_store=None,
+    completed=None,
+    _crash_hook=None,
 ):
     """cascade_loop for a ROOT run, paged through RAM in horizontal tiles.
 
@@ -646,6 +690,25 @@ def streamed_cascade_loop(
                   for i in range(n_classes)]
     ledger = RunLedger(n_classes)
     store = TileStore(scratch_dir)
+    # RESUME. ``completed`` is the set of (class, phase) pairs a previous attempt
+    # finished, from the store's progress log. Every phase is written to be
+    # re-runnable from its start -- pass 1 is pure measurement, pass 2 reads the
+    # entering buffers which survive until the plane pass swaps them, and the
+    # plane pass double-buffers -- so resume is simply "skip what is marked".
+    # The one thing that cannot be recomputed is a completed class's LEDGER
+    # entry, so each class's entry is persisted as it completes and read back.
+    completed = set() if completed is None else set(completed)
+
+    def phase_done(index, phase):
+        return (index, phase) in completed
+
+    def hook(index, phase):
+        if _crash_hook is not None:
+            _crash_hook(index, phase)
+
+    def persist(index):
+        save_class_ledger(store.directory / f"ledger_c{index:02d}.npz",
+                          ledger.classes[index])
     scale_c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
     # The resident head stages its per-class increments the way cascade_loop
     # already does (npy per class), beside the streamed store's own.
@@ -723,6 +786,13 @@ def streamed_cascade_loop(
              C_qt_k[index], b_qt_k[index], qt_min, qt_max),
         )
 
+        if phase_done(index, 'class'):
+            ledger.classes[index] = load_class_ledger(
+                store.directory / f"ledger_c{index:02d}.npz")
+            print(f'Streamed {index + 1:3d}/{n_classes:3d}: resumed, already '
+                  f'complete                       ')
+            continue
+
         deficit_i = comp_k[index] - np.float32(1.0)
         class_has_deficit = bool(np.any(deficit_i))
         carried = list(STATE_FIELDS) + [
@@ -733,7 +803,7 @@ def streamed_cascade_loop(
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  regrid...', end='\r')
-        for name in carried:
+        for name in (() if phase_done(index, 'regrid') else carried):
             source_shape = store.open(previous, name).shape
             store.create(index, name, world_shape)
 
@@ -756,17 +826,19 @@ def streamed_cascade_loop(
                                       (x_lo, x_hi, y_lo, y_hi)))
             store.plane_array(index, name).flush()
             store.close(index, name)
-        for name in carried:
+        for name in (() if phase_done(index, 'regrid') else carried):
             store.drop(previous, name)
         # A class whose compensation differs from one starts the deficits if no
         # earlier class already did. Once they exist they are carried on, even
         # through classes with f == 1, because the accumulated sum is what the
         # composition adds.
-        if class_has_deficit:
+        if class_has_deficit and not phase_done(index, 'regrid'):
             for name in DEFICIT_FIELDS.values():
                 if not store.exists(index, name):
                     store.create(index, name, world_shape, fill=0.0)
-        store.mark(index, 'regrid')
+        if not phase_done(index, 'regrid'):
+            store.mark(index, 'regrid')
+        hook(index, 'regrid_done')
 
         per_class_scale = scale_c / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
         shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
@@ -791,145 +863,162 @@ def streamed_cascade_loop(
                 class_keys[index], sparsity_factors, per_class_scale, shift,
                 n_zero, zero_bottom, zero_top)
 
-        # ---- pass 1: MEASURE -----------------------------------------------
-        print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
-              f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
-              f'{tiles_x}x{tiles_y} tiles  measure...', end='\r')
-        entering = MeanReduction(np.float64(0.0), 0)
-        noise_abs = MeanReduction(np.float64(0.0), 0)
-        raw_pattern = {}
-        for window in windows:                  # world raster order: see
-            inner = inner_of(window)             # tile_windows
-            flux_tile = read_tile('flux', window)
-            noise = tile_noise(window)
+        # Passes 1 and 2 are skipped wholesale on resume, and their results
+        # come from the persisted class ledger rather than being re-measured:
+        # a partially completed plane pass may already have swapped the
+        # ENTERING flux for the advanced one, so re-measuring would measure
+        # the wrong field. This is what the per-class ledger file is for.
+        if phase_done(index, 'apply'):
+            ledger.classes[index] = load_class_ledger(
+                store.directory / f"ledger_c{index:02d}.npz")
+            class_ledger = ledger.classes[index]
+            level_means = {scalar: class_ledger.pattern[scalar].level_mean
+                           for scalar in ('h', 'qt')}
+            mean_abs = class_ledger.flux.noise_abs.mean
+            flux_rescale = class_ledger.flux.rescale
+        else:
+            # ---- pass 1: MEASURE -----------------------------------------------
+            print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
+                  f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
+                  f'{tiles_x}x{tiles_y} tiles  measure...', end='\r')
+            entering = MeanReduction(np.float64(0.0), 0)
+            noise_abs = MeanReduction(np.float64(0.0), 0)
+            raw_pattern = {}
+            for window in windows:                  # world raster order: see
+                inner = inner_of(window)             # tile_windows
+                flux_tile = read_tile('flux', window)
+                noise = tile_noise(window)
 
-            flux_inner = flux_tile[inner]
-            entering = entering + MeanReduction(
-                flux_inner.sum(dtype=np.float64), flux_inner.size)
-            noise_inner = noise[inner]
-            noise_abs = noise_abs + MeanReduction(
-                np.abs(noise_inner).sum(dtype=np.float64),
-                np.count_nonzero(noise_inner))
+                flux_inner = flux_tile[inner]
+                entering = entering + MeanReduction(
+                    flux_inner.sum(dtype=np.float64), flux_inner.size)
+                noise_inner = noise[inner]
+                noise_abs = noise_abs + MeanReduction(
+                    np.abs(noise_inner).sum(dtype=np.float64),
+                    np.count_nonzero(noise_inner))
 
-            # The RAW product, i.e. with the entering flux in place of S_k: S_k
-            # is that product divided by the mean-abs noise, which is not known
-            # until this sweep finishes. A positive scalar factors straight out
-            # of the level sums, so the normalized totals are recovered below
-            # by one division -- at the cost of one float32 multiply's worth of
-            # rounding against the in-RAM order, which is the floor this whole
-            # path is measured at.
-            raw = noise * flux_tile
-            for (name, state_name, _, mean_1d, _, b_i, phi_min,
-                 phi_max) in scalars:
-                state = read_tile(state_name, window)
-                running_sum = state + mean_1d[np.newaxis, np.newaxis, :]
-                W = _advective_weight(running_sum, dx_k, dy_k, z_k,
-                                      aspect_k[index])
-                W *= raw
-                W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
-                W_inner = W[inner]
-                partial = PatternLedger(
-                    np.abs(W_inner).sum(axis=(0, 1), dtype=np.float64),
-                    np.count_nonzero(W_inner, axis=(0, 1)))
-                raw_pattern[name] = (partial if name not in raw_pattern
-                                     else raw_pattern[name] + partial)
-                del state, running_sum, W, W_inner
-            del flux_tile, noise, raw
+                # The RAW product, i.e. with the entering flux in place of S_k: S_k
+                # is that product divided by the mean-abs noise, which is not known
+                # until this sweep finishes. A positive scalar factors straight out
+                # of the level sums, so the normalized totals are recovered below
+                # by one division -- at the cost of one float32 multiply's worth of
+                # rounding against the in-RAM order, which is the floor this whole
+                # path is measured at.
+                raw = noise * flux_tile
+                for (name, state_name, _, mean_1d, _, b_i, phi_min,
+                     phi_max) in scalars:
+                    state = read_tile(state_name, window)
+                    running_sum = state + mean_1d[np.newaxis, np.newaxis, :]
+                    W = _advective_weight(running_sum, dx_k, dy_k, z_k,
+                                          aspect_k[index])
+                    W *= raw
+                    W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
+                    W_inner = W[inner]
+                    partial = PatternLedger(
+                        np.abs(W_inner).sum(axis=(0, 1), dtype=np.float64),
+                        np.count_nonzero(W_inner, axis=(0, 1)))
+                    raw_pattern[name] = (partial if name not in raw_pattern
+                                         else raw_pattern[name] + partial)
+                    del state, running_sum, W, W_inner
+                del flux_tile, noise, raw
 
-        # ---- reduce ---------------------------------------------------------
-        mean_abs = noise_abs.mean
-        for name in raw_pattern:
-            divisor = mean_abs if mean_abs > 0 else 1.0
-            class_ledger.pattern[name] = PatternLedger(
-                raw_pattern[name].level_total / divisor,
-                raw_pattern[name].level_count)
-        level_means = {name: class_ledger.pattern[name].level_mean
-                       for name in raw_pattern}
-        store.mark(index, 'measure')
+            # ---- reduce ---------------------------------------------------------
+            mean_abs = noise_abs.mean
+            for name in raw_pattern:
+                divisor = mean_abs if mean_abs > 0 else 1.0
+                class_ledger.pattern[name] = PatternLedger(
+                    raw_pattern[name].level_total / divisor,
+                    raw_pattern[name].level_count)
+            level_means = {name: class_ledger.pattern[name].level_mean
+                           for name in raw_pattern}
+            store.mark(index, 'measure')
 
-        # ---- pass 2: APPLY --------------------------------------------------
-        print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
-              f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
-              f'{tiles_x}x{tiles_y} tiles  apply...', end='\r')
-        for name in CANDIDATE_FIELDS:
-            store.create(index, name, world_shape)
-        realized = MeanReduction(np.float64(0.0), 0)
-        n_clipped = 0
-        # DOUBLE BUFFER, and it is load-bearing. Pass 2 reads the ENTERING flux
-        # over a tile plus halo and writes the UPDATED flux over the tile. Those
-        # regions overlap between neighbouring tiles, so writing back into the
-        # field being read would hand every tile after the first a halo of
-        # already-advanced values -- caught 2026-08-12 as a 13% error in the
-        # realized flux mean, which is exactly the kind of thing the
-        # streamed-equals-resident test exists to find.
-        flux_next = store.create(index, 'flux_next', world_shape)
-        for window in windows:
-            x_lo, x_hi, y_lo, y_hi = window
-            inner = inner_of(window)
-            flux_tile = read_tile('flux', window)
-            noise = tile_noise(window)
+            # ---- pass 2: APPLY --------------------------------------------------
+            print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
+                  f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
+                  f'{tiles_x}x{tiles_y} tiles  apply...', end='\r')
+            for name in CANDIDATE_FIELDS:
+                store.create(index, name, world_shape)
+            realized = MeanReduction(np.float64(0.0), 0)
+            n_clipped = 0
+            # DOUBLE BUFFER, and it is load-bearing. Pass 2 reads the ENTERING flux
+            # over a tile plus halo and writes the UPDATED flux over the tile. Those
+            # regions overlap between neighbouring tiles, so writing back into the
+            # field being read would hand every tile after the first a halo of
+            # already-advanced values -- caught 2026-08-12 as a 13% error in the
+            # realized flux mean, which is exactly the kind of thing the
+            # streamed-equals-resident test exists to find.
+            flux_next = store.create(index, 'flux_next', world_shape)
+            for window in windows:
+                x_lo, x_hi, y_lo, y_hi = window
+                inner = inner_of(window)
+                flux_tile = read_tile('flux', window)
+                noise = tile_noise(window)
 
-            # Same order as the in-RAM class body: S_k comes from the ENTERING
-            # flux, then the flux advances, then the scalars use S_k.
-            noise *= flux_tile
-            if mean_abs > 0:
-                S_k = noise * np.float32(1.0 / mean_abs)
-            else:
-                S_k = noise.copy()
+                # Same order as the in-RAM class body: S_k comes from the ENTERING
+                # flux, then the flux advances, then the scalars use S_k.
+                noise *= flux_tile
+                if mean_abs > 0:
+                    S_k = noise * np.float32(1.0 / mean_abs)
+                else:
+                    S_k = noise.copy()
 
-            # Per-tile FFT. It is periodic over the PADDED TILE rather than the
-            # domain, so the wrap contaminates within a kernel radius of the
-            # padded tile's edge -- which is inside the halo, and the halo is
-            # never written back. Exactly the nest halo's argument.
-            increment = CONVOLVE(noise, kernel, device=device)
-            del noise
-            flux_tile += increment
-            del increment
-            flux_inner = flux_tile[inner]
-            n_clipped += int(np.count_nonzero(flux_inner < 0))
-            np.maximum(flux_tile, np.float32(0.0), out=flux_tile)
-            flux_inner = flux_tile[inner]
-            realized = realized + MeanReduction(
-                flux_inner.sum(dtype=np.float64), flux_inner.size)
-            store.write_window(index, 'flux_next', x_lo, x_hi,
-                               y_lo, y_hi, flux_inner)
-            del flux_tile
+                # Per-tile FFT. It is periodic over the PADDED TILE rather than the
+                # domain, so the wrap contaminates within a kernel radius of the
+                # padded tile's edge -- which is inside the halo, and the halo is
+                # never written back. Exactly the nest halo's argument.
+                increment = CONVOLVE(noise, kernel, device=device)
+                del noise
+                flux_tile += increment
+                del increment
+                flux_inner = flux_tile[inner]
+                n_clipped += int(np.count_nonzero(flux_inner < 0))
+                np.maximum(flux_tile, np.float32(0.0), out=flux_tile)
+                flux_inner = flux_tile[inner]
+                realized = realized + MeanReduction(
+                    flux_inner.sum(dtype=np.float64), flux_inner.size)
+                store.write_window(index, 'flux_next', x_lo, x_hi,
+                                   y_lo, y_hi, flux_inner)
+                del flux_tile
 
-            for (name, state_name, increment_name, mean_1d, C_k_i, b_i,
-                 phi_min, phi_max) in scalars:
-                state = read_tile(state_name, window)
-                running_sum = state + mean_1d[np.newaxis, np.newaxis, :]
-                W = _advective_weight(running_sum, dx_k, dy_k, z_k,
-                                      aspect_k[index])
-                W *= S_k
-                W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
-                level_mean = level_means[name]
-                W /= np.where(level_mean > 0, level_mean,
-                              np.float32(1.0))[None, None, :]
-                W *= C_k_i
-                candidate = CONVOLVE(W, kernel, device=device)
-                del W, state, running_sum
-                store.write_window(index, increment_name, x_lo, x_hi,
-                                   y_lo, y_hi, candidate[inner])
-                del candidate
-            del S_k
-        store.plane_array(index, 'flux_next').flush()
-        # The swap is DEFERRED to pass 3: forming the flux's actually-added
-        # increment needs the entering flux ('flux') and the advanced flux
-        # ('flux_next') live at the same time, after the rescale.
-        for name in CANDIDATE_FIELDS:
-            store.plane_array(index, name).flush()
+                for (name, state_name, increment_name, mean_1d, C_k_i, b_i,
+                     phi_min, phi_max) in scalars:
+                    state = read_tile(state_name, window)
+                    running_sum = state + mean_1d[np.newaxis, np.newaxis, :]
+                    W = _advective_weight(running_sum, dx_k, dy_k, z_k,
+                                          aspect_k[index])
+                    W *= S_k
+                    W *= _bound_taper(running_sum, b_i, phi_min, phi_max)
+                    level_mean = level_means[name]
+                    W /= np.where(level_mean > 0, level_mean,
+                                  np.float32(1.0))[None, None, :]
+                    W *= C_k_i
+                    candidate = CONVOLVE(W, kernel, device=device)
+                    del W, state, running_sum
+                    store.write_window(index, increment_name, x_lo, x_hi,
+                                       y_lo, y_hi, candidate[inner])
+                    del candidate
+                del S_k
+                hook(index, 'apply_tile')
+            store.plane_array(index, 'flux_next').flush()
+            # The swap is DEFERRED to pass 3: forming the flux's actually-added
+            # increment needs the entering flux ('flux') and the advanced flux
+            # ('flux_next') live at the same time, after the rescale.
+            for name in CANDIDATE_FIELDS:
+                store.plane_array(index, name).flush()
 
-        class_ledger.flux = FluxAdvanceLedger(entering, noise_abs, realized,
-                                              n_clipped)
-        flux_rescale = class_ledger.flux.rescale
-        if flux_rescale is None:
-            raise RuntimeError(
-                f"class {index}: the whole domain clipped to zero, which the "
-                f"in-RAM path handles by flattening the flux to its entering "
-                f"mean. Not reachable at any sane amplitude, and not "
-                f"implemented streamed rather than implemented untested.")
-        store.mark(index, 'apply')
+            class_ledger.flux = FluxAdvanceLedger(entering, noise_abs, realized,
+                                                  n_clipped)
+            flux_rescale = class_ledger.flux.rescale
+            if flux_rescale is None:
+                raise RuntimeError(
+                    f"class {index}: the whole domain clipped to zero, which the "
+                    f"in-RAM path handles by flattening the flux to its entering "
+                    f"mean. Not reachable at any sane amplitude, and not "
+                    f"implemented streamed rather than implemented untested.")
+            store.mark(index, 'apply')
+            persist(index)
+        hook(index, 'apply_done')
 
         # ---- pass 3: PLANE PASS (the bounded add) --------------------------
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
@@ -944,39 +1033,70 @@ def streamed_cascade_loop(
         # own traffic -- makes "the store always holds a fully advanced flux" an
         # invariant, and hands the deficit and save_for_refinement the increment
         # they need.
-        entering_planes = store.plane_array(index, 'flux')
-        advanced_planes = store.plane_array(index, 'flux_next')
-        flux_deficit_planes = (
-            store.plane_array(index, 'flux_deficit')
-            if store.exists(index, 'flux_deficit') else None)
-        record_flux = increment_store is not None
-        if record_flux:
-            increment_store.create(index, 'flux', world_shape)
-            flux_increment_planes = increment_store.plane_array(index, 'flux')
-        for level in range(nz_k):
-            advanced = advanced_planes[level] * np.float32(flux_rescale)
-            if flux_deficit_planes is not None or record_flux:
-                applied = advanced - entering_planes[level]
-                if flux_deficit_planes is not None:
-                    flux_deficit_planes[level] += (
-                        np.float32(deficit_i[level]) * applied)
-                if record_flux:
-                    flux_increment_planes[level] = applied
-            advanced_planes[level] = advanced
-        if record_flux:
-            increment_store.plane_array(index, 'flux').flush()
-            increment_store.close(index, 'flux')
-        store.plane_array(index, 'flux_next').flush()
-        store.drop(index, 'flux')
-        store.rename(index, 'flux_next', 'flux')
+        if phase_done(index, 'plane_flux'):
+            entering_planes = advanced_planes = None
+        else:
+            entering_planes = store.plane_array(index, 'flux')
+            advanced_planes = store.plane_array(index, 'flux_next')
+            has_flux_deficit = store.exists(index, 'flux_deficit')
+            flux_deficit_planes = (store.plane_array(index, 'flux_deficit')
+                                   if has_flux_deficit else None)
+            flux_deficit_next = None
+            if has_flux_deficit:
+                store.create(index, 'flux_deficit_next', world_shape)
+                flux_deficit_next = store.plane_array(index, 'flux_deficit_next')
+            record_flux = increment_store is not None
+            if record_flux:
+                increment_store.create(index, 'flux', world_shape)
+                flux_increment_planes = increment_store.plane_array(index, 'flux')
+            for level in range(nz_k):
+                advanced = advanced_planes[level] * np.float32(flux_rescale)
+                if flux_deficit_planes is not None or record_flux:
+                    applied = advanced - entering_planes[level]
+                    if flux_deficit_next is not None:
+                        flux_deficit_next[level] = (
+                            flux_deficit_planes[level]
+                            + np.float32(deficit_i[level]) * applied)
+                    if record_flux:
+                        flux_increment_planes[level] = applied
+                advanced_planes[level] = advanced
+            if record_flux:
+                increment_store.plane_array(index, 'flux').flush()
+                increment_store.close(index, 'flux')
+            store.plane_array(index, 'flux_next').flush()
+            store.drop(index, 'flux')
+            store.rename(index, 'flux_next', 'flux')
+            if flux_deficit_next is not None:
+                flux_deficit_next.flush()
+                store.drop(index, 'flux_deficit')
+                store.rename(index, 'flux_deficit_next', 'flux_deficit')
+            store.mark(index, 'plane_flux')
 
         for (name, state_name, increment_name, mean_1d, _, _, phi_min,
              phi_max) in scalars:
+            if phase_done(index, f'plane_{name}'):
+                continue
+            # DOUBLE BUFFERED, for resume. The plane pass used to mutate the
+            # state in place level by level, so a crash mid-pass left a
+            # half-projected field that a re-run would project twice. Writing
+            # to a companion buffer and swapping at pass end makes "resume =
+            # re-run the last incomplete pass" unconditionally true, at one
+            # extra state field of I/O per class per scalar. The DEFICIT needs
+            # the same treatment for the same reason -- it is accumulated, so a
+            # re-run would double-add.
             state_planes = store.plane_array(index, state_name)
             candidate_planes = store.plane_array(index, increment_name)
+            store.create(index, state_name + '_next', world_shape)
+            state_next_planes = store.plane_array(index, state_name + '_next')
             deficit_name = DEFICIT_FIELDS[name]
+            has_deficit = store.exists(index, deficit_name)
             deficit_planes = (store.plane_array(index, deficit_name)
-                              if store.exists(index, deficit_name) else None)
+                              if has_deficit else None)
+            deficit_next_planes = None
+            if has_deficit:
+                store.create(index, deficit_name + '_next', world_shape)
+                deficit_next_planes = store.plane_array(
+                    index, deficit_name + '_next')
             increment_planes = None
             if increment_store is not None:
                 increment_store.create(index, name, world_shape)
@@ -996,28 +1116,40 @@ def streamed_cascade_loop(
                     plane_state, mean_1d[level:level + 1], plane_candidate,
                     phi_min, phi_max, window=None, device=device,
                     record_applied=True)
-                state_planes[level] = plane_state[:, :, 0]
+                state_next_planes[level] = plane_state[:, :, 0]
                 # record_applied left the ACTUALLY-ADDED delta in the candidate
                 # -- after minus before, float32 rounding included, which is
                 # what the deficit compensates and what a nest replays.
                 applied = plane_candidate[:, :, 0]
-                if deficit_planes is not None:
-                    deficit_planes[level] += np.float32(deficit_i[level]) * applied
+                if deficit_next_planes is not None:
+                    deficit_next_planes[level] = (
+                        deficit_planes[level]
+                        + np.float32(deficit_i[level]) * applied)
                 if increment_planes is not None:
                     increment_planes[level] = applied
+                if level == nz_k // 2:
+                    hook(index, f'plane_{name}_mid')
                 for field in ('a0', 'n_loop', 'n_scale', 'final_demean', 'mu'):
                     getattr(solve, field)[level] = getattr(level_solve, field)[0]
                 solve.demean[level] = level_solve.demean[0]
                 solve.scale[level] = level_solve.scale[0]
             class_ledger.bounded_add[name] = solve
-            store.plane_array(index, state_name).flush()
-            if deficit_planes is not None:
-                deficit_planes.flush()
+            state_next_planes.flush()
+            store.drop(index, state_name)
+            store.rename(index, state_name + '_next', state_name)
+            if deficit_next_planes is not None:
+                deficit_next_planes.flush()
+                store.drop(index, deficit_name)
+                store.rename(index, deficit_name + '_next', deficit_name)
             if increment_planes is not None:
                 increment_store.plane_array(index, name).flush()
                 increment_store.close(index, name)
             store.drop(index, increment_name)
-        store.mark(index, 'planes')
+            persist(index)
+            store.mark(index, f'plane_{name}')
+        persist(index)
+        store.mark(index, 'class')
+        hook(index, 'class_done')
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  done          ')
@@ -1278,3 +1410,184 @@ def compose_and_write(store, increment_store, result, grids, plan,
             output_path, Path(store.directory) / "head_increments",
             class_grids, compress=compress, readers=readers)
     return projections, flux_output_ledger
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: budgets, refusals, manifest, resume (component 5)
+# ---------------------------------------------------------------------------
+
+MEMORY_BUDGET_FRACTION = 0.8
+
+
+def available_memory_budget(fraction=MEMORY_BUDGET_FRACTION):
+    """A default memory budget from MemAvailable, in bytes.
+
+    MemAvailable rather than MemFree: the kernel's own estimate of what a new
+    allocation can have without swapping, which already discounts the
+    reclaimable page cache a streamed run leans on. The fraction is headroom for
+    everything the estimate cannot know about -- the FFT working set's own
+    guards, the interpreter, whatever else the box is doing.
+    """
+    try:
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            if line.startswith('MemAvailable:'):
+                return int(int(line.split()[1]) * 1024 * fraction)
+    except OSError:
+        pass
+    from .utils import available_memory_bytes
+    available = available_memory_bytes()
+    return None if available is None else int(available * fraction)
+
+
+def is_tmpfs(path):
+    """Is this path on a RAM-backed filesystem?
+
+    /proc/mounts is the reliable route on Linux (statvfs exposes no f_type):
+    walk the mount points, take the longest one that is a prefix of the resolved
+    path, and look at its type. tmpfs, ramfs and devtmpfs are all RAM.
+    """
+    path = Path(path).resolve()
+    try:
+        entries = Path('/proc/mounts').read_text().splitlines()
+    except OSError:
+        return False
+    best, best_type = -1, None
+    for entry in entries:
+        parts = entry.split()
+        if len(parts) < 3:
+            continue
+        mount_point, filesystem = parts[1], parts[2]
+        mount_point = mount_point.replace('\\040', ' ')
+        try:
+            resolved = Path(mount_point).resolve()
+        except OSError:
+            continue
+        if resolved == path or resolved in path.parents:
+            depth = len(resolved.parts)
+            if depth > best:
+                best, best_type = depth, filesystem
+    return best_type in ('tmpfs', 'ramfs', 'devtmpfs')
+
+
+def check_scratch_filesystem(directory):
+    """Refuse a RAM-backed scratch directory.
+
+    A tmpfs scratch IS memory, so streaming to it bounds nothing and the run
+    fails later and more confusingly than it would have here. The system
+    temporary directory is tmpfs on most Linux distributions, which is why the
+    default scratch lives beside the output file -- and why this check exists
+    rather than a comment hoping nobody points scratch_dir at /tmp. No override:
+    a genuinely exotic setup can name a real filesystem instead.
+    """
+    probe = Path(directory)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if is_tmpfs(probe):
+        raise OSError(
+            f"scratch directory {directory} is on a RAM-backed filesystem "
+            f"(tmpfs/ramfs). Streaming to RAM bounds nothing -- the whole point "
+            f"is to keep the working state OFF memory -- so this is refused "
+            f"rather than run. Pass scratch_dir= pointing at a real "
+            f"filesystem, ideally NVMe: scratch I/O is this mode's cost driver."
+        )
+
+
+def check_output_space(output_path, grids, save_for_refinement):
+    """Refuse up front if the OUTPUT file will not fit where it is going.
+
+    A run that streams for hours and then dies inside write_netcdf on a full
+    filesystem is precisely the failure this feature exists to prevent, and the
+    output is not small: h, qt and flux at the finest grid, doubled by
+    save_for_refinement, plus the class-increment pyramid.
+    """
+    field = _field_bytes(grids, len(grids['k']) - 1)
+    needed = 3 * field
+    if save_for_refinement:
+        needed += 3 * field
+        needed += 3 * sum(_field_bytes(grids, index)
+                          for index in range(len(grids['k'])))
+    destination = Path(output_path).parent
+    free = shutil.disk_usage(destination if destination.exists()
+                             else Path('.')).free
+    if needed > free:
+        raise OSError(
+            f"the output file needs about {needed / 1024**3:.2f} GiB in "
+            f"{destination} but only {free / 1024**3:.2f} GiB is free. "
+            f"Refusing before the cascade rather than after it.")
+    return needed
+
+
+def build_manifest(grids, plan, seed, sparsity_factors,
+                   n_scale_classes_per_dyad, bounds, profiles,
+                   flux_noise_scale, noise_scheme):
+    """The fingerprint a resume must match before it reuses a scratch store.
+
+    Everything that would change the answer: the class ladder and every grid
+    shape, the seed, the tiling plan, the bounds, the input profiles, the flux
+    parameters, and the noise scheme. Hashed rather than stored field by field,
+    with the shapes kept readable so a mismatch can be diagnosed by eye.
+
+    A scratch store whose manifest does not match is NEVER silently reused --
+    half a cascade from a different configuration is worse than no cascade.
+    """
+    digest = hashlib.sha256()
+    for part in (np.asarray(grids['k'], dtype=np.float64).tobytes(),
+                 np.asarray(grids['nx']).tobytes(),
+                 np.asarray(grids['ny']).tobytes(),
+                 np.asarray(grids['nz']).tobytes(),
+                 np.asarray(profiles[0], dtype=np.float64).tobytes(),
+                 np.asarray(profiles[1], dtype=np.float64).tobytes(),
+                 np.asarray(profiles[2], dtype=np.float64).tobytes(),
+                 repr((seed, tuple(sparsity_factors),
+                       n_scale_classes_per_dyad, tuple(bounds),
+                       float(flux_noise_scale), noise_scheme,
+                       plan.horizon, sorted(plan.tiles.items()),
+                       plan.halo)).encode()):
+        digest.update(part)
+    return {
+        'config_sha256': digest.hexdigest(),
+        'n_classes': int(len(grids['k'])),
+        'horizon': int(plan.horizon),
+        'tiles': {str(k): list(v) for k, v in sorted(plan.tiles.items())},
+        'halo': list(plan.halo),
+        'noise_scheme': noise_scheme,
+        'shapes': [[int(grids['nx'][i]), int(grids['ny'][i]),
+                    int(grids['nz'][i])] for i in range(len(grids['k']))],
+    }
+
+
+def prepare_scratch(directory, manifest, fresh=False):
+    """Validate or clear a scratch directory. Returns the completed-phase set.
+
+    An existing store whose manifest matches is resumed from; one that does not
+    match, or has no manifest at all, is REFUSED with the option of fresh=True.
+    Silently reusing it would mix two configurations' half-cascades.
+    """
+    directory = Path(directory)
+    store = TileStore(directory)
+    existing = store.read_manifest()
+    if fresh or existing is None:
+        if directory.exists() and any(directory.iterdir()):
+            store.destroy()
+            store = TileStore(directory)
+        store.write_manifest(manifest)
+        return store, set()
+    if existing.get('config_sha256') != manifest['config_sha256']:
+        raise OSError(
+            f"scratch directory {directory} holds a partial run of a DIFFERENT "
+            f"configuration (manifest {existing.get('config_sha256', '?')[:12]} "
+            f"against {manifest['config_sha256'][:12]}). Refusing to mix them. "
+            f"Pass fresh=True to discard it and start over, or point "
+            f"scratch_dir= somewhere else.")
+    return store, store.completed()
+
+
+def scratch_hint(grids):
+    """A human-readable scratch estimate, for the refusal message.
+
+    About 11 field-equivalents at the finest grid -- the peak the planner
+    accounts for -- which is the number worth quoting to someone deciding
+    whether to turn streaming on.
+    """
+    total = 11 * _field_bytes(grids, len(grids['k']) - 1)
+    return f"{total / 1024**3:.1f} GiB"

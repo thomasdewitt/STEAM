@@ -92,6 +92,10 @@ Each lands separately, each independently verifiable. 1 and 2 are
 prerequisites and are behavior-changing (1) / behavior-neutral (2) on the
 NORMAL path; 3-6 are additive.
 
+**STATUS: components 1-5 all landed 2026-08-12. The feature is complete and the
+spec is now the merge documentation.** Component 6 (GPU-resident tiles) was
+always deferred; see Future work.
+
 ### 1. World-keyed noise  [LANDED 2026-08-12]
 
 Implemented as described below. What landed, and what the implementation had
@@ -500,13 +504,102 @@ adjustment / hydrostatic column solve (column-local), and NetCDF writing
 (hyperslab per tile). The final projection is per-level: reuse the plane
 pass. Nothing algorithmic changes.
 
-### 5. The switch and lifecycle  [delegated, after 4]
+### 5. The switch and lifecycle  [LANDED 2026-08-12]
+
+`simulate(stream_to_disk=False, scratch_dir=None, memory_budget=None,
+fresh=False)`. All five components are now in; the feature is complete.
+
+**The switch does not auto-engage.** Left off, a run whose resident working set
+exceeds `memory_budget` fails EARLY with a `MemoryError` naming the predicted
+bytes, the budget, and the flag — a helpful refusal, because changing execution
+mode is the caller's decision and not the planner's. `memory_budget` defaults to
+80% of `MemAvailable` from /proc/meminfo (the kernel's own estimate of what a new
+allocation can have without swapping, which already discounts the reclaimable
+page cache a streamed run leans on).
+
+**Every check runs before any compute:** scratch filesystem type, scratch free
+space against the planner's predicted peak, and the OUTPUT file's destination.
+That last one matters — a run that streams for hours and then dies inside
+`write_netcdf` on a full filesystem is exactly the failure this feature exists to
+prevent.
+
+**tmpfs is refused, not warned about.** A RAM-backed scratch directory IS memory,
+so streaming to it bounds nothing. Detected via /proc/mounts (statvfs exposes no
+`f_type`): longest mount point that is a prefix of the resolved path, then its
+type against tmpfs/ramfs/devtmpfs. There is no override — an exotic setup can
+name a real filesystem. The default scratch location is beside the output file
+for the same reason, since the system temp directory is tmpfs on most Linux
+distributions. This is not hypothetical: it silently invalidated the first
+version of the I/O benchmark, which reported a meaningless "1.0×".
+
+**RESUME.** A manifest (SHA-256 over the class ladder, every grid shape, the
+seed, the tiling plan, the bounds, the input profiles, the flux parameters and
+the noise scheme) plus an appended per-(class, phase) progress log. Matching
+manifest → resume from the last completed phase; absent or mismatched → refuse,
+offering `fresh=True`. A mismatched store is never silently reused: half a
+cascade from a different configuration is worse than none.
+
+The structural change resume required: **the plane pass is now double-buffered**,
+state and deficit both. It used to mutate the state in place level by level, so a
+crash mid-pass left a half-projected field that a re-run would project twice —
+and the deficit is accumulated, so it would double-add. Writing to a companion
+buffer and swapping at pass end makes "resume = re-run the last incomplete pass"
+unconditionally true. Cost: one extra state field of I/O per class per scalar.
+
+Passes 1 and 2 were already re-runnable (pass 1 is pure measurement; pass 2 reads
+buffers that survive until the plane pass swaps them). One thing that CANNOT be
+recomputed is a finished class's ledger entry — and re-measuring is not an option,
+because a partially completed plane pass may already have swapped the entering
+flux — so each class's entry is persisted to scratch as it completes and read
+back on resume.
+
+**RESUME IS BIT-IDENTICAL** to an uninterrupted run, verified at five
+interruption points: mid-pass-2 after the first tile, mid-plane-pass on each
+scalar (which is what proves the new double buffer), between classes, and after
+the regrid. Not "close" — identical: the partials accumulate in a fixed tile
+order and world-keyed noise makes recomputation exact, so there is nothing left
+that could differ.
+
+The resident classes above the horizon are not resumable and simply re-run. That
+is cheap by construction — they are the classes that fit in memory.
+
+Scratch is destroyed on success and RETAINED on failure, with a printed message
+naming the path and saying that re-running resumes.
+
+### The original component 5 description follows.
 
 `stream_to_disk=False/True` (consider 'auto' later, engaging on planner
 overflow with a warning), `scratch_dir=` (default: system temp on the same
 filesystem as the output path — scratch I/O is the cost driver; document
 that it should be NVMe), final copy to requested output path, scratch
 cleanup on success, retention + resume instructions on failure.
+
+## Future work
+
+In rough priority order, as of 2026-08-12 with components 1-5 landed:
+
+1. **GPU-resident tiles** (the original component 6, below): tiles sized to VRAM
+   rather than RAM, per-tile work running device-resident end to end. Nothing in
+   1-5 precludes it — the per-tile work unit is a pure function of (slab arrays
+   in, slab arrays out, scalars) and `device=` plumbs through. Revisit the
+   2026-08-07 benchmark conclusions then.
+2. **Production shakedown**: a medium-scale streamed-vs-resident comparison at
+   the largest size the resident path can still run, then a demonstration run
+   past the RAM wall. The outer regression is the paper-production figure
+   pipeline in turbulon-analysis.
+3. **`stream_to_disk='auto'`**, engaging on planner overflow with a warning. Held
+   deliberately: the current behaviour is a helpful refusal, and auto-engagement
+   changes execution mode without the caller asking.
+4. **Streamed nests.** `refine` does not take the flag and the driver raises on
+   non-root grids (a varying padded extent). A streamed nest would need the nest
+   halo to compose with the tile halo, which was never in scope.
+5. **A tighter halo.** Currently `kernel_half + 1` per side at every class,
+   verified sufficient. The accumulated-halo variant (letting a tile descend
+   several classes without re-paging) is only worth it if I/O turns out to
+   dominate; measure before building.
+6. **Narrow-tile I/O.** The z-major layout costs tile reads a factor of ~2 at
+   128-cell tile widths and nothing at production widths. If a configuration ever
+   forces very narrow tiles, that constant is where to look.
 
 ### 6. (Deferred) GPU-resident tiles
 
@@ -515,6 +608,30 @@ per-tile work running device-resident end-to-end. Revisit the 2026-08-07
 benchmark conclusions then. Nothing in 1-5 may preclude this: keep the
 per-tile work unit a pure function of (slab arrays in, slab arrays out,
 scalars) with `device=` plumbed through.
+
+## Measured numbers, all configurations (2026-08-12)
+
+One table, so the merge review has them in one place.
+
+| what | measured |
+|---|---|
+| keyed noise throughput vs the stream it replaced | 1.06× at 1.93 G draws (faster) |
+| streamed vs resident, cascade states | h 2.6e-06, qt 5.9e-07, flux 2.4e-07 |
+| streamed vs resident, deficits | 2.4e-06 / 5.2e-07 / 3.2e-07 |
+| streamed vs resident, written file | h 9.1e-08, qt 1.8e-07, flux 2.6e-07 |
+| streamed vs resident, diagnostics | T 2.0e-07, p 7.7e-08, qv 5.3e-07, qc 3.1e-06 |
+| nest from a streamed parent vs a resident one | h 9.1e-08, qt 1.8e-07, flux 3.5e-07 |
+| **seam ratio, cascade states (4×4)** | **0.94 / 0.92 / 0.87** |
+| **seam ratio, composed fields (4×4)** | **0.93 / 1.04** |
+| floor invariance with tile count | identical from 1×1 to 8×8 |
+| resume vs uninterrupted | **bit-identical**, 5 interruption points |
+| per-level I/O amplification, (nx,ny,nz) → (nz,nx,ny) | **256.0× → 13.3×** |
+| ledger agreement, flux entering / mean-abs noise | exact |
+| scratch accounting | predicted peak bounds actual, within 4× |
+
+float32 eps is 1.2e-07 throughout. The seam ratio is the seam-adjacent
+difference bin divided by the interior median; ~1 means no seam-correlated
+structure, which is the criterion the whole design is held to.
 
 ## Conventions for this branch
 

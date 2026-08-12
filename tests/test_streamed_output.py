@@ -203,7 +203,11 @@ def test_diagnostics_agree(pair):
     sitting exactly at saturation can land on either side of the branch.
 
     MEASURED (2026-08-12): T 2.0e-07, p 7.7e-08, qv 5.3e-07, qc 3.1e-06,
-    qi exactly 0. No amplification at all on this configuration -- and
+    qi exactly 0 -- and that last row is VACUOUS: an 800 m toy column never
+    freezes, so qi is identically zero in both files. It says nothing about the
+    ice path. Not worth an ice-bearing configuration of its own, since the
+    partition is a pointwise linear ramp and the liquid path exercises the
+    mechanism. No amplification at all on this configuration -- and
     test_condensate_differences_are_not_widespread puts the fraction of cells
     past 1e-5 of the field scale at 0.0000% for all three condensate variables.
     If a configuration ever does amplify, that is where it will show.

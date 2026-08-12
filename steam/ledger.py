@@ -402,3 +402,64 @@ def read_ledger(dataset, group=None):
                 run_ledger.projection[name] = ProjectionLedger(
                     np.asarray(composition.variables[key][:], dtype=np.float64))
     return run_ledger
+
+
+# ---------------------------------------------------------------------------
+# Per-class serialization, for streamed resume
+# ---------------------------------------------------------------------------
+#
+# A resumed run must not re-derive the classes it already finished, and their
+# ledger entries live only in memory. So each class's entry is written to the
+# scratch store as it completes and read back on resume. npz rather than the
+# NetCDF group: the scratch store is not the output file, this has to survive a
+# crash mid-run, and one file per class is the granularity resume works at.
+
+def save_class_ledger(path, class_ledger):
+    """Write one ClassLedger to an npz. Whatever is present is written."""
+    arrays = {}
+    flux = class_ledger.flux
+    if flux is not None:
+        arrays['flux_entering_total'] = np.float64(flux.entering.total)
+        arrays['flux_entering_count'] = np.int64(flux.entering.count)
+        arrays['flux_noise_abs_total'] = np.float64(flux.noise_abs.total)
+        arrays['flux_noise_abs_count'] = np.int64(flux.noise_abs.count)
+        arrays['flux_realized_total'] = np.float64(flux.realized.total)
+        arrays['flux_realized_count'] = np.int64(flux.realized.count)
+        arrays['flux_n_clipped'] = np.int64(flux.n_clipped)
+    for name, pattern in class_ledger.pattern.items():
+        arrays[f'{name}_pattern_total'] = pattern.level_total
+        arrays[f'{name}_pattern_count'] = pattern.level_count
+    for name, solve in class_ledger.bounded_add.items():
+        for field in ('a0', 'demean', 'scale', 'n_loop', 'n_scale',
+                      'final_demean', 'mu'):
+            arrays[f'{name}_{field}'] = getattr(solve, field)
+    np.savez(path, **arrays)
+
+
+def load_class_ledger(path):
+    """Read back what save_class_ledger wrote."""
+    class_ledger = ClassLedger()
+    with np.load(path) as data:
+        keys = set(data.files)
+        if 'flux_entering_total' in keys:
+            class_ledger.flux = FluxAdvanceLedger(
+                MeanReduction(np.float64(data['flux_entering_total']),
+                              int(data['flux_entering_count'])),
+                MeanReduction(np.float64(data['flux_noise_abs_total']),
+                              int(data['flux_noise_abs_count'])),
+                MeanReduction(np.float64(data['flux_realized_total']),
+                              int(data['flux_realized_count'])),
+                int(data['flux_n_clipped']))
+        for name in _SCALARS:
+            if f'{name}_pattern_total' in keys:
+                class_ledger.pattern[name] = PatternLedger(
+                    data[f'{name}_pattern_total'],
+                    data[f'{name}_pattern_count'])
+            if f'{name}_a0' in keys:
+                a0 = data[f'{name}_a0']
+                solve = BoundedAddLedger(len(a0), data[f'{name}_demean'].shape[1])
+                for field in ('a0', 'demean', 'scale', 'n_loop', 'n_scale',
+                              'final_demean', 'mu'):
+                    getattr(solve, field)[...] = data[f'{name}_{field}']
+                class_ledger.bounded_add[name] = solve
+    return class_ledger

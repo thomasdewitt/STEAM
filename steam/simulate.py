@@ -659,7 +659,12 @@ def simulate(
     haar_to_mhat=None,
     bound_buffer_multiple=None,
     ledger=None,
+    stream_to_disk=False,
+    scratch_dir=None,
+    memory_budget=None,
+    fresh=False,
     _force_tiling=None,
+    _crash_hook=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -765,14 +770,54 @@ def simulate(
         recorded scalars are injected instead, reproducing that run bit-for-bit
         on the same device. This is the replay primitive the streamed path is
         built on -- a tile is never asked to re-derive a global scalar.
+    stream_to_disk : bool
+        Run out of core: size classes too large for memory are evaluated in
+        horizontal tiles with the working state on scratch disk, which lifts the
+        domain limit from RAM to disk. Output is the same as the in-RAM run to
+        the float32/FFT rounding floor with no seam-correlated structure, and a
+        streamed run is a valid refinement parent like any other.
+
+        OFF by default, and left off it does not silently engage: a run whose
+        resident working set exceeds ``memory_budget`` fails early with the
+        predicted bytes and a pointer to this flag. Changing execution mode is
+        the caller's decision, not the planner's.
+
+        Scratch sizing, for capacity planning: about 11 field-equivalents at the
+        finest grid, i.e. roughly 44 bytes per finest-grid cell, plus the
+        class-increment pyramid (~3.4 more field-equivalents) when
+        ``save_for_refinement`` is set. The planner computes the exact number and
+        refuses up front if the filesystem is short, naming both figures.
+
+        A streamed run is a VALID REFINEMENT PARENT like any other: with
+        ``save_for_refinement`` it writes the same cascade states and the same
+        class_increments group, and a nest refined from it matches a nest refined
+        from the equivalent in-RAM parent at the rounding floor.
+    scratch_dir : str, Path or None
+        Where the streamed working state lives. None puts it beside the output
+        file, deliberately: the system temporary directory is tmpfs on most
+        Linux distributions, and a tmpfs scratch directory IS memory, which
+        bounds nothing and defeats the entire feature. A RAM-backed scratch_dir
+        is refused rather than run. Prefer NVMe -- scratch I/O is this mode's
+        cost driver.
+
+        Scratch is deleted on success and RETAINED on failure, together with a
+        per-(class, phase) progress log and a manifest of the configuration.
+        Re-running the same command resumes from the last completed phase; every
+        phase is written to be re-runnable from its start. A scratch directory
+        whose manifest does not match the current configuration is refused
+        rather than mixed with it -- pass ``fresh=True`` to discard it. The
+        resident classes above the tiling horizon are not resumable and simply
+        re-run, which is cheap by construction: they are the classes that fit in
+        memory.
+    memory_budget : int or None
+        Bytes of RAM the run may use. None reads MemAvailable from
+        /proc/meminfo and takes 80% of it.
+    fresh : bool
+        Discard any existing scratch directory instead of resuming from it.
     _force_tiling : (horizon, tiles_x, tiles_y) or None
-        Internal, and the only way in to the streamed path for now: run size
-        classes from ``horizon`` on out of core, over a tiles_x by tiles_y tile
-        grid, with the working state on scratch disk. None runs in RAM. The
-        public ``stream_to_disk`` switch and its lifecycle (scratch_dir, resume,
-        cleanup) are component 5; this exists so the streamed path can be
-        tested, and so its output file can be compared variable for variable
-        against the resident one.
+        Internal: force the tiling plan instead of letting the planner choose,
+        which is how the streamed path is exercised at toy scale where nothing
+        would tile on its own. Implies ``stream_to_disk``.
 
     Returns
     -------
@@ -1033,19 +1078,69 @@ def simulate(
     # what makes the two output files comparable attribute for attribute. Only
     # the cascade itself and the composition/write differ.
     store = increment_store = None
-    if _force_tiling is not None:
-        from .streaming import TileStore, plan_tiling
-        plan = plan_tiling(grids, unit_turbulon.shape[2], force=_force_tiling,
+    resume_completed = None
+    if stream_to_disk or _force_tiling is not None:
+        from .streaming import (
+            TileStore, available_memory_budget, build_manifest,
+            check_output_space, check_scratch_filesystem, check_scratch_space,
+            plan_tiling, prepare_scratch)
+        budget = (memory_budget if memory_budget is not None
+                  else available_memory_budget())
+        plan = plan_tiling(grids, unit_turbulon.shape[2],
+                           budget_bytes=budget, device=device,
+                           force=_force_tiling,
                            save_increments=save_for_refinement)
-        # Beside the OUTPUT file, not in the system temp directory. /tmp is
-        # tmpfs on Linux, so a scratch directory there IS RAM and defeats the
-        # entire point -- the same trap that made the layout benchmark read
-        # 1.0x amplification, and the same reason simulate() already stages its
-        # class increments here. Component 5's scratch_dir= must check this.
-        scratch_root = Path(output_path).parent / f".steam_scratch_{Path(output_path).stem}"
-        store = TileStore(scratch_root)
+        # Beside the OUTPUT file, not the system temp directory: /tmp is tmpfs
+        # on most Linux distributions, so scratch there IS RAM and bounds
+        # nothing. Checked rather than hoped for -- see check_scratch_filesystem.
+        scratch_root = Path(scratch_dir) if scratch_dir is not None else (
+            Path(output_path).parent / f".steam_scratch_{Path(output_path).stem}")
+
+        # EVERY check before any compute. A run that streams for hours and then
+        # dies on a full filesystem is the failure this feature exists to
+        # prevent, so the refusals are up front and name their numbers.
+        if _force_tiling is None:
+            # The production checks belong to the PUBLIC path. `_force_tiling` is
+            # the internal entry point -- it exists to exercise tiling at toy
+            # scale, where the fields are kilobytes and a RAM-backed scratch
+            # directory is harmless rather than self-defeating. A caller reaching
+            # for the internal hook takes on the checks it skips; a caller
+            # setting stream_to_disk=True gets them all.
+            check_scratch_filesystem(scratch_root)
+        check_scratch_space(scratch_root, plan.peak_scratch_bytes)
+        check_output_space(output_path, grids, save_for_refinement)
+        manifest = build_manifest(
+            grids, plan, seed, sparsity_factors, n_scale_classes_per_dyad,
+            (h_min, h_max, qt_min, qt_max),
+            (h_profile, qt_profile, z_profile),
+            FLUX_SCALE, 'world_keyed_philox4x32_10')
+        store, resume_completed = prepare_scratch(scratch_root, manifest,
+                                                  fresh=fresh)
+        if resume_completed:
+            print(f"Resuming streamed run from {scratch_root} "
+                  f"({len(resume_completed)} phases already complete)")
         if save_for_refinement:
             increment_store = TileStore(scratch_root / "increments")
+    else:
+        # The helpful refusal. The planner already knows what the resident run
+        # needs; a MemoryError naming the number and the flag is worth more than
+        # the same run dying in the allocator two classes deeper.
+        from .streaming import (_working_bytes, available_memory_budget,
+                               scratch_hint)
+        budget = (memory_budget if memory_budget is not None
+                  else available_memory_budget())
+        if budget is not None:
+            needed = _working_bytes(nx_f, ny_f, nz_f,
+                                    unit_turbulon.shape[2], device)
+            if needed > budget:
+                raise MemoryError(
+                    f"this configuration needs about "
+                    f"{needed / 1024**3:.1f} GiB for its finest class "
+                    f"{(nx_f, ny_f, nz_f)} but the memory budget is "
+                    f"{budget / 1024**3:.1f} GiB. Pass stream_to_disk=True to "
+                    f"run it out of core (working state on scratch disk, "
+                    f"roughly {scratch_hint(grids)} of scratch), raise "
+                    f"memory_budget=, or reduce the domain.")
 
     if store is None:
         (h_pert, qt_pert, flux_field,
@@ -1068,24 +1163,33 @@ def simulate(
         )
     else:
         from .streaming import streamed_cascade_loop
-        (h_pert, qt_pert, flux_field,
-         deficit_h, deficit_qt, deficit_flux, final_grid, run_ledger,
-         store) = streamed_cascade_loop(
-            h_profile, qt_profile, z_profile,
-            grids,
-            C_h_k, C_qt_k,
-            b_h_k, b_qt_k, aspect_k,
-            h_min, h_max, qt_min, qt_max,
-            min_distance_to_ground,
-            sparsity_factors,
-            child_seeds,
-            plan, store.directory,
-            n_scale_classes_per_dyad=n_scale_classes_per_dyad,
-            turbulon_shape=turbulon_shape,
-            device=device,
-            comp_k=comp_k,
-            increment_store=increment_store,
-        )
+        try:
+            (h_pert, qt_pert, flux_field,
+             deficit_h, deficit_qt, deficit_flux, final_grid, run_ledger,
+             store) = streamed_cascade_loop(
+                h_profile, qt_profile, z_profile,
+                grids,
+                C_h_k, C_qt_k,
+                b_h_k, b_qt_k, aspect_k,
+                h_min, h_max, qt_min, qt_max,
+                min_distance_to_ground,
+                sparsity_factors,
+                child_seeds,
+                plan, store.directory,
+                n_scale_classes_per_dyad=n_scale_classes_per_dyad,
+                turbulon_shape=turbulon_shape,
+                device=device,
+                comp_k=comp_k,
+                increment_store=increment_store,
+                completed=resume_completed,
+                _crash_hook=_crash_hook,
+            )
+        except BaseException:
+            print(f"\nStreamed cascade failed. Scratch RETAINED at "
+                  f"{store.directory}\nRe-running the same command resumes "
+                  f"from the last completed phase; pass fresh=True to start "
+                  f"over.")
+            raise
 
     # Construct final 3D fields
     z_final = final_grid['z'].astype(np.float32)
@@ -1203,10 +1307,17 @@ def simulate(
             run_ledger.projection.update(projections)
             if flux_output is not None:
                 run_ledger.flux_output = flux_output
-        finally:
-            # Scratch is deleted on success and KEPT on failure: a crashed
-            # run's scratch plus its progress markers is the only thing that
-            # makes it resumable, and resume is component 5's work.
+        except BaseException:
+            # RETAINED on failure, and said so. A crashed run's scratch plus its
+            # progress log is the only thing that makes it resumable, so deleting
+            # it here would throw away the hours the run already spent. Printed
+            # rather than merely left behind, because a directory nobody knows
+            # about is not a feature.
+            print(f"\nStreamed run failed. Scratch RETAINED at {store.directory}"
+                  f"\nRe-running the same command resumes from the last "
+                  f"completed phase; pass fresh=True to start over.")
+            raise
+        else:
             store.destroy()
             if increment_store is not None:
                 increment_store.destroy()
