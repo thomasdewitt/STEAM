@@ -54,7 +54,7 @@ $dx$, $dy$ & finest (output) grid spacing & \\
 $L_z$ & domain height & \\
 $[\Phi_{\min}, \Phi_{\max}]$ & physical bounds & one pair per scalar \\
 $n_b$ & bound-buffer multiple & default 3 \\
-$m$ & minimum center distance to ground & in units of $\ell_z(\ell)$, default 1 \\
+$m$ & minimum center distance to ground & in units of $\ell_z(\ell)$, default 0 \\
 $p_s$ & surface pressure & \\
 --- & random seed & \\
 $s_x$, $s_y$, $s_z$ & sparsity factors & positive integers, default 1 \\
@@ -219,7 +219,9 @@ cells. This corresponds exactly to every $\ell/2$ in physical space horizontally
 vertical grid (Sect. \ref{ssect:working grids}) makes them less than or equal to
 $\ell_z/2$. No centers are placed within $2 s_z m$ vertical cells of the
 surface or of the domain top, corresponding to approximately $m\, \ell_z(\ell)$ in physical space with $m$
-defined in Table \ref{tab:steam inputs} (default 1). The L\'evy noise is scaled by
+defined in Table \ref{tab:steam inputs}. At the default $m = 0$ no centers are
+excluded, and turbulons centered at the boundary cells are cut off by the
+vertical zero padding. The L\'evy noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly. This can be seen by writing $\gamma_0$ for the unscaled
