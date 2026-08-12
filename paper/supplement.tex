@@ -243,12 +243,12 @@ Next, the scalar amplitudes are computed from the noise, bound factor, and gradi
 Gradients are taken with periodic
 central differences in $x$ and $y$ and with one-sided differences at the
 vertical boundaries (central in the interior). The gradient weight is computed as $W_{\Phi,\ell} =
-|\nabla_h \Phi_{>\ell}| + (\ell_z/\ell)|\partial \Phi_{>\ell}/\partial z|$. The overall weighing factor $g_\Phi W_{\Phi,\ell} S_\ell$ is divided
+|\nabla_h \Phi_{>\ell}| + (\ell_z/\ell)|\partial \Phi_{>\ell}/\partial z|$. The amplitude pattern $P_{\Phi,\ell} = g_\Phi W_{\Phi,\ell} S_\ell$ is divided
 by its mean absolute value over the turbulon centers at each level.
-The mean is taken over the centers where the product is nonzero, whether that
-center is pinned to zero by the bound taper or has an exactly zero gradient
-weight. 
-Finally, the normalized product
+Centers where the pattern is zero --- whether pinned to zero by the bound
+taper or holding an exactly zero gradient weight --- are excluded from the
+mean.
+Finally, the normalized pattern
 is multiplied by $C_{\Phi,\ell}(z)$, giving the amplitude field
 $A_\Phi$.
 
