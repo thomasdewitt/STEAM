@@ -830,3 +830,139 @@ def test_scratch_and_output_are_checked_together_on_one_filesystem(tmp_path):
     with pytest.raises(OSError, match="share a filesystem"):
         check_space(tmp_path / "scratch", tmp_path / "out.nc", scratch_need,
                     grids, True)
+
+
+# ---------------------------------------------------------------------------
+# codex final pass: data safety around the output path and destroy()
+# ---------------------------------------------------------------------------
+
+def test_output_inside_the_scratch_store_is_refused(tmp_path):
+    """codex final pass #1, their exact repro. The store's subtree is deleted on
+    success, so an output file written inside it is removed by the very run that
+    produced it -- simulate() would return a path to nothing."""
+    from steam.streaming import STORE_DIRNAME as SD
+
+    scratch = tmp_path / "scratch"
+    kwargs = _kwargs(tmp_path, "unused", _force_tiling=(2, 2, 2),
+                     scratch_dir=scratch)
+    kwargs['output_path'] = scratch / SD / "result.nc"
+    with pytest.raises(OSError, match="inside the scratch store"):
+        simulate(**kwargs)
+
+    # Deeper inside counts too.
+    kwargs['output_path'] = scratch / SD / "nested" / "result.nc"
+    with pytest.raises(OSError, match="inside the scratch store"):
+        simulate(**kwargs)
+
+    # And the symmetric direction: the store must not sit inside the output path.
+    kwargs['output_path'] = scratch
+    with pytest.raises(OSError):
+        simulate(**kwargs)
+
+    # Beside it is fine -- this is a containment check, not a blanket refusal.
+    kwargs['output_path'] = tmp_path / "beside.nc"
+    simulate(**kwargs)
+    assert (tmp_path / "beside.nc").exists()
+
+
+def test_destroy_refuses_an_unstamped_subtree(tmp_path):
+    """codex final pass #2 -- defense in depth. prepare_scratch already refuses
+    an unstamped subtree, but TileStore's constructor mkdirs its root with
+    exist_ok, so a caller using the store directly could adopt a pre-existing
+    directory and then delete it. The dangerous operation now checks its own
+    precondition instead of trusting every present and future call site."""
+    from steam.streaming import STORE_DIRNAME as SD
+    from steam.streaming import TileStore
+
+    scratch = tmp_path / "adopted"
+    root = scratch / SD
+    root.mkdir(parents=True)
+    treasure = root / "someone_elses.dat"
+    treasure.write_text("keep me")
+
+    store = TileStore(scratch)
+    with pytest.raises(OSError, match="refusing to destroy"):
+        store.destroy()
+    assert treasure.exists() and treasure.read_text() == "keep me"
+
+    # A store that created its own root DOES own it, and destroys cleanly.
+    mine = TileStore(tmp_path / "mine")
+    mine.create(0, 'field', (2, 2, 2))
+    mine.destroy()
+    assert not mine.root.exists()
+
+
+def test_a_lost_settle_record_is_a_hard_error(tmp_path):
+    """codex final pass #3. A marker says a phase completed; its settle record
+    describes the renames and drops that finish it. If the record is unreadable
+    the renames may be half-applied, so continuing would run the next phase
+    against the wrong fields -- and settle() used to return silently."""
+    from steam.streaming import TileStore
+
+    store = TileStore(tmp_path / "settle")
+    store.create(0, 'thing_next', (2, 2, 2))
+    store.mark_atomic(0, 'phase', pending_renames=[('thing_next', 'thing')])
+    assert store.exists(0, 'thing')
+
+    # Corrupt the record of an already-marked phase and demand a refusal.
+    (store.root / "settle_00_phase.json").write_text("{ truncated")
+    with pytest.raises(OSError, match="fresh=True"):
+        store.settle(0, 'phase')
+    with pytest.raises(OSError, match="fresh=True"):
+        store.settle_all({(0, 'phase')})
+
+
+def test_no_raw_durability_writes(tmp_path):
+    """The lint that closes the class.
+
+    Four separate times on this branch a structural change landed and a call site
+    drifted: settle_all() defined but never called, the store nested inside
+    itself, prepare_scratch checking the wrong directory, and the settle record
+    bypassing _atomic_write. The first three were caught by tests of behaviour;
+    the fourth was invisible to them because a missing fsync changes nothing that
+    a passing process can observe -- only a host crash can.
+
+    So this is a source scan, which is crude, and deliberately so: it turns the
+    fourth instance into the last by making the NEXT one fail at import of the
+    test suite rather than at someone's power cut. Every durability-critical
+    write in steam/streaming.py must go through _atomic_write.
+    """
+    import ast
+    import inspect
+    import steam.streaming as streaming
+
+    source = inspect.getsource(streaming)
+    tree = ast.parse(source)
+
+    # The one legitimate exception, recorded rather than left implicit: rename()
+    # swaps a DATA file as part of the settle protocol. A lost rename is
+    # recoverable, because settle is idempotent and replays it -- which is only
+    # true because the settle RECORD is durable, and that is what goes through
+    # _atomic_write.
+    allowed = {'_atomic_write', 'rename'}
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in allowed:
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            target = inner.func
+            name = None
+            if isinstance(target, ast.Attribute):
+                name = target.attr
+            if name in ('replace', 'write_text', 'write_bytes'):
+                # os.replace / Path.write_text / Path.write_bytes
+                if name == 'replace' and not (
+                        isinstance(target.value, ast.Name)
+                        and target.value.id == 'os'):
+                    continue        # str.replace and friends are not writes
+                offenders.append(f"{node.name}: {name}() at line {inner.lineno}")
+
+    assert not offenders, (
+        "durability-critical writes must go through _atomic_write (which fsyncs "
+        "the file AND its directory). Offending call sites:\n  "
+        + "\n  ".join(offenders))

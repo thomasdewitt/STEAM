@@ -1100,8 +1100,8 @@ def simulate(
     if stream_to_disk or _force_tiling is not None:
         from .streaming import (
             TileStore, available_memory_budget, build_manifest,
-            check_scratch_filesystem, check_space, plan_tiling,
-            prepare_scratch)
+            check_output_outside_store, check_scratch_filesystem, check_space,
+            plan_tiling, prepare_scratch)
         budget = (memory_budget if memory_budget is not None
                   else available_memory_budget())
         plan = plan_tiling(grids, unit_turbulon.shape,
@@ -1117,6 +1117,10 @@ def simulate(
         # EVERY check before any compute. A run that streams for hours and then
         # dies on a full filesystem is the failure this feature exists to
         # prevent, so the refusals are up front and name their numbers.
+        # The output must not live inside the subtree that cleanup deletes.
+        # Checked on BOTH entry points, unlike the tmpfs check: this one is a
+        # data-loss trap rather than a performance one.
+        check_output_outside_store(scratch_root, output_path)
         if _force_tiling is None:
             # The production checks belong to the PUBLIC path. `_force_tiling` is
             # the internal entry point -- it exists to exercise tiling at toy
@@ -1383,9 +1387,11 @@ def simulate(
                   f"completed phase; pass fresh=True to start over.")
             raise
         else:
+            # One destroy: the increments sub-store lives INSIDE this store's
+            # owned subtree, so removing the subtree removes it too. Calling its
+            # own destroy() as well would be the one caller relying on
+            # destroying a stampless directory.
             store.destroy()
-            if increment_store is not None:
-                increment_store.destroy()
         return output_path
 
     write_netcdf(

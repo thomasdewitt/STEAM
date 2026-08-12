@@ -317,9 +317,21 @@ class TileStore:
         # is irrelevant rather than protected by a list of the files we own.
         self.root = (Path(owned_root) if owned_root is not None
                      else self.scratch_dir / STORE_DIRNAME)
+        # A store that CREATES its root owns it, and stamps it immediately so
+        # destroy() will accept it later. A store handed a root that already has
+        # content and no stamp does NOT claim it -- that subtree is someone
+        # else's, destroy() refuses it, and prepare_scratch reports it as "not a
+        # scratch store". Ownership is thus established once, where the directory
+        # comes into existence, rather than asserted by each caller.
+        fresh = not self.root.exists() or not any(self.root.iterdir())
         self.root.mkdir(parents=True, exist_ok=True)
-        self._open = {}          # logical (nx, ny, nz) views
-        self._raw = {}           # the (nz, nx, ny) buffers they are views of
+        self._open = {}
+        self._raw = {}
+        if fresh and self.read_manifest() is None:
+            # A bare ownership stamp, with no configuration fingerprint: a
+            # resume against it is refused rather than mixing configurations,
+            # and prepare_scratch overwrites it with the real manifest.
+            self.write_manifest({'claimed_only': True})
 
     @property
     def directory(self):
@@ -455,10 +467,16 @@ class TileStore:
             'renames': [list(pair) for pair in pending_renames],
             'drops': list(pending_drops),
         }
-        settle_path = self.directory / f"settle_{class_index:02d}_{phase}.json"
-        temporary = settle_path.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(record))
-        os.replace(temporary, settle_path)
+        settle_path = self.root / f"settle_{class_index:02d}_{phase}.json"
+        # Through _atomic_write, like every other record this store commits. It
+        # used write_text + os.replace and was therefore never fsynced, while its
+        # marker WAS -- so a host crash could leave a durable marker whose settle
+        # record was lost, and the phase would then be skipped with its old
+        # fields still active (codex final pass #3). Fourth instance of "a
+        # structural change lands and a call site drifts";
+        # test_no_raw_durability_writes closes the class.
+        payload = json.dumps(record).encode()
+        _atomic_write(settle_path, lambda handle: handle.write(payload))
         self.mark(class_index, phase)
         self.settle(class_index, phase)
 
@@ -470,13 +488,27 @@ class TileStore:
         every marked phase, which is what makes the restart rule a single clause
         -- before the marker, re-run the phase; after it, settle and continue.
         """
-        settle_path = self.directory / f"settle_{class_index:02d}_{phase}.json"
+        settle_path = self.root / f"settle_{class_index:02d}_{phase}.json"
         if not settle_path.exists():
+            # Nothing recorded: either the phase had nothing to settle, or the
+            # marker predates settle records. Both benign.
             return
         try:
             record = json.loads(settle_path.read_text())
         except ValueError:
-            return
+            raise OSError(
+                f"the settle record for class {class_index} phase {phase} "
+                f"({settle_path}) is unreadable. Its marker says the phase "
+                f"completed, so the renames and drops it describes may be "
+                f"half-applied, and continuing would run the next phase against "
+                f"the wrong fields. Refusing rather than skipping it silently -- "
+                f"a lost settle record must never be silently skippable. Pass "
+                f"fresh=True to discard the scratch store and start over."
+            ) from None
+        if not isinstance(record, dict):
+            raise OSError(
+                f"the settle record at {settle_path} is not an object; see the "
+                f"message above. Pass fresh=True to start over.")
         for source, target in record.get('renames', []):
             source_path = self._path(class_index, source)
             if source_path.exists():
@@ -573,6 +605,20 @@ class TileStore:
         """
         for key in list(self._open):
             self.close(*key)
+        if not self.root.exists():
+            return
+        if any(self.root.iterdir()) and self.read_manifest() is None:
+            # DEFENSE IN DEPTH (codex final pass #2). prepare_scratch already
+            # refuses an unstamped subtree, but the constructor mkdirs its root
+            # with exist_ok=True, so a caller using TileStore directly -- the
+            # driver, a future script -- could adopt a pre-existing directory and
+            # then delete it. The dangerous operation checks its own precondition
+            # rather than trusting every present and future call site.
+            raise OSError(
+                f"refusing to destroy {self.root}: it is not empty and carries "
+                f"no {STORE_SCHEMA!r} manifest, so it is not a scratch store "
+                f"this code created. Delete it deliberately if that is what you "
+                f"mean.")
         shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -1696,6 +1742,30 @@ def is_tmpfs(path):
             if depth > best:
                 best, best_type = depth, filesystem
     return best_type in ('tmpfs', 'ramfs', 'devtmpfs')
+
+
+def check_output_outside_store(scratch_dir, output_path):
+    """Refuse an output path that the scratch cleanup would delete.
+
+    The store's subtree is removed on success, so an output file written inside
+    it is deleted by the very run that produced it and simulate() returns a path
+    to nothing (codex final pass #1, reproduced with
+    output_path = scratch_dir/steam-scratch-store/result.nc). Checked in both
+    directions: the store must not contain the output, and the output must not
+    contain the store.
+    """
+    store_root = (Path(scratch_dir) / STORE_DIRNAME).resolve()
+    output = Path(output_path).resolve()
+    if store_root == output or store_root in output.parents:
+        raise OSError(
+            f"output_path {output} is inside the scratch store {store_root}, "
+            f"which is DELETED when the run succeeds -- the run would return a "
+            f"path to a file it had just removed. Write the output elsewhere, or "
+            f"point scratch_dir= elsewhere.")
+    if output in store_root.parents:
+        raise OSError(
+            f"the scratch store {store_root} would sit inside the output path "
+            f"{output}. Choose a different scratch_dir=.")
 
 
 def check_scratch_filesystem(directory):
