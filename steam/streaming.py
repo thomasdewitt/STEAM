@@ -60,6 +60,12 @@ from .ledger import (
 STATE_FIELDS = ('h_perturbation', 'qt_perturbation', 'flux')
 # Written within a class by pass 2 and consumed by pass 3.
 CANDIDATE_FIELDS = ('h_increment', 'qt_increment')
+# The interpolation-compensation deficits: sum over classes of (f_i(z) - 1)
+# times the increment that class actually added. Carried between classes down
+# the same regrid chain as the state, and allocated lazily at the first class
+# with f != 1, exactly as cascade_loop does -- the well-resolved classes carry
+# none, so on a production ladder these exist only for the last nine.
+DEFICIT_FIELDS = {'h': 'h_deficit', 'qt': 'qt_deficit', 'flux': 'flux_deficit'}
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +420,8 @@ def _working_bytes(nx, ny, nz, kernel_nz, device):
     return total
 
 
-def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None):
+def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
+                save_increments=False):
     """Choose the RAM horizon, the per-class tile grids, and the halo.
 
     ``force`` is (horizon, tiles_x, tiles_y) and overrides the search entirely:
@@ -480,16 +487,28 @@ def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None):
                     tiles_y *= 2
             tiles[index] = (tiles_x, tiles_y)
 
-    # Peak scratch: at class i the previous class's three state fields are still
-    # live (pass 0 reads them) alongside this class's three state fields and two
-    # candidate increments. The previous class is dropped as soon as pass 0
-    # finishes, so this is the true peak rather than the cascade's total.
+    # Peak scratch. Per class the store can hold, at the widest moment (pass 0,
+    # which has both classes live):
+    #   previous class: 3 state + 3 deficit                 = 6 fields
+    #   this class:     3 state + 3 deficit + 2 candidate
+    #                   + 1 flux double-buffer              = 9 fields
+    # The deficits exist only from the first class with f != 1 onward, and the
+    # candidates only within a class; counting them always is deliberate --
+    # a planner that UNDER-predicts is worse than no planner, because the run
+    # dies deep instead of refusing up front. (Caught 2026-08-12: adding the
+    # deficits made the old 3+5 estimate under-predict, and the accounting test
+    # failed rather than the run.)
     peak = 0
     for index in range(max(horizon, 1), n_classes):
-        peak = max(peak, 3 * _field_bytes(grids, index - 1)
-                   + 5 * _field_bytes(grids, index))
+        peak = max(peak, 6 * _field_bytes(grids, index - 1)
+                   + 9 * _field_bytes(grids, index))
     if horizon == 0:
-        peak = max(peak, 5 * _field_bytes(grids, 0))
+        peak = max(peak, 9 * _field_bytes(grids, 0))
+    if save_increments:
+        # Three applied increments per class, kept until the output file is
+        # written. A geometric pyramid over the ladder, not a per-class cost.
+        peak += 3 * sum(_field_bytes(grids, index)
+                        for index in range(horizon, n_classes))
     return TilePlan(horizon, tiles, halo, peak)
 
 
@@ -557,6 +576,8 @@ def streamed_cascade_loop(
     zero_bottom=True,
     zero_top=True,
     device='cpu',
+    comp_k=None,
+    increment_store=None,
 ):
     """cascade_loop for a ROOT run, paged through RAM in horizontal tiles.
 
@@ -571,16 +592,23 @@ def streamed_cascade_loop(
     the tiling argument simple enough to trust; a streamed nest would need the
     halo bookkeeping to compose with the tile halo, which is not this component.
 
-    The interpolation-compensation DEFICITS are not carried (component 4). They
-    feed only the output composition -- the cascade state never reads them -- so
-    the states and the ledger this returns are complete, and the deficits become
-    component 4's business along with the composition that consumes them.
+    ``comp_k`` is the per-class, per-level interpolation compensation, as
+    cascade_loop takes it. Where it differs from one the run accumulates the
+    three DEFICIT fields in the store, lazily and down the same regrid chain as
+    the state; they feed only the output composition, which never touches the
+    cascade state.
 
-    Returns (h_perturbation, qt_perturbation, flux, None, None, None,
-    final_grid_info, ledger, store). The three fields are memory-mapped views on
-    the scratch store rather than resident arrays: assembling them in RAM would
-    undo the whole point at production scale, and component 4 writes them out as
-    hyperslabs. The caller owns the store and must destroy() it.
+    ``increment_store`` is a second TileStore. Given one, each class's ACTUALLY
+    ADDED increment is persisted into it (per scalar from the plane pass, for
+    the flux from the rescale visit) -- what save_for_refinement stores, and
+    what a nest replays to compose its own output.
+
+    Returns (h_perturbation, qt_perturbation, flux, deficit_h, deficit_qt,
+    deficit_flux, final_grid_info, ledger, store). The fields are memory-mapped
+    views on the scratch store rather than resident arrays: assembling them in
+    RAM would undo the whole point at production scale, so the composition
+    writes them out in hyperslabs. Deficits are None where every class was well
+    resolved. The caller owns the store and must destroy() it.
     """
     from .simulate import (
         CONVOLVE, FLUX_ALPHA, FLUX_SCALE, LEVY_LOG_MEAN, SUPPORT_FACTOR,
@@ -608,9 +636,21 @@ def streamed_cascade_loop(
                                 support_factor=SUPPORT_FACTOR,
                                 shape=turbulon_shape)
     class_keys = [class_key(child) for child in class_seeds]
+    if comp_k is None:
+        from .simulate import _interpolation_compensation
+        k_finest = float(grids['k'][n_classes - 1])
+        comp_k = [np.full(int(grids['nz'][i]), np.float32(
+                      _interpolation_compensation(2.0 * grids['k'][i] / k_finest)))
+                  for i in range(n_classes)]
     ledger = RunLedger(n_classes)
     store = TileStore(scratch_dir)
     scale_c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
+    # The resident head stages its per-class increments the way cascade_loop
+    # already does (npy per class), beside the streamed store's own.
+    head_increment_dir = None
+    if increment_store is not None and horizon > 0:
+        head_increment_dir = Path(scratch_dir) / "head_increments"
+        head_increment_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- above the horizon: today's resident loop, unchanged ----------------
     if horizon > 0:
@@ -618,7 +658,12 @@ def streamed_cascade_loop(
                           if key not in ('z_arrays', 'dz_arrays')
                           else grids[key][:horizon])
                     for key in grids}
-        (h_pert, qt_pert, flux_field, _, _, _, _,
+        # comp_k[:horizon], NOT the default cascade_loop would compute: the
+        # default is derived from the finest class of the grids it is handed, so
+        # a sliced head would compensate its classes as though the cascade
+        # stopped there. Caught 2026-08-12 by the deficit comparison -- the
+        # states matched and the deficits were 11% out.
+        (h_pert, qt_pert, flux_field, deficit_h, deficit_qt, deficit_flux, _,
          head_ledger) = cascade_loop(
             h_profile, qt_profile, z_profile, resident,
             C_h_k[:horizon], C_qt_k[:horizon],
@@ -629,27 +674,30 @@ def streamed_cascade_loop(
             flux_noise_scale=flux_noise_scale,
             turbulon_shape=turbulon_shape,
             zero_bottom=zero_bottom, zero_top=zero_top, device=device,
+            comp_k=comp_k[:horizon],
+            increment_dir=head_increment_dir,
         )
         for index in range(horizon):
             ledger.classes[index] = head_ledger.classes[index]
+        # The head's deficits come across too, on its own final grid, and are
+        # regridded onward with the state like any other carried field.
         for name, field in (('h_perturbation', h_pert),
                             ('qt_perturbation', qt_pert),
-                            ('flux', flux_field)):
+                            ('flux', flux_field),
+                            ('h_deficit', deficit_h),
+                            ('qt_deficit', deficit_qt),
+                            ('flux_deficit', deficit_flux)):
+            if field is None:
+                continue
             store.create(horizon - 1, name, field.shape)[...] = field
             store.close(horizon - 1, name)
-        del h_pert, qt_pert, flux_field
+        del h_pert, qt_pert, flux_field, deficit_h, deficit_qt, deficit_flux
     else:
         # Nothing ran in RAM, so class 0's store IS the cascade's initial state.
         shape = (int(grids['nx'][0]), int(grids['ny'][0]), int(grids['nz'][0]))
         store.create(-1, 'h_perturbation', shape, fill=0.0)
         store.create(-1, 'qt_perturbation', shape, fill=0.0)
         store.create(-1, 'flux', shape, fill=1.0)
-
-    # The flux's per-class volume-mean restore, folded into the NEXT class's
-    # read instead of costing a third sweep over the tiles (spec, component 3).
-    # In-RAM order is rescale-then-regrid, so it is applied to the source slab
-    # before interpolation -- see regrid_window's `scale`.
-    pending_flux_rescale = None
 
     for index in range(max(horizon, 0), n_classes):
         nx_k = int(grids['nx'][index])
@@ -673,14 +721,19 @@ def streamed_cascade_loop(
              C_qt_k[index], b_qt_k[index], qt_min, qt_max),
         )
 
+        deficit_i = comp_k[index] - np.float32(1.0)
+        class_has_deficit = bool(np.any(deficit_i))
+        carried = list(STATE_FIELDS) + [
+            name for name in DEFICIT_FIELDS.values()
+            if store.exists(previous, name)]
+
         # ---- pass 0: regrid the previous class's store onto this grid -------
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  regrid...', end='\r')
-        for name in STATE_FIELDS:
+        for name in carried:
             source_shape = store.open(previous, name).shape
             store.create(index, name, world_shape)
-            scale = pending_flux_rescale if name == 'flux' else None
 
             def read_slab(x_lo, x_hi, y_lo, y_hi, _name=name):
                 return store.read_window(previous, _name, x_lo, x_hi,
@@ -692,22 +745,25 @@ def streamed_cascade_loop(
                 source_planes = store.plane_array(previous, name)
                 target_planes = store.plane_array(index, name)
                 for level in range(nz_k):
-                    if scale is None:
-                        target_planes[level] = source_planes[level]
-                    else:
-                        target_planes[level] = (source_planes[level]
-                                                * np.float32(scale))
+                    target_planes[level] = source_planes[level]
             else:
                 for x_lo, x_hi, y_lo, y_hi in windows:
                     store.write_window(
                         index, name, x_lo, x_hi, y_lo, y_hi,
                         regrid_window(read_slab, source_shape, world_shape,
-                                      (x_lo, x_hi, y_lo, y_hi), scale=scale))
+                                      (x_lo, x_hi, y_lo, y_hi)))
             store.plane_array(index, name).flush()
             store.close(index, name)
-        for name in STATE_FIELDS:
+        for name in carried:
             store.drop(previous, name)
-        pending_flux_rescale = None
+        # A class whose compensation differs from one starts the deficits if no
+        # earlier class already did. Once they exist they are carried on, even
+        # through classes with f == 1, because the accumulated sum is what the
+        # composition adds.
+        if class_has_deficit:
+            for name in DEFICIT_FIELDS.values():
+                if not store.exists(index, name):
+                    store.create(index, name, world_shape, fill=0.0)
         store.mark(index, 'regrid')
 
         per_class_scale = scale_c / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
@@ -856,16 +912,16 @@ def streamed_cascade_loop(
                 del candidate
             del S_k
         store.plane_array(index, 'flux_next').flush()
-        store.drop(index, 'flux')
-        store.rename(index, 'flux_next', 'flux')
+        # The swap is DEFERRED to pass 3: forming the flux's actually-added
+        # increment needs the entering flux ('flux') and the advanced flux
+        # ('flux_next') live at the same time, after the rescale.
         for name in CANDIDATE_FIELDS:
             store.plane_array(index, name).flush()
 
         class_ledger.flux = FluxAdvanceLedger(entering, noise_abs, realized,
                                               n_clipped)
-        # Folded into the next class's read (see pending_flux_rescale).
-        pending_flux_rescale = class_ledger.flux.rescale
-        if pending_flux_rescale is None:
+        flux_rescale = class_ledger.flux.rescale
+        if flux_rescale is None:
             raise RuntimeError(
                 f"class {index}: the whole domain clipped to zero, which the "
                 f"in-RAM path handles by flattening the flux to its entering "
@@ -877,10 +933,52 @@ def streamed_cascade_loop(
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  planes... ', end='\r')
+        # The flux finishes INSIDE its class (2026-08-12). The rescale used to
+        # be folded into the next class's read, which left the stored flux in a
+        # half-advanced state and made the last class a special case; worse, the
+        # flux's actually-added increment is defined across the WHOLE advance
+        # including the rescale, so it could not be formed at all. Applying the
+        # rescale here -- one multiply per plane, cheap beside the plane pass's
+        # own traffic -- makes "the store always holds a fully advanced flux" an
+        # invariant, and hands the deficit and save_for_refinement the increment
+        # they need.
+        entering_planes = store.plane_array(index, 'flux')
+        advanced_planes = store.plane_array(index, 'flux_next')
+        flux_deficit_planes = (
+            store.plane_array(index, 'flux_deficit')
+            if store.exists(index, 'flux_deficit') else None)
+        record_flux = increment_store is not None
+        if record_flux:
+            increment_store.create(index, 'flux', world_shape)
+            flux_increment_planes = increment_store.plane_array(index, 'flux')
+        for level in range(nz_k):
+            advanced = advanced_planes[level] * np.float32(flux_rescale)
+            if flux_deficit_planes is not None or record_flux:
+                applied = advanced - entering_planes[level]
+                if flux_deficit_planes is not None:
+                    flux_deficit_planes[level] += (
+                        np.float32(deficit_i[level]) * applied)
+                if record_flux:
+                    flux_increment_planes[level] = applied
+            advanced_planes[level] = advanced
+        if record_flux:
+            increment_store.plane_array(index, 'flux').flush()
+            increment_store.close(index, 'flux')
+        store.plane_array(index, 'flux_next').flush()
+        store.drop(index, 'flux')
+        store.rename(index, 'flux_next', 'flux')
+
         for (name, state_name, increment_name, mean_1d, _, _, phi_min,
              phi_max) in scalars:
             state_planes = store.plane_array(index, state_name)
             candidate_planes = store.plane_array(index, increment_name)
+            deficit_name = DEFICIT_FIELDS[name]
+            deficit_planes = (store.plane_array(index, deficit_name)
+                              if store.exists(index, deficit_name) else None)
+            increment_planes = None
+            if increment_store is not None:
+                increment_store.create(index, name, world_shape)
+                increment_planes = increment_store.plane_array(index, name)
             solve = BoundedAddLedger(nz_k)
             for level in range(nz_k):
                 # The domain of a streamed run is the world, so an assembled
@@ -897,25 +995,30 @@ def streamed_cascade_loop(
                     phi_min, phi_max, window=None, device=device,
                     record_applied=True)
                 state_planes[level] = plane_state[:, :, 0]
+                # record_applied left the ACTUALLY-ADDED delta in the candidate
+                # -- after minus before, float32 rounding included, which is
+                # what the deficit compensates and what a nest replays.
+                applied = plane_candidate[:, :, 0]
+                if deficit_planes is not None:
+                    deficit_planes[level] += np.float32(deficit_i[level]) * applied
+                if increment_planes is not None:
+                    increment_planes[level] = applied
                 for field in ('a0', 'n_loop', 'n_scale', 'final_demean', 'mu'):
                     getattr(solve, field)[level] = getattr(level_solve, field)[0]
                 solve.demean[level] = level_solve.demean[0]
                 solve.scale[level] = level_solve.scale[0]
             class_ledger.bounded_add[name] = solve
             store.plane_array(index, state_name).flush()
+            if deficit_planes is not None:
+                deficit_planes.flush()
+            if increment_planes is not None:
+                increment_store.plane_array(index, name).flush()
+                increment_store.close(index, name)
             store.drop(index, increment_name)
         store.mark(index, 'planes')
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  done          ')
-
-    # The last class's rescale has no next read to fold into.
-    if pending_flux_rescale is not None:
-        flux_store = store.open(n_classes - 1, 'flux')
-        for x_lo, x_hi, y_lo, y_hi in windows:
-            flux_store[x_lo:x_hi, y_lo:y_hi] *= np.float32(
-                pending_flux_rescale)
-        store.plane_array(n_classes - 1, 'flux').flush()
 
     final = n_classes - 1
     final_grid_info = {
@@ -924,7 +1027,12 @@ def streamed_cascade_loop(
         'dy': float(grids['dy'][final]), 'dz': grids['dz_arrays'][final],
         'z': grids['z_arrays'][final],
     }
+    def deficit_or_none(name):
+        return (store.open(final, name) if store.exists(final, name) else None)
+
     return (store.open(final, 'h_perturbation'),
             store.open(final, 'qt_perturbation'),
             store.open(final, 'flux'),
-            None, None, None, final_grid_info, ledger, store)
+            deficit_or_none('h_deficit'), deficit_or_none('qt_deficit'),
+            deficit_or_none('flux_deficit'),
+            final_grid_info, ledger, store)
