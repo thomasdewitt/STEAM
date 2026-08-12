@@ -397,9 +397,55 @@ the rounding floor, seam-binned difference statistics flat. Plus: tile count
 non-square tiles, domain-edge tiles wrapping the periodic boundary,
 save_for_refinement increments written correctly from streamed mode.
 
-### 4. Streamed composition, diagnostics, output  [IN PROGRESS 2026-08-12]
+### 4. Streamed composition, diagnostics, output  [LANDED 2026-08-12]
 
-**Landed: the I/O layout prerequisite, and items 1-3 of 5.**
+A streamed run produces a COMPLETE output file.
+`simulate(_force_tiling=(horizon, tiles_x, tiles_y))` is the internal entry
+point; the public switch and lifecycle are component 5.
+
+**MEASURED**, streamed vs resident written file (32² × 10, four classes, 2×2):
+
+| variable | relative |
+|---|---|
+| h / qt / flux | 9.1e-08 / 1.8e-07 / 2.6e-07 |
+| h_pert / qt_pert / flux_state | 1.0e-06 / 3.6e-07 / 1.6e-07 |
+| T / p / qv / qc / qi | 2.0e-07 / 7.7e-08 / 5.3e-07 / 3.1e-06 / 0 |
+| **nest from streamed parent** | **9.1e-08 / 1.8e-07 / 3.5e-07** |
+| **seam ratio, composed h / qt (4×4)** | **0.93 / 1.04** |
+
+The composed fields are TIGHTER than the states they come from — arithmetic, not
+luck: h is ~3.4e5 against a ~1e3 perturbation. The 2×2 seam ratio reads 1.58 on
+h, which is sampling noise on a 124-cell bin; 4×4 doubles the sample and reads
+0.93. Both recorded so nobody rediscovers that the 2×2 number is noisy.
+
+**Diagnostics needed no streaming work.** `compute_diagnostics` already walks a
+written file in x-chunks, so the item reduced to "write h/qt/flux, then call it
+as-is" — checked before writing any code. The saturation adjustment did not
+amplify anywhere here (0.0000% of cells past 1e-5 of scale for every condensate
+variable), and a dedicated test pins that fraction so a configuration that DOES
+amplify gets characterized rather than absorbed into a looser tolerance.
+
+**Structure:** composition per-LEVEL on the store's z-major planes (which is what
+the projection is), file written per-TILE in x-y with full z (which is what the
+output variable's chunks are). Composing straight into the NetCDF variable plane
+by plane would touch every chunk per level — the memmap trap one level up. Two
+hooks carry it: `write_netcdf(tile_writer=)` and
+`write_class_increments(readers=)`.
+
+Everything after the cascade — coordinates, stored ladder, `simulation_params` —
+is SHARED between the paths, which is what makes the files comparable attribute
+for attribute; `test_file_structure_is_identical` asserts it.
+
+**Bug the ledger round-trip caught:** the composition's projections were merged
+into the run ledger AFTER `write_netcdf` serialized the ledger group, so the
+streamed file's projection group was empty while every field agreed. Same shape
+as the resident-head deficit bug — a quantity the main comparison cannot see.
+
+**Scratch goes beside the output file, never /tmp**, which is tmpfs: scratch
+there IS RAM and defeats the feature. Component 5's `scratch_dir=` must detect
+and refuse or warn.
+
+Earlier in this component:
 
 **Layout (prerequisite, found in review).** The store is now Z-MAJOR, stored as
 (nz, nx, ny) behind an (nx, ny, nz) view. On a C-ordered (nx, ny, nz) field the
@@ -445,15 +491,6 @@ RESIDENT HEAD, not the tiles:** the head's `cascade_loop` was called without
 handed — compensating its classes as though the cascade stopped at the horizon.
 The states matched perfectly while the deficits were 11% out. An independent
 quantity is the only thing that could have shown this.
-
-**STILL TO DO (items 3-remainder, 4, 5):** the composition itself
-(`_compose_output`'s projection per plane, `_compose_flux_output`'s
-measure/apply), diagnostics, NetCDF hyperslab writing, `class_increments`
-wiring, and the end-to-end gate on the written file including
-refine-from-a-streamed-parent. The pieces below the store are in place: the
-plane-major layout makes the per-level projection cheap, the ledger already has
-`ProjectionLedger` / `FluxOutputLedger` slots from component 2, and the
-increments and deficits are recorded and verified.
 
 The original component description follows.
 
