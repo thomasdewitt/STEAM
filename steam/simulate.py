@@ -14,6 +14,15 @@ from .constants import (
     haar_to_mhat as HAAR_TO_MHAT,
 )
 from . import turbulons as _turbulons
+from .ledger import (
+    BoundedAddLedger,
+    FluxAdvanceLedger,
+    FluxOutputLedger,
+    MeanReduction,
+    PatternLedger,
+    ProjectionLedger,
+    RunLedger,
+)
 from .noise import center_indices, class_key, keyed_uniforms
 from .utils import (
     convolve_periodic_xy_zeropad_z,
@@ -1003,7 +1012,7 @@ def simulate(
                                     anisotropy)
 
     (h_pert, qt_pert, flux_field,
-     deficit_h, deficit_qt, deficit_flux, final_grid) = cascade_loop(
+     deficit_h, deficit_qt, deficit_flux, final_grid, run_ledger) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -1025,14 +1034,24 @@ def simulate(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    h_3d = _compose_output(h_pert, deficit_h, h_mean_final, h_min, h_max,
-                           device=device)
-    qt_3d = _compose_output(qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max,
-                            device=device)
+    # The composition's own reductions go into the same ledger the cascade
+    # filled: they are realized global scalars like any other, and a streamed
+    # run reaches them through the same plane pass.
+    h_3d, projection_h = _compose_output(
+        h_pert, deficit_h, h_mean_final, h_min, h_max, device=device,
+        ledger=run_ledger.projection.get('h'))
+    qt_3d, projection_qt = _compose_output(
+        qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max, device=device,
+        ledger=run_ledger.projection.get('qt'))
     del deficit_h, deficit_qt
 
-    flux_3d = _compose_flux_output(flux_field, deficit_flux)
+    flux_3d, run_ledger.flux_output = _compose_flux_output(
+        flux_field, deficit_flux, ledger=run_ledger.flux_output)
     del deficit_flux
+    if projection_h is not None:
+        run_ledger.projection['h'] = projection_h
+    if projection_qt is not None:
+        run_ledger.projection['qt'] = projection_qt
 
     nx_final_val = h_3d.shape[0]
     ny_final_val = h_3d.shape[1]
@@ -1109,6 +1128,7 @@ def simulate(
         h_pert_3d=h_pert if save_for_refinement else None,
         qt_pert_3d=qt_pert if save_for_refinement else None,
         flux_state_3d=flux_field if save_for_refinement else None,
+        run_ledger=run_ledger,
     )
     if increment_dir is not None:
         from .output import write_class_increments
@@ -1141,6 +1161,7 @@ def cascade_loop(
     inner_windows=None,
     world_origins=None,
     world_shapes=None,
+    ledger=None,
     flux_noise_scale=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
@@ -1232,6 +1253,12 @@ def cascade_loop(
         Dimensions of those world grids, used to wrap an index that runs off a
         periodic edge. None means each class's own grid shape, so wrapping is
         a no-op -- correct for a root, which spans the world.
+    ledger : steam.ledger.RunLedger or None
+        None records a fresh ledger while running normally. A recorded ledger
+        runs APPLY-ONLY: every solve and every reduction is skipped and the
+        recorded scalars are injected, reproducing the run bit-for-bit on the
+        same device. Replay is device-specific -- the GPU's reduction order is
+        not numpy's -- and a ledger only replays the run that recorded it.
     zero_bottom, zero_top : bool
         Whether to zero the bottom/top n_zero cells of the sparse noise
         at each class. True when the z-boundary corresponds to ground or
@@ -1256,6 +1283,9 @@ def cascade_loop(
     final_grid_info : dict
         Keys nx, ny, nz, dx, dy, dz (mean), z (1D coordinate array) from
         the last (finest) iteration.
+    ledger : steam.ledger.RunLedger
+        Every realized global reduction the run took, per class. The one passed
+        in when replaying; a freshly recorded one otherwise.
     """
     s_x, s_y, s_z = sparsity_factors
     n_classes = len(grids['k'])
@@ -1302,6 +1332,29 @@ def cascade_loop(
         )
     class_keys = [class_key(child) for child in class_seeds]
 
+    # MEASURE / APPLY (2026-08-12, component 2). Every realized global
+    # reduction of a class -- the product norms, the flux means, the bounded
+    # add's solved per-level constants -- is recorded in the ledger and read
+    # back from it, never used straight from the reduction that produced it.
+    # In RAM that is a naming exercise: measure, reduce and apply run
+    # back-to-back on the resident array and the arithmetic is untouched, so
+    # the output is bit-identical to the fused form. Out of core it is the
+    # whole point: sweep 1 accumulates the partials tile by tile, they reduce,
+    # and sweep 2 applies the totals.
+    #
+    # ``ledger`` in means APPLY-ONLY: every solve is skipped and the recorded
+    # scalars are injected instead, which reproduces the run bit-for-bit on the
+    # same device. That is a streamed tile's replay primitive, and it is also
+    # what demonstrates the seam is real -- a fused reduction cannot be
+    # bypassed, so if replay works, the split is genuine.
+    if ledger is None:
+        ledger = RunLedger(n_classes)
+    elif len(ledger.classes) != n_classes:
+        raise ValueError(
+            f"ledger has {len(ledger.classes)} classes for {n_classes} size "
+            f"classes; a ledger only replays the run that recorded it"
+        )
+
     # Kernel is identical every iteration — hoist it out of the loop
     kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
                                 support_factor=SUPPORT_FACTOR, shape=turbulon_shape)
@@ -1335,6 +1388,7 @@ def cascade_loop(
         padded_h_i = float(padded_height[i])
         z_min_i = float(z_min_per_class[i])
         window = None if inner_windows is None else tuple(inner_windows[i])
+        class_ledger = ledger.classes[i]
 
         print(f'Step {i+1:3d}/{n_classes:3d}: k={k:6.0f}m, grid=({nx_k:4d},{ny_k:4d},{nz_k:4d})           interpolating...', end='\r')
 
@@ -1425,12 +1479,12 @@ def cascade_loop(
         # transient field, at the same classes where the peak already is.
         need_flux_increment = class_has_deficit or increment_dir is not None
         flux_before = flux.copy() if need_flux_increment else None
-        S_k, _ = _advance_flux(
+        S_k, class_ledger.flux, _ = _advance_flux(
             flux, noise_region, kernel,
             FLUX_SCALE if flux_noise_scale is None else flux_noise_scale,
             n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
-            device=device, window=window,
+            device=device, window=window, ledger=class_ledger.flux,
         )
         if need_flux_increment:
             np.subtract(flux, flux_before, out=flux_before)
@@ -1494,15 +1548,24 @@ def cascade_loop(
             # axes (0, 1) of an (x, y, z) array accumulates in index order,
             # which is the same whether the operand is this contiguous buffer
             # or the window's strided view of it (verified both ways).
+            # MEASURE (product norm). The per-level sum and turbulon-center
+            # count, both additive across tiles, which is why the ledger keeps
+            # them separately rather than the mean they imply.
             absolute_W = running_sum
             del running_sum
-            inner = _inner_view(W, window)
-            inner_absolute = _inner_view(absolute_W, window)
-            np.abs(inner, out=inner_absolute)
-            level_sum = inner_absolute.sum(axis=(0, 1), dtype=np.float64)
-            level_cnt = np.count_nonzero(inner, axis=(0, 1))
-            del absolute_W, inner_absolute
-            level_mean = (level_sum / np.maximum(level_cnt, 1)).astype(np.float32)
+            if class_ledger.pattern.get(name) is None:
+                inner = _inner_view(W, window)
+                inner_absolute = _inner_view(absolute_W, window)
+                np.abs(inner, out=inner_absolute)
+                class_ledger.pattern[name] = PatternLedger(
+                    inner_absolute.sum(axis=(0, 1), dtype=np.float64),
+                    np.count_nonzero(inner, axis=(0, 1)))
+                del inner, inner_absolute
+            del absolute_W
+
+            # APPLY. Structureless levels (level_mean == 0) keep W = 0 rather
+            # than dividing by nothing.
+            level_mean = class_ledger.pattern[name].level_mean
             W /= np.where(level_mean > 0, level_mean, np.float32(1.0))[None, None, :]
 
             W *= C_k_i          # 1D broadcast: mean amplitude C_k(z)
@@ -1525,9 +1588,17 @@ def cascade_loop(
             # interpolation compensation ever multiplies: the running
             # state stays uncompensated, and the deficit field accumulates
             # (f_i - 1) times what was added, down the same regrid chain.
-            _bounded_amplitude_add(perturbation_field, mean_1d, increment,
-                                   phi_min, phi_max, window=window, device=device,
-                                   record_applied=True)
+            # SOLVE / APPLY. In RAM these are one pass: the solve records each
+            # per-level scalar as it takes it and applies it immediately, which
+            # costs nothing and moves nothing. Given a recorded ledger the same
+            # call replays the sequence with no reduction at all — the seam a
+            # streamed run needs, where the solve happens on an assembled
+            # z-plane and the apply happens tile by tile.
+            class_ledger.bounded_add[name] = _bounded_amplitude_add(
+                perturbation_field, mean_1d, increment,
+                phi_min, phi_max, window=window, device=device,
+                record_applied=True,
+                ledger=class_ledger.bounded_add.get(name))
             if deficit_field is not None:
                 deficit_field += deficit_i[np.newaxis, np.newaxis, :] * increment
             if increment_dir is not None:
@@ -1554,7 +1625,7 @@ def cascade_loop(
         'z': z_k,
     }
     return (h_perturbation, qt_perturbation, flux,
-            deficit_h, deficit_qt, deficit_flux, final_grid_info)
+            deficit_h, deficit_qt, deficit_flux, final_grid_info, ledger)
 
 
 def _inner_view(field, window):
@@ -1574,7 +1645,7 @@ def _inner_view(field, window):
 def _advance_flux(
     flux, noise_region, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
-    device='cpu', window=None,
+    device='cpu', window=None, ledger=None,
 ):
     """Advance the dimensionless flux cascade by one size class.
 
@@ -1614,16 +1685,32 @@ def _advance_flux(
     different values in different arrays, which blocked tiling and made
     sibling nests noise clones of one another.
 
-    Returns ``(scalar_amplitude, diagnostics)``. The flux STATE carries no
+    Returns ``(scalar_amplitude, ledger, diagnostics)``, the ledger being this
+    advance's three realized means as (total, count) pairs plus the clip count
+    (see steam.ledger). Passing a recorded ``ledger`` in instead runs the
+    advance in APPLY-ONLY mode: no reduction is taken, the recorded scalars are
+    injected, and the result is bit-identical on the same device. The clip
+    itself still runs — it is pointwise, not a reduction.
+
+    The flux STATE carries no
     interpolation compensation; the compensation belongs to the output
     composition (_compose_flux_output, fed by a deficit accumulated in
     cascade_loop from the state differences across this call — see the
     HOP_RETENTION note).
     """
     s_x, s_y, s_z = sparsity_factors
-    # Captured before the increment: this is what the renormalization restores.
-    # float64 accumulator — the finest cascade grid runs to ~1e9 cells.
-    entering_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
+    # MEASURE (entering). Captured before the increment: this is what the
+    # renormalization restores. float64 accumulator — the finest cascade grid
+    # runs to ~1e9 cells. Stored as (total, count) rather than the mean because
+    # a streamed sweep adds these across tiles; sum/count is bit-identical to
+    # numpy's own mean(dtype=float64), which computes exactly that.
+    if ledger is None:
+        entering_view = _inner_view(flux, window)
+        entering = MeanReduction(
+            entering_view.sum(dtype=np.float64), entering_view.size)
+    else:
+        entering = ledger.entering
+    entering_mean = entering.mean
     per_class_scale = flux_noise_scale / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
     shift = np.float32(LEVY_LOG_MEAN * per_class_scale ** FLUX_ALPHA)
     per_class_scale = np.float32(per_class_scale)
@@ -1653,8 +1740,17 @@ def _advance_flux(
     noise[off_center] = np.float32(0.0)
     del off_center
 
-    noise_inner = _inner_view(noise, window)
-    mean_abs = np.abs(noise_inner).sum() / max(np.count_nonzero(noise_inner), 1)
+    # MEASURE (noise amplitude). float32 total, deliberately: this is the
+    # reduction the cascade has always taken (`.sum()` with no dtype), and
+    # component 2's gate is bit-exactness. See FluxAdvanceLedger for why it is
+    # nonetheless worth noting.
+    if ledger is None:
+        noise_inner = _inner_view(noise, window)
+        noise_abs = MeanReduction(np.abs(noise_inner).sum(),
+                                  np.count_nonzero(noise_inner))
+    else:
+        noise_abs = ledger.noise_abs
+    mean_abs = noise_abs.mean
     # The multiplier noise times the entering flux, formed once: the signed
     # scalar amplitude is that same product scaled to unit mean absolute
     # value, and the flux increment is that same product convolved,
@@ -1670,9 +1766,24 @@ def _advance_flux(
     flux += increment
     del increment
 
-    n_clipped = int(np.count_nonzero(flux < 0))
-    np.maximum(flux, np.float32(0.0), out=flux)
-    realized_mean = float(_inner_view(flux, window).mean(dtype=np.float64))
+    # MEASURE (realized) — necessarily AFTER the apply above, since the clip's
+    # bias is what it measures. So the advance is four phases, not two:
+    # measure_entering -> apply_update -> measure_realized -> apply_rescale.
+    if ledger is None:
+        n_clipped = int(np.count_nonzero(flux < 0))
+        np.maximum(flux, np.float32(0.0), out=flux)
+        realized_view = _inner_view(flux, window)
+        realized = MeanReduction(
+            realized_view.sum(dtype=np.float64), realized_view.size)
+    else:
+        n_clipped = ledger.n_clipped
+        np.maximum(flux, np.float32(0.0), out=flux)
+        realized = ledger.realized
+    realized_mean = realized.mean
+
+    # APPLY (rescale). One scalar per class — the only thing a third streamed
+    # sweep would be needed for, which is why the design folds it into the next
+    # class's read instead.
     if realized_mean > 0:
         flux *= np.float32(entering_mean / realized_mean)
     else:
@@ -1687,7 +1798,8 @@ def _advance_flux(
         'entering_mean': entering_mean,
         'realized_mean': realized_mean,
     }
-    return scalar_amplitude, diagnostics
+    return scalar_amplitude, FluxAdvanceLedger(entering, noise_abs, realized,
+                                               n_clipped), diagnostics
 
 
 def simulate_flux_only(
@@ -1790,7 +1902,7 @@ def simulate_flux_only(
         # state; a calibration against the full model's written flux must
         # account for the composition (see the FLUX_SCALE provenance
         # caveat).
-        scalar_amplitude, advance = _advance_flux(
+        scalar_amplitude, _, advance = _advance_flux(
             flux, noise_region, kernel, c, n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
         )
@@ -2411,7 +2523,8 @@ def _level_mean_abs(field, n_points):
 
 def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
                                 phi_min, phi_max, window, n_rescale,
-                                record_applied=False):
+                                record_applied=False, solve=None,
+                                replaying=False):
     """_bounded_amplitude_add on the GPU, a batch of z-levels at a time.
 
     The levels are independent -- every reduction in the solve is within a
@@ -2437,13 +2550,14 @@ def _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
         _bounded_amplitude_add_cuda_levels(
             perturbation_field[:, :, z_start:z_stop], mean_1d[z_start:z_stop],
             increment[:, :, z_start:z_stop], phi_min, phi_max, window,
-            n_rescale, record_applied,
+            n_rescale, record_applied, solve, replaying, z_start,
         )
 
 
 def _bounded_amplitude_add_cuda_levels(perturbation_field, mean_1d, increment,
                                        phi_min, phi_max, window, n_rescale,
-                                       record_applied=False):
+                                       record_applied=False, solve=None,
+                                       replaying=False, z_offset=0):
     """One batch of z-levels of _bounded_amplitude_add_cuda.
 
     The same algorithm as the CPU path, with every per-level scalar (the
@@ -2487,38 +2601,79 @@ def _bounded_amplitude_add_cuda_levels(perturbation_field, mean_1d, increment,
     n_points = float(d_inner.shape[0] * d_inner.shape[1])
     mean_phi = _level_mean(_inner_view(phi, window), n_points)
 
-    a0 = _level_mean_abs(d_inner, n_points)
-    done = a0 <= 0.0            # a level with no amplitude only gets clipped
-    for _ in range(n_rescale):
-        d.sub_(torch.where(done, 0.0, _level_mean(d_inner, n_points)).to(torch.float32))
+    # The batch's slice of the whole field's ledger. Every scalar below is a
+    # (n_levels,) device vector, so recording it is one download per step and
+    # replaying it is one upload; the `done` mask makes a finished level's
+    # demean 0 and its scale 1, which replay reproduces as the no-ops they are.
+    levels = slice(z_offset, z_offset + nz)
+    if replaying:
+        # APPLY-ONLY, same shape as the CPU path but in this path's own
+        # arithmetic: the GPU's reduction order differs from numpy's, so a
+        # ledger replays exactly on the device that recorded it and only there.
+        a0 = torch.from_numpy(solve.a0[levels]).to('cuda')
+        n_loop = int(solve.n_loop[levels].max()) if nz else 0
+        for step in range(n_loop):
+            d.sub_(torch.from_numpy(
+                solve.demean[levels, step]).to('cuda').to(torch.float32))
+            torch.add(d, phi, out=scratch).clamp_(lo, hi)
+            torch.sub(scratch, phi, out=d)
+            d.mul_(torch.from_numpy(
+                solve.scale[levels, step]).to('cuda').to(torch.float32))
+        d.sub_(torch.from_numpy(
+            solve.final_demean[levels]).to('cuda').to(torch.float32))
         torch.add(d, phi, out=scratch).clamp_(lo, hi)
         torch.sub(scratch, phi, out=d)
-        m_abs = _level_mean_abs(d_inner, n_points)
-        scale = torch.clamp(a0 / m_abs.clamp(min=1e-300), max=2.0)
-        done |= (m_abs <= 0.0) | ((scale - 1.0).abs() < 1e-4)
-        if bool(done.all()):
-            break
-        d.mul_(torch.where(done, 1.0, scale).to(torch.float32))
+    else:
+        a0 = _level_mean_abs(d_inner, n_points)
+        solve.a0[levels] = a0.cpu().numpy()
+        done = a0 <= 0.0        # a level with no amplitude only gets clipped
+        n_loop = 0
+        for step in range(n_rescale):
+            demean = torch.where(done, 0.0, _level_mean(d_inner, n_points))
+            d.sub_(demean.to(torch.float32))
+            solve.demean[levels, step] = demean.cpu().numpy()
+            n_loop = step + 1
+            torch.add(d, phi, out=scratch).clamp_(lo, hi)
+            torch.sub(scratch, phi, out=d)
+            m_abs = _level_mean_abs(d_inner, n_points)
+            scale = torch.clamp(a0 / m_abs.clamp(min=1e-300), max=2.0)
+            done |= (m_abs <= 0.0) | ((scale - 1.0).abs() < 1e-4)
+            if bool(done.all()):
+                break
+            applied = torch.where(done, 1.0, scale)
+            d.mul_(applied.to(torch.float32))
+            solve.scale[levels, step] = applied.cpu().numpy()
+        solve.n_loop[levels] = n_loop
+        solve.n_scale[levels] = n_loop
 
-    d.sub_(_level_mean(d_inner, n_points).to(torch.float32))
-    torch.add(d, phi, out=scratch).clamp_(lo, hi)
-    torch.sub(scratch, phi, out=d)
+        final_demean = _level_mean(d_inner, n_points)
+        d.sub_(final_demean.to(torch.float32))
+        solve.final_demean[levels] = final_demean.cpu().numpy()
+        torch.add(d, phi, out=scratch).clamp_(lo, hi)
+        torch.sub(scratch, phi, out=d)
 
     # Bisect mu in shifted space: e = d + phi, and
     # clip(d - mu, phi_min - phi, phi_max - phi) + phi == clamp(e - mu, phi_min, phi_max),
     # so the level mean of the trial increment is that of the trial field minus
     # the level mean of phi, and no cap arrays are needed.
     e = d.add_(phi)
-    mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
-    mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
-    for _ in range(60):
-        mu = 0.5 * (mu_lo + mu_hi)
-        torch.sub(e, mu.to(torch.float32), out=scratch).clamp_(lo, hi)
-        positive = _level_mean(scratch_inner, n_points) - mean_phi > 0.0
-        mu_lo = torch.where(positive, mu, mu_lo)
-        mu_hi = torch.where(positive, mu_hi, mu)
+    if replaying:
+        mu_final = torch.from_numpy(solve.mu[levels]).to('cuda')
+    else:
+        mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
+        mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
+        for _ in range(60):
+            mu = 0.5 * (mu_lo + mu_hi)
+            torch.sub(e, mu.to(torch.float32), out=scratch).clamp_(lo, hi)
+            positive = _level_mean(scratch_inner, n_points) - mean_phi > 0.0
+            mu_lo = torch.where(positive, mu, mu_lo)
+            mu_hi = torch.where(positive, mu_hi, mu)
+        mu_final = 0.5 * (mu_lo + mu_hi)
+        # Unlike the host path this bisection is unconditional, so every level
+        # carries a mu and none is NaN.
+        solve.mu[levels] = mu_final.cpu().numpy()
 
-    torch.sub(e, (0.5 * (mu_lo + mu_hi)).to(torch.float32), out=scratch).clamp_(lo, hi)
+    torch.sub(e, mu_final.to(torch.float32), out=scratch).clamp_(lo, hi)
     scratch.sub_(mean_column)   # the bounded field, back to a perturbation
     if record_applied:
         # after - before, in the buffer the bisection has just finished with
@@ -2532,7 +2687,7 @@ def _bounded_amplitude_add_cuda_levels(perturbation_field, mean_1d, increment,
 
 def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
                            phi_min, phi_max, window=None, n_rescale=10,
-                           device='cpu', record_applied=False):
+                           device='cpu', record_applied=False, ledger=None):
     """Add a class's increment under the three deposit conditions.
 
     For each z-level, the added perturbation delta satisfies (ruling
@@ -2597,11 +2752,15 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     runs here. That is a real dispatch, not a fallback: the nest legitimately
     runs on the host.
     """
+    nz = perturbation_field.shape[2]
+    replaying = ledger is not None
+    solve = ledger if replaying else BoundedAddLedger(nz, n_rescale)
+
     if device == 'cuda':
         _bounded_amplitude_add_cuda(perturbation_field, mean_1d, increment,
                                     phi_min, phi_max, window, n_rescale,
-                                    record_applied)
-        return
+                                    record_applied, solve, replaying)
+        return solve
 
     lo = np.float32(phi_min)
     hi = np.float32(phi_max)
@@ -2613,36 +2772,74 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
         cap_hi = hi - phi
         d = np.ascontiguousarray(increment[:, :, lev])
         dw = _inner_view(d, window)
-        a0 = float(np.abs(dw).mean(dtype=np.float64))
-        if a0 <= 0.0:
-            np.clip(d, cap_lo, cap_hi, out=d)   # halo may still carry mass
+        if replaying:
+            # APPLY-ONLY. Replay the recorded scalar sequence: every step below
+            # is either a per-level scalar or a pointwise clip, so nothing is
+            # reduced and nothing needs the rest of the plane. That is what
+            # lets a streamed run solve on an assembled z-plane and then apply
+            # tile by tile.
+            a0 = float(solve.a0[lev])
+            if a0 <= 0.0:
+                np.clip(d, cap_lo, cap_hi, out=d)
+            else:
+                n_loop = int(solve.n_loop[lev])
+                n_scale = int(solve.n_scale[lev])
+                for step in range(n_loop):
+                    d -= np.float32(solve.demean[lev, step])
+                    np.clip(d, cap_lo, cap_hi, out=d)
+                    if step < n_scale:
+                        d *= np.float32(solve.scale[lev, step])
+                d -= np.float32(solve.final_demean[lev])
+                np.clip(d, cap_lo, cap_hi, out=d)
+                if not np.isnan(solve.mu[lev]):
+                    np.subtract(d, np.float32(solve.mu[lev]), out=d)
+                    np.clip(d, cap_lo, cap_hi, out=d)
         else:
-            for _ in range(n_rescale):
-                d -= np.float32(dw.mean(dtype=np.float64))
+            # SOLVE, recording each realized scalar as it is taken. The
+            # arithmetic is character-for-character what it was: the numbers
+            # are written down on the way past, not recomputed.
+            a0 = float(np.abs(dw).mean(dtype=np.float64))
+            solve.a0[lev] = a0
+            if a0 <= 0.0:
+                np.clip(d, cap_lo, cap_hi, out=d)   # halo may still carry mass
+            else:
+                n_loop = n_scale = 0
+                for step in range(n_rescale):
+                    demean = dw.mean(dtype=np.float64)
+                    d -= np.float32(demean)
+                    solve.demean[lev, step] = demean
+                    n_loop = step + 1
+                    np.clip(d, cap_lo, cap_hi, out=d)
+                    m_abs = float(np.abs(dw).mean(dtype=np.float64))
+                    if m_abs <= 0.0:
+                        break
+                    scale = min(a0 / m_abs, 2.0)
+                    if abs(scale - 1.0) < 1e-4:
+                        break
+                    d *= np.float32(scale)
+                    solve.scale[lev, step] = scale
+                    n_scale = step + 1
+                solve.n_loop[lev] = n_loop
+                solve.n_scale[lev] = n_scale
+                final_demean = dw.mean(dtype=np.float64)
+                d -= np.float32(final_demean)
+                solve.final_demean[lev] = final_demean
                 np.clip(d, cap_lo, cap_hi, out=d)
-                m_abs = float(np.abs(dw).mean(dtype=np.float64))
-                if m_abs <= 0.0:
-                    break
-                scale = min(a0 / m_abs, 2.0)
-                if abs(scale - 1.0) < 1e-4:
-                    break
-                d *= np.float32(scale)
-            d -= np.float32(dw.mean(dtype=np.float64))
-            np.clip(d, cap_lo, cap_hi, out=d)
-            if abs(float(dw.mean(dtype=np.float64))) > 1e-9 * a0:
-                mu_lo, mu_hi = -width, width
-                trial = np.empty_like(d)
-                trial_w = _inner_view(trial, window)
-                for _ in range(60):
-                    mu = 0.5 * (mu_lo + mu_hi)
-                    np.subtract(d, np.float32(mu), out=trial)
-                    np.clip(trial, cap_lo, cap_hi, out=trial)
-                    if float(trial_w.mean(dtype=np.float64)) > 0.0:
-                        mu_lo = mu
-                    else:
-                        mu_hi = mu
-                np.subtract(d, np.float32(0.5 * (mu_lo + mu_hi)), out=d)
-                np.clip(d, cap_lo, cap_hi, out=d)
+                if abs(float(dw.mean(dtype=np.float64))) > 1e-9 * a0:
+                    mu_lo, mu_hi = -width, width
+                    trial = np.empty_like(d)
+                    trial_w = _inner_view(trial, window)
+                    for _ in range(60):
+                        mu = 0.5 * (mu_lo + mu_hi)
+                        np.subtract(d, np.float32(mu), out=trial)
+                        np.clip(trial, cap_lo, cap_hi, out=trial)
+                        if float(trial_w.mean(dtype=np.float64)) > 0.0:
+                            mu_lo = mu
+                        else:
+                            mu_hi = mu
+                    solve.mu[lev] = 0.5 * (mu_lo + mu_hi)
+                    np.subtract(d, np.float32(solve.mu[lev]), out=d)
+                    np.clip(d, cap_lo, cap_hi, out=d)
         if not record_applied:
             perturbation_field[:, :, lev] += d
         else:
@@ -2655,13 +2852,13 @@ def _bounded_amplitude_add(perturbation_field, mean_1d, increment,
     # (measured 19.7 s at 8, 20.9 s at 30 on the production shape), and extra
     # workers only add per-level scratch and oversubscribe when a square and
     # a nest run concurrently.
-    nz = perturbation_field.shape[2]
     with ThreadPoolExecutor(max_workers=max(1, min(8, nz))) as pool:
         list(pool.map(solve_level, range(nz)))
+    return solve
 
 
 def _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min, phi_max,
-                              window=None):
+                              window=None, ledger=None):
     """_project_onto_bounds on the GPU, a batch of z-levels at a time.
 
     The same solve as the host path and in the same float64: the levels are
@@ -2703,17 +2900,23 @@ def _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min, phi_max,
     hi = float(phi_max)
     width = hi - lo
     nx, ny, nz = perturbation_field.shape
+    replaying = ledger is not None
+    projection = ledger if replaying else ProjectionLedger(
+        np.full(nz, np.nan, dtype=np.float64))
     levels_per_batch = cuda_level_batch_size(nx, ny, nz, 8)
     for z_start in range(0, nz, levels_per_batch):
         z_stop = min(z_start + levels_per_batch, nz)
         _project_onto_bounds_cuda_levels(
             perturbation_field[:, :, z_start:z_stop], mean_1d[z_start:z_stop],
-            lo, hi, width, window,
+            lo, hi, width, window, projection, replaying, z_start,
         )
+    return projection
 
 
 def _project_onto_bounds_cuda_levels(perturbation_field, mean_1d,
-                                     lo, hi, width, window):
+                                     lo, hi, width, window,
+                                     projection=None, replaying=False,
+                                     z_offset=0):
     """One batch of z-levels of :func:`_project_onto_bounds_cuda`.
 
     Every per-level scalar — the target mean, the bisection bracket, the
@@ -2734,9 +2937,18 @@ def _project_onto_bounds_cuda_levels(perturbation_field, mean_1d,
     # level. The batch is then compacted to those levels: everything below is
     # per-level, so dropping the interior ones changes no answer and is the
     # difference between winning and losing on a mostly-interior field.
-    violating = torch.nonzero(
-        (e.amin(dim=0).amin(dim=0) < lo) | (e.amax(dim=0).amax(dim=0) > hi),
-        as_tuple=True)[0]
+    batch = slice(z_offset, z_offset + e.shape[2])
+    if replaying:
+        # Which levels the recording run projected. Taken from the ledger, not
+        # re-tested: the violation test is itself a reduction (a min and a max
+        # over the level), and apply-only mode takes none.
+        recorded = projection.mu[batch]
+        violating = torch.from_numpy(
+            np.flatnonzero(~np.isnan(recorded)).astype(np.int64)).to('cuda')
+    else:
+        violating = torch.nonzero(
+            (e.amin(dim=0).amin(dim=0) < lo) | (e.amax(dim=0).amax(dim=0) > hi),
+            as_tuple=True)[0]
     if violating.numel() == 0:
         return
     if violating.numel() < e.shape[2]:
@@ -2747,19 +2959,27 @@ def _project_onto_bounds_cuda_levels(perturbation_field, mean_1d,
     inner = _inner_view(e, window)
     scratch_inner = _inner_view(scratch, window)
     n_points = float(inner.shape[0] * inner.shape[1])
-    target = _level_mean(inner, n_points)
 
     nz = e.shape[2]
-    mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
-    mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
-    for _ in range(60):
-        mu = 0.5 * (mu_lo + mu_hi)
-        torch.sub(e, mu, out=scratch).clamp_(lo, hi)
-        positive = _level_mean(scratch_inner, n_points) > target
-        mu_lo = torch.where(positive, mu, mu_lo)
-        mu_hi = torch.where(positive, mu_hi, mu)
+    if replaying:
+        mu_final = torch.from_numpy(
+            projection.mu[batch][violating.cpu().numpy()]).to('cuda')
+    else:
+        target = _level_mean(inner, n_points)
+        mu_lo = torch.full((nz,), -width, dtype=torch.float64, device='cuda')
+        mu_hi = torch.full((nz,), width, dtype=torch.float64, device='cuda')
+        for _ in range(60):
+            mu = 0.5 * (mu_lo + mu_hi)
+            torch.sub(e, mu, out=scratch).clamp_(lo, hi)
+            positive = _level_mean(scratch_inner, n_points) > target
+            mu_lo = torch.where(positive, mu, mu_lo)
+            mu_hi = torch.where(positive, mu_hi, mu)
+        mu_final = 0.5 * (mu_lo + mu_hi)
+        recorded = projection.mu[batch]
+        recorded[violating.cpu().numpy()] = mu_final.cpu().numpy()
+        projection.mu[batch] = recorded
 
-    torch.sub(e, 0.5 * (mu_lo + mu_hi), out=scratch).clamp_(lo, hi)
+    torch.sub(e, mu_final, out=scratch).clamp_(lo, hi)
     scratch -= mean_column
     # Back to the caller's dtype the way the host path does it: the float64
     # level is assigned into a float32 array, which rounds to nearest. Only
@@ -2769,7 +2989,7 @@ def _project_onto_bounds_cuda_levels(perturbation_field, mean_1d,
 
 
 def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max,
-                         window=None, device='cpu'):
+                         window=None, device='cpu', ledger=None):
     """Project onto [phi_min, phi_max] preserving each level's horizontal mean.
 
     NOTE (2026-07-28, amended 2026-08-07): superseded in cascade_loop by
@@ -2804,33 +3024,43 @@ def _project_onto_bounds(perturbation_field, mean_1d, phi_min, phi_max,
     A real dispatch, not a fallback — a nest legitimately runs on the host.
     """
     if device == 'cuda':
-        _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min,
-                                  phi_max, window)
-        return
+        return _project_onto_bounds_cuda(perturbation_field, mean_1d, phi_min,
+                                         phi_max, window, ledger)
 
     lo = float(phi_min)
     hi = float(phi_max)
     width = hi - lo
-    for lev in range(perturbation_field.shape[2]):
+    nz = perturbation_field.shape[2]
+    replaying = ledger is not None
+    projection = ledger if replaying else ProjectionLedger(
+        np.full(nz, np.nan, dtype=np.float64))
+    for lev in range(nz):
+        if replaying and np.isnan(projection.mu[lev]):
+            continue            # recorded as unviolated: left bit-identical
         field_lev = perturbation_field[:, :, lev].astype(np.float64)
         field_lev += float(mean_1d[lev])
-        if field_lev.min() >= lo and field_lev.max() <= hi:
-            continue
-        field_lev_inner = _inner_view(field_lev, window)
-        target = field_lev_inner.mean()
-        mu_low, mu_high = -width, width
-        for _ in range(60):
+        if replaying:
+            mu = float(projection.mu[lev])
+        else:
+            if field_lev.min() >= lo and field_lev.max() <= hi:
+                continue
+            field_lev_inner = _inner_view(field_lev, window)
+            target = field_lev_inner.mean()
+            mu_low, mu_high = -width, width
+            for _ in range(60):
+                mu = 0.5 * (mu_low + mu_high)
+                if np.clip(field_lev_inner - mu, lo, hi).mean() > target:
+                    mu_low = mu
+                else:
+                    mu_high = mu
+                if mu_high - mu_low < 1e-12 * width:
+                    break
             mu = 0.5 * (mu_low + mu_high)
-            if np.clip(field_lev_inner - mu, lo, hi).mean() > target:
-                mu_low = mu
-            else:
-                mu_high = mu
-            if mu_high - mu_low < 1e-12 * width:
-                break
-        mu = 0.5 * (mu_low + mu_high)
+            projection.mu[lev] = mu
         np.clip(field_lev - mu, lo, hi, out=field_lev)
         field_lev -= float(mean_1d[lev])
         perturbation_field[:, :, lev] = field_lev
+    return projection
 
 
 def _stage_nest_increments(increment_dir, parent_path, parent_group,
@@ -2900,7 +3130,7 @@ def _stage_nest_increments(increment_dir, parent_path, parent_group,
 
 
 def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None,
-                    device='cpu'):
+                    device='cpu', ledger=None):
     """The field that gets written: state + deficit + mean, then projected.
 
     The cascade's state carries no interpolation compensation; the output
@@ -2925,12 +3155,14 @@ def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None,
     discipline is a clip and one scalar rescale, ~1 s at the production
     square against qt's 78.
     """
+    projection = None
     if deficit is None:
         output = state + mean_1d[np.newaxis, np.newaxis, :]
     else:
         deficit += state
-        _project_onto_bounds(deficit, mean_1d, phi_min, phi_max, window,
-                             device=device)
+        projection = _project_onto_bounds(deficit, mean_1d, phi_min, phi_max,
+                                          window, device=device,
+                                          ledger=ledger)
         output = deficit
         output += mean_1d[np.newaxis, np.newaxis, :]
     # The bounds now hold up to float32 rounding of the (perturbation + mean)
@@ -2938,10 +3170,10 @@ def _compose_output(state, deficit, mean_1d, phi_min, phi_max, window=None,
     # -1e-9 on qt). Clamp that rounding residue only — at most one ulp, not a
     # physics clip.
     np.clip(output, np.float32(phi_min), np.float32(phi_max), out=output)
-    return np.ascontiguousarray(output)
+    return np.ascontiguousarray(output), projection
 
 
-def _compose_flux_output(state, deficit, window=None):
+def _compose_flux_output(state, deficit, window=None, ledger=None):
     """The flux that gets written: state + deficit, clipped, mean restored.
 
     The flux analogue of _compose_output (2026-08-04 ruling: the flux output
@@ -2963,17 +3195,32 @@ def _compose_flux_output(state, deficit, window=None):
     the output.
     """
     if deficit is None:
-        return np.ascontiguousarray(state)
-    entering_mean = float(_inner_view(state, window).mean(dtype=np.float64))
+        return np.ascontiguousarray(state), None
+    # MEASURE (entering) / APPLY (clip) / MEASURE (realized) / APPLY (rescale),
+    # the same four phases as one flux advance -- the composition's bounds
+    # discipline IS that clip-and-restore (audit ruling B14).
+    if ledger is None:
+        entering_view = _inner_view(state, window)
+        entering = MeanReduction(entering_view.sum(dtype=np.float64),
+                                 entering_view.size)
+    else:
+        entering = ledger.entering
+    entering_mean = entering.mean
     deficit += state
     output = deficit
     np.maximum(output, np.float32(0.0), out=output)
-    realized_mean = float(_inner_view(output, window).mean(dtype=np.float64))
+    if ledger is None:
+        realized_view = _inner_view(output, window)
+        realized = MeanReduction(realized_view.sum(dtype=np.float64),
+                                 realized_view.size)
+    else:
+        realized = ledger.realized
+    realized_mean = realized.mean
     if realized_mean > 0:
         output *= np.float32(entering_mean / realized_mean)
     else:
         output[...] = np.float32(entering_mean)
-    return np.ascontiguousarray(output)
+    return np.ascontiguousarray(output), FluxOutputLedger(entering, realized)
 
 
 def _contiguous_runs(indices):
@@ -3593,7 +3840,8 @@ def refine(
                                               dir=parent_path.parent))
 
     (h_pert_refined, qt_pert_refined, flux_refined,
-     deficit_h, deficit_qt, deficit_flux, final_grid) = cascade_loop(
+     deficit_h, deficit_qt, deficit_flux, final_grid,
+     run_ledger) = cascade_loop(
         h_profile, qt_profile, z_profile,
         grids,
         C_h_k, C_qt_k,
@@ -3658,13 +3906,20 @@ def refine(
     qt_mean_final = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
     spheroscale_final = np.interp(z_final, z_profile, spheroscale_profile).astype(np.float32)
 
-    h_3d_out = _compose_output(h_pert_inner, deficit_h_inner, h_mean_final,
-                               h_min, h_max, device=device)
-    qt_3d_out = _compose_output(qt_pert_inner, deficit_qt_inner, qt_mean_final,
-                                qt_min, qt_max, device=device)
+    h_3d_out, projection_h = _compose_output(
+        h_pert_inner, deficit_h_inner, h_mean_final, h_min, h_max,
+        device=device, ledger=run_ledger.projection.get('h'))
+    qt_3d_out, projection_qt = _compose_output(
+        qt_pert_inner, deficit_qt_inner, qt_mean_final, qt_min, qt_max,
+        device=device, ledger=run_ledger.projection.get('qt'))
     # The halo is already discarded, so the composition's volume mean is the
     # nest's own inherited anomaly.
-    flux_3d_out = _compose_flux_output(flux_inner, deficit_flux_inner)
+    flux_3d_out, run_ledger.flux_output = _compose_flux_output(
+        flux_inner, deficit_flux_inner, ledger=run_ledger.flux_output)
+    if projection_h is not None:
+        run_ledger.projection['h'] = projection_h
+    if projection_qt is not None:
+        run_ledger.projection['qt'] = projection_qt
 
     nx_out = h_3d_out.shape[0]
     ny_out = h_3d_out.shape[1]
@@ -3781,6 +4036,7 @@ def refine(
         h_pert_3d=h_pert_inner if save_for_refinement else None,
         qt_pert_3d=qt_pert_inner if save_for_refinement else None,
         flux_state_3d=flux_inner if save_for_refinement else None,
+        run_ledger=run_ledger,
     )
     if increment_dir is not None:
         from .output import write_class_increments

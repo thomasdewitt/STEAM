@@ -5,6 +5,7 @@ import netCDF4
 from pathlib import Path
 
 from . import constants
+from .ledger import write_ledger
 
 
 def compression_kwargs(compress, chunksizes):
@@ -38,6 +39,7 @@ def write_netcdf(
     h_pert_3d=None,
     qt_pert_3d=None,
     flux_state_3d=None,
+    run_ledger=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -318,6 +320,12 @@ def write_netcdf(
         pb_var[:] = np.asarray(p['p_bottom'], dtype=np.float32)
         pb_var.units = "Pa"
         pb_var.long_name = "starting pressure at nest bottom (z=z[0])"
+
+    # The ledger (component 2): every realized global reduction the run took,
+    # as sums and counts rather than means so a streamed run can accumulate
+    # them tile by tile. Kilobytes, and enough to replay any class.
+    if run_ledger is not None:
+        write_ledger(ds, run_ledger)
 
     ds_root.close()
     print(f"Written {output_path}" + (f" (group '{group}')" if group else ""))

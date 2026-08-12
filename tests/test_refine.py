@@ -115,13 +115,13 @@ def test_split_cascade_matches_full_cascade(monkeypatch):
         )
 
     all_seeds = np.random.SeedSequence(123).spawn(n_classes)
-    h_full, qt_full, flux_full, _, _, _, _ = run(slice(0, n_classes), all_seeds)
+    h_full, qt_full, flux_full, _, _, _, _, _ = run(slice(0, n_classes), all_seeds)
 
     split = n_classes // 2
     seeds = np.random.SeedSequence(123).spawn(n_classes)
-    h_1, qt_1, flux_1, _, _, _, _ = run(slice(0, split), seeds[:split])
-    h_2, qt_2, flux_2, _, _, _, _ = run(slice(split, n_classes), seeds[split:],
-                                        h_pert=h_1, qt_pert=qt_1, flux=flux_1)
+    h_1, qt_1, flux_1, _, _, _, _, _ = run(slice(0, split), seeds[:split])
+    h_2, qt_2, flux_2, _, _, _, _, _ = run(slice(split, n_classes), seeds[split:],
+                                           h_pert=h_1, qt_pert=qt_1, flux=flux_1)
 
     np.testing.assert_array_equal(h_2, h_full)
     np.testing.assert_array_equal(qt_2, qt_full)
