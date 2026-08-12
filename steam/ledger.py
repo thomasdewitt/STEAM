@@ -16,10 +16,11 @@ accumulates partials tile by tile, reduces, and hands the result to sweep 2.
 **Dtype fidelity.** Two separate things, and conflating them costs the last
 bits of the answer (caught by the bit-exactness gate, 2026-08-12):
 
-- The ACCUMULATOR's dtype is part of the contract. The flux's mean-abs noise
-  is summed in float32 and the volume means in float64, and those sums differ
-  in value, so a total must be stored as the reduction produced it. See the
-  caveat on `FluxAdvanceLedger.noise_abs`.
+- The ACCUMULATOR's dtype is part of the contract: two sums of the same data
+  at different widths differ in value, so a total must be stored as the
+  reduction produced it. Every accumulator in this file is float64 as of
+  2026-08-12, which is what makes the whole ledger exactly additive across
+  tiles (see the history on `FluxAdvanceLedger.noise_abs`).
 - The DIVISION is float64 in every case. That is not a choice: inline, a
   float32 total was divided by a numpy int64 count, and NEP 50 promotes that
   pair to float64 because an int64 is a strong type. Coercing the count to a
@@ -45,16 +46,16 @@ N_RESCALE_DEFAULT = 10
 class MeanReduction:
     """An additive (total, count) pair standing in for a realized mean.
 
-    ``total`` keeps the dtype the reduction produced -- float64 where the
-    cascade accumulated in float64, float32 where it did not, since those sums
-    differ in value. ``mean`` then divides in float64, which is what the inline
-    code did by promotion (float32 over int64 -> float64) and what a float64
-    total did directly.
+    ``total`` keeps the dtype the reduction produced, since two sums of the same
+    data at different widths differ in value. ``mean`` divides in float64 --
+    see the module docstring on why that must be explicit rather than left to
+    NEP 50 promotion.
 
     ``+`` is how a streamed sweep accumulates one tile's partial into the
-    running total. It is exact for float64 totals; for a float32 total it is
-    exact only to fp32 rounding, which is the documented tolerance of the
-    streamed path (spec: "difference at the float32/FFT rounding floor").
+    running total. Every accumulator the cascade feeds it is float64, so the
+    sum of the partials is exact; only the ORDER of accumulation is a choice,
+    and the streamed driver fixes it (world raster order) so two streamed runs
+    of the same configuration agree bit for bit.
     """
 
     __slots__ = ('total', 'count')
@@ -115,13 +116,13 @@ class FluxAdvanceLedger:
     their ratio is the single scalar that corrects the clip's downward bias.
 
     ``noise_abs`` is the mean absolute multiplier noise over the turbulon
-    centers, and its total is FLOAT32 -- `np.abs(noise_inner).sum()` with no
-    dtype argument, which is what the cascade has always done. Recorded as it
-    is, because component 2's gate is bit-exactness; but noted here because it
-    is the one accumulator in this file that is not float64 while reducing over
-    a field that reaches ~1e9 cells at the production finest class, and
-    summing float32 partials across tiles is therefore exact only to fp32
-    rounding. Reported to the coordinator rather than changed here.
+    centers. Its total was accumulated in FLOAT32 before 2026-08-12 --
+    `np.abs(noise_inner).sum()` with no dtype argument -- over a field reaching
+    ~1e9 cells at the production finest class. It is float64 now: it was the
+    one accumulator here whose per-tile partials were not exactly additive, and
+    fixing it means the streamed path differs from the in-RAM path by the
+    fp32/FFT rounding floor and nothing else. Realizations moved (it feeds S_k,
+    never the flux state); ruled a non-issue, references regenerated.
     """
 
     __slots__ = ('entering', 'noise_abs', 'realized', 'n_clipped')
@@ -292,8 +293,7 @@ def write_ledger(dataset, run_ledger, group=None):
         if flux is not None:
             grp.flux_entering_total = np.float64(flux.entering.total)
             grp.flux_entering_count = np.int64(flux.entering.count)
-            # float32 on purpose: see FluxAdvanceLedger.
-            grp.flux_noise_abs_total = np.float32(flux.noise_abs.total)
+            grp.flux_noise_abs_total = np.float64(flux.noise_abs.total)
             grp.flux_noise_abs_count = np.int64(flux.noise_abs.count)
             grp.flux_realized_total = np.float64(flux.realized.total)
             grp.flux_realized_count = np.int64(flux.realized.count)
@@ -363,7 +363,7 @@ def read_ledger(dataset, group=None):
             class_ledger.flux = FluxAdvanceLedger(
                 MeanReduction(np.float64(grp.flux_entering_total),
                               int(grp.flux_entering_count)),
-                MeanReduction(np.float32(grp.flux_noise_abs_total),
+                MeanReduction(np.float64(grp.flux_noise_abs_total),
                               int(grp.flux_noise_abs_count)),
                 MeanReduction(np.float64(grp.flux_realized_total),
                               int(grp.flux_realized_count)),

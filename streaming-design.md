@@ -223,14 +223,22 @@ tiles exactly as well as (s, mu) would have — every recorded entry is a
 per-level scalar and every step between them is a pointwise clip — so nothing
 downstream is harder, it is just more numbers.
 
-**FOUND, NOT FIXED (bit-exactness was the gate).** The flux's mean-abs
-multiplier noise is accumulated in **float32** — `np.abs(noise_inner).sum()`
-with no dtype argument — unlike the float64 volume means beside it, while
-reducing over a field that reaches ~1e9 cells at the production finest class.
-It feeds S_k (not the flux state), so it moves the scalar realization. Two
-consequences: it is a candidate float32-accumulator bug in its own right, and
-summing float32 partials across tiles in component 3 is exact only to fp32
-rounding rather than exactly. Recorded as-is and reported.
+**FOUND during component 2, FIXED as component 3's pre-work.** The flux's
+mean-abs multiplier noise was accumulated in **float32** —
+`np.abs(noise_inner).sum()` with no dtype argument — unlike the float64 volume
+means beside it, while reducing over a field reaching ~1e9 cells at the
+production finest class. Left alone in component 2 because bit-exactness was
+that component's gate; now `dtype=np.float64`, which
+
+- matches the repo's float64-accumulator convention at that scale, and
+- makes the WHOLE ledger exactly additive across tiles. It was the one
+  reduction whose per-tile partials were not, so the streamed-vs-in-RAM
+  comparison is now "the fp32/FFT floor, period" rather than "the floor plus
+  one fuzzy reduction".
+
+It feeds S_k and never the flux state, so it moved the scalar realization;
+ruled a non-issue, and the pinned references were regenerated in the same
+commit that made the change.
 
 **Float-discipline trap worth knowing for component 3.** The division in a
 realized mean is float64 in every case, and that is not a choice: inline, a

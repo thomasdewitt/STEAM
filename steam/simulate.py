@@ -1749,13 +1749,18 @@ def _advance_flux(
     noise[off_center] = np.float32(0.0)
     del off_center
 
-    # MEASURE (noise amplitude). float32 total, deliberately: this is the
-    # reduction the cascade has always taken (`.sum()` with no dtype), and
-    # component 2's gate is bit-exactness. See FluxAdvanceLedger for why it is
-    # nonetheless worth noting.
+    # MEASURE (noise amplitude). float64 accumulator, as of 2026-08-12: this
+    # sum used to be taken as `.sum()` with no dtype, i.e. in float32, over a
+    # field that reaches ~1e9 cells at the production finest class. Two reasons
+    # it is now float64 -- it is the repo's own convention for a reduction at
+    # that scale, and it was the ONE reduction in the ledger whose per-tile
+    # partials were not exactly additive, so the streamed path's difference
+    # from the in-RAM path is now the fp32/FFT floor and nothing else. It feeds
+    # S_k only (never the flux state), so the change moves the scalar
+    # realization; ruled a non-issue.
     if ledger is None:
         noise_inner = _inner_view(noise, window)
-        noise_abs = MeanReduction(np.abs(noise_inner).sum(),
+        noise_abs = MeanReduction(np.abs(noise_inner).sum(dtype=np.float64),
                                   np.count_nonzero(noise_inner))
     else:
         noise_abs = ledger.noise_abs
