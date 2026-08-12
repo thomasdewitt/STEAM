@@ -599,7 +599,16 @@ In rough priority order, as of 2026-08-12 with components 1-5 landed:
    verified sufficient. The accumulated-halo variant (letting a tile descend
    several classes without re-paging) is only worth it if I/O turns out to
    dominate; measure before building.
-6. **Narrow-tile I/O.** The z-major layout costs tile reads a factor of ~2 at
+6. **Durability limitations — deliberately out of scope.** Resume is a
+   convenience, and `fresh=True` is always the fallback. We defend against
+   process death at any point (atomic marker and ledger commits, idempotent
+   settle, double-buffered phases) and against a host crash to the extent that
+   `fsync` on the file and its directory plus POSIX `rename` semantics allow. We
+   do **not** defend against filesystem-level torn writes inside a single
+   `.npy` field file, non-POSIX rename semantics (some network filesystems), or
+   media corruption. A store that fails its manifest stamp is refused rather
+   than repaired. This boundary is a decision, not an omission.
+7. **Narrow-tile I/O.** The z-major layout costs tile reads a factor of ~2 at
    128-cell tile widths and nothing at production widths. If a configuration ever
    forces very narrow tiles, that constant is where to look.
 
@@ -660,6 +669,52 @@ only a test that crashes inside the window could tell.
 so the preflight would fire; the streamed run must proceed while the resident one
 refuses) and *anisotropic sparsity* (s=(3,1,1), (1,3,1), (2,3,1)).
 
+### Round 2 — re-review of the fix commits
+
+Codex re-reviewed the fixes, confirmed the **numerics clean** (per-axis halo,
+wrapped-world center selection, preflight gating, seed adoption, `ledger=`
+refusal) and found 8 further issues, **all in the crash-durability and accounting
+layer**. Two fixes are structural, chosen to kill whole classes rather than the
+instances found.
+
+**A — markers are one empty file each, not an append log** (#1). A crash or
+ENOSPC part-way through an append leaves a torn line, and the *next* append
+concatenates onto it — `"2 plane"` + `"2 plane_h"` reads as one nonsense entry a
+tolerant parser silently drops. Silent loss of a completed phase is the worst
+failure available here, because the resume then re-runs a phase whose inputs its
+settle already consumed. One file per marker makes that impossible by
+construction. Every atomic replace now goes through one helper that fsyncs the
+file *and* the containing directory: on ext4 a rename can be durable while its
+directory entry is not, which would preserve a marker and lose its settle record.
+
+**B — containment, not enumeration** (#4). The store owns
+`scratch_dir/steam-scratch-store`, writes nothing outside it, and `destroy()`
+rmtree's exactly that subtree. `scratch_dir` is never scanned, never deleted,
+never required to be empty, so other contents are *irrelevant* rather than
+protected by a list of "files we own" — enumeration whose failure mode is
+deleting someone's data. The manifest carries an ownership stamp checked before
+any reuse or destruction, so a directory holding a merely-parseable
+`manifest.json` (`{}` included) is not mistaken for ours.
+
+**The other six.** (#2) the class ledger was written straight to its live path —
+atomic now. (#3) the fingerprint omitted dx/dy and the padded extents; nx=2 at
+dx=25 and nx=2 at dx=24 are the same shape and a different answer. (#5) regrid
+dropped the previous class by hand outside the protocol — recorded as settle
+actions, because a protocol with special cases is not one. (#6) the degenerate
+no-tiling accounting floored at 6 final-field equivalents where the concurrent
+peak is 9. (#7) `total_bytes()` missed the increment sub-stores; an rglob over
+the owned subtree, which falls out of containment. (#8) scratch and output were
+checked independently against the *same* free space — the default case, since
+scratch lives beside the output and is not cleaned up until after the write.
+
+**Two bugs of my own**, both caught by the new tests rather than by reading: the
+store ended up nested inside itself (`simulate` passed the owned root where the
+driver expected the scratch dir), and the containment rewrite initially checked
+`scratch_dir`'s emptiness rather than the store subdirectory's, refusing every
+run whose scratch directory it had just created.
+
+**No realization change**, asserted by the pinned references passing untouched.
+
 ## Measured numbers, all configurations (2026-08-12)
 
 One table, so the merge review has them in one place.
@@ -679,6 +734,7 @@ One table, so the merge review has them in one place.
 | per-level I/O amplification, (nx,ny,nz) → (nz,nx,ny) | **256.0× → 13.3×** |
 | ledger agreement, flux entering / mean-abs noise | exact |
 | scratch accounting | predicted peak bounds actual, within 4× |
+| **resume after a torn/failed write** | recovers, bit-identical (9 injection points) |
 | **anisotropic s=(3,1,1)** | floor 5.0e-06, seams 1.25 / 1.18 / 1.13 |
 | **anisotropic s=(1,3,1)** | floor 3.7e-06, seams 1.13 / 1.10 / 1.05 |
 | **anisotropic s=(2,3,1)** | floor 3.5e-06, seams 1.06 / 1.19 / 1.12 |
@@ -693,9 +749,12 @@ structure, which is the criterion the whole design is held to.
 - Full suite green (318 tests) and `tests/heavy/test_nest_identity.py` bit-exact
   on all eight configurations.
 - Pinned pre-refactor references unchanged and passing.
-- **The branch passed an independent codex review (Thomas's explicit request)
-  with all 12 findings resolved**, each with a regression test, and the two
-  feature-defeating ones verified non-vacuously by reintroducing the bug.
+- **The branch passed independent codex review (Thomas's explicit request) in
+  two rounds — 12 findings then 8 — with all 20 resolved**, each with a
+  regression test, and the feature-defeating ones verified non-vacuously by
+  reintroducing the bug and watching the test fail. Round 2 confirmed the
+  numerics clean and was confined to the resume/durability layer; the remaining
+  boundary of that layer is recorded under Future work rather than left implicit.
 - Remaining work is in Future work above; nothing there blocks merge.
 
 ## Conventions for this branch
