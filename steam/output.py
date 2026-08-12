@@ -40,6 +40,7 @@ def write_netcdf(
     qt_pert_3d=None,
     flux_state_3d=None,
     run_ledger=None,
+    tile_writer=None,
 ):
     """Write STEAM simulation output to a NetCDF file.
 
@@ -68,6 +69,13 @@ def write_netcdf(
         If True, write the 3D data variables with the
         ``steam.constants.output_compression`` filter. None (default) uses
         the module-level ``steam.constants.output_compress`` setting.
+    tile_writer : callable or None
+        ``tile_writer(name, variable, source)``, called instead of
+        ``variable[:] = source`` for every 3D field. A streamed run passes one
+        that copies the field in x-y tiles from its scratch store, so the whole
+        field is never resident; the arrays it is handed are memory maps, and
+        ``variable[:] = memmap`` would materialize them. None keeps the plain
+        assignment.
 
     Returns
     -------
@@ -79,6 +87,13 @@ def write_netcdf(
 
     output_path = Path(output_path)
     nx_final, ny_final, nz_final = h_3d.shape
+
+    def _assign(name, variable, source):
+        """Write one 3D field, in tiles if the caller supplied a writer."""
+        if tile_writer is None:
+            variable[:] = source
+        else:
+            tile_writer(name, variable, source)
 
     if group is not None:
         print(f"Writing NetCDF group '{group}' to {output_path} ...")
@@ -118,7 +133,7 @@ def write_netcdf(
         "h", "f4", ("x", "y", "z"), chunksizes=field_chunks,
         **compression_kwargs(compress, field_chunks),
     )
-    h_var[:] = h_3d
+    _assign("h", h_var, h_3d)
     h_var.units = "J/kg"
     h_var.long_name = "moist static energy"
 
@@ -126,7 +141,7 @@ def write_netcdf(
         "qt", "f4", ("x", "y", "z"), chunksizes=field_chunks,
         **compression_kwargs(compress, field_chunks),
     )
-    qt_var[:] = qt_3d
+    _assign("qt", qt_var, qt_3d)
     qt_var.units = "kg/kg"
     qt_var.long_name = "total water mixing ratio"
 
@@ -135,7 +150,7 @@ def write_netcdf(
             "flux", "f4", ("x", "y", "z"), chunksizes=field_chunks,
             **compression_kwargs(compress, field_chunks),
         )
-        flux_var[:] = flux_3d
+        _assign("flux", flux_var, flux_3d)
         flux_var.units = "1"
         flux_var.long_name = "dimensionless conserved flux"
 
@@ -153,7 +168,7 @@ def write_netcdf(
                 name, "f4", ("x", "y", "z"), chunksizes=field_chunks,
                 **compression_kwargs(compress, field_chunks),
             )
-            var[:] = field
+            _assign(name, var, field)
             var.units = units
             var.long_name = f"{name} as the cascade left it (mean not added)"
 
@@ -165,7 +180,7 @@ def write_netcdf(
             "flux_state", "f4", ("x", "y", "z"), chunksizes=field_chunks,
             **compression_kwargs(compress, field_chunks),
         )
-        var[:] = flux_state_3d
+        _assign("flux_state", var, flux_state_3d)
         var.units = "1"
         var.long_name = ("dimensionless conserved flux as the cascade left "
                          "it (no interpolation compensation)")
@@ -333,7 +348,7 @@ def write_netcdf(
 
 
 def write_class_increments(output_path, increment_dir, class_grids,
-                           group=None, compress=None):
+                           group=None, compress=None, readers=None):
     """Append per-class added increments to an existing STEAM output file.
 
     Stores, for each size class j of the WHOLE root ladder, the h, qt and
@@ -354,7 +369,16 @@ def write_class_increments(output_path, increment_dir, class_grids,
     output_path : str or Path
         Existing NetCDF file written by write_netcdf.
     increment_dir : str or Path
-        Directory of ``c{j:02d}_{h,qt}.npy`` files staged by the caller.
+        Directory of ``c{j:02d}_{h,qt}.npy`` files staged by the caller. Ignored
+        for any class that ``readers`` covers.
+    readers : list or None
+        One entry per stored class, or None. An entry may be None (read the
+        staged npy for that class) or a callable
+        ``reader(name, x_lo, x_hi) -> (x_hi - x_lo, ny, nz) array``. A streamed
+        run passes callables backed by its scratch store, so an increment field
+        is never resident and the NetCDF write stays in x-slabs -- writing an
+        (x, y, z) variable from a z-major source in one assignment degenerates
+        the same way per-level memmap access does.
     class_grids : list of dict
         One per stored class, in ladder order, with keys k, dx, dy and z
         (the class's 1D z-coordinate array).
@@ -373,9 +397,14 @@ def write_class_increments(output_path, increment_dir, class_grids,
 
     for j, class_grid in enumerate(class_grids):
         sub = inc_root.createGroup(f"c{j:02d}")
-        arrays = {name: np.load(increment_dir / f"c{j:02d}_{name}.npy")
-                  for name in ("h", "qt", "flux")}
-        nx_j, ny_j, nz_j = arrays["h"].shape
+        reader = None if readers is None else readers[j]
+        if reader is None:
+            arrays = {name: np.load(increment_dir / f"c{j:02d}_{name}.npy")
+                      for name in ("h", "qt", "flux")}
+            nx_j, ny_j, nz_j = arrays["h"].shape
+        else:
+            arrays = None
+            nx_j, ny_j, nz_j = reader.shape
         sub.createDimension("x", nx_j)
         sub.createDimension("y", ny_j)
         sub.createDimension("z", nz_j)
@@ -388,7 +417,14 @@ def write_class_increments(output_path, increment_dir, class_grids,
                 name, "f4", ("x", "y", "z"), chunksizes=class_chunks,
                 **compression_kwargs(compress, class_chunks),
             )
-            v[:] = arrays[name]
+            if arrays is not None:
+                v[:] = arrays[name]
+            else:
+                # x-slabs matching the variable's own chunking, so a z-major
+                # source never forces a whole-field touch per write.
+                for x_lo in range(0, nx_j, class_chunks[0]):
+                    x_hi = min(x_lo + class_chunks[0], nx_j)
+                    v[x_lo:x_hi] = reader(name, x_lo, x_hi)
             v.units = units
             v.long_name = f"class {j} added {name} increment"
         sub.k = np.float64(class_grid['k'])

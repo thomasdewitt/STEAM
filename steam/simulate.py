@@ -659,6 +659,7 @@ def simulate(
     haar_to_mhat=None,
     bound_buffer_multiple=None,
     ledger=None,
+    _force_tiling=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -764,6 +765,14 @@ def simulate(
         recorded scalars are injected instead, reproducing that run bit-for-bit
         on the same device. This is the replay primitive the streamed path is
         built on -- a tile is never asked to re-derive a global scalar.
+    _force_tiling : (horizon, tiles_x, tiles_y) or None
+        Internal, and the only way in to the streamed path for now: run size
+        classes from ``horizon`` on out of core, over a tiles_x by tiles_y tile
+        grid, with the working state on scratch disk. None runs in RAM. The
+        public ``stream_to_disk`` switch and its lifecycle (scratch_dir, resume,
+        cleanup) are component 5; this exists so the streamed path can be
+        tested, and so its output file can be compared variable for variable
+        against the resident one.
 
     Returns
     -------
@@ -1019,23 +1028,64 @@ def simulate(
                                     spheroscale_profile, z_profile,
                                     anisotropy)
 
-    (h_pert, qt_pert, flux_field,
-     deficit_h, deficit_qt, deficit_flux, final_grid, run_ledger) = cascade_loop(
-        h_profile, qt_profile, z_profile,
-        grids,
-        C_h_k, C_qt_k,
-        b_h_k, b_qt_k, aspect_k,
-        h_min, h_max, qt_min, qt_max,
-        min_distance_to_ground,
-        sparsity_factors,
-        child_seeds,
-        n_scale_classes_per_dyad=n_scale_classes_per_dyad,
-        turbulon_shape=turbulon_shape,
-        device=device,
-        increment_dir=increment_dir,
-        comp_k=comp_k,
-        ledger=ledger,
-    )
+    # STREAMED or resident. Everything after the cascade -- the coordinates, the
+    # stored amplitude ladder, the simulation_params dict -- is SHARED, which is
+    # what makes the two output files comparable attribute for attribute. Only
+    # the cascade itself and the composition/write differ.
+    store = increment_store = None
+    if _force_tiling is not None:
+        from .streaming import TileStore, plan_tiling
+        plan = plan_tiling(grids, unit_turbulon.shape[2], force=_force_tiling,
+                           save_increments=save_for_refinement)
+        # Beside the OUTPUT file, not in the system temp directory. /tmp is
+        # tmpfs on Linux, so a scratch directory there IS RAM and defeats the
+        # entire point -- the same trap that made the layout benchmark read
+        # 1.0x amplification, and the same reason simulate() already stages its
+        # class increments here. Component 5's scratch_dir= must check this.
+        scratch_root = Path(output_path).parent / f".steam_scratch_{Path(output_path).stem}"
+        store = TileStore(scratch_root)
+        if save_for_refinement:
+            increment_store = TileStore(scratch_root / "increments")
+
+    if store is None:
+        (h_pert, qt_pert, flux_field,
+         deficit_h, deficit_qt, deficit_flux, final_grid,
+         run_ledger) = cascade_loop(
+            h_profile, qt_profile, z_profile,
+            grids,
+            C_h_k, C_qt_k,
+            b_h_k, b_qt_k, aspect_k,
+            h_min, h_max, qt_min, qt_max,
+            min_distance_to_ground,
+            sparsity_factors,
+            child_seeds,
+            n_scale_classes_per_dyad=n_scale_classes_per_dyad,
+            turbulon_shape=turbulon_shape,
+            device=device,
+            increment_dir=increment_dir,
+            comp_k=comp_k,
+            ledger=ledger,
+        )
+    else:
+        from .streaming import streamed_cascade_loop
+        (h_pert, qt_pert, flux_field,
+         deficit_h, deficit_qt, deficit_flux, final_grid, run_ledger,
+         store) = streamed_cascade_loop(
+            h_profile, qt_profile, z_profile,
+            grids,
+            C_h_k, C_qt_k,
+            b_h_k, b_qt_k, aspect_k,
+            h_min, h_max, qt_min, qt_max,
+            min_distance_to_ground,
+            sparsity_factors,
+            child_seeds,
+            plan, store.directory,
+            n_scale_classes_per_dyad=n_scale_classes_per_dyad,
+            turbulon_shape=turbulon_shape,
+            device=device,
+            comp_k=comp_k,
+            increment_store=increment_store,
+        )
 
     # Construct final 3D fields
     z_final = final_grid['z'].astype(np.float32)
@@ -1046,24 +1096,30 @@ def simulate(
     # The composition's own reductions go into the same ledger the cascade
     # filled: they are realized global scalars like any other, and a streamed
     # run reaches them through the same plane pass.
-    h_3d, projection_h = _compose_output(
-        h_pert, deficit_h, h_mean_final, h_min, h_max, device=device,
-        ledger=run_ledger.projection.get('h'))
-    qt_3d, projection_qt = _compose_output(
-        qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max, device=device,
-        ledger=run_ledger.projection.get('qt'))
-    del deficit_h, deficit_qt
+    #
+    # The streamed path composes AFTER simulation_params is built, because it
+    # composes and writes in one traversal of the store -- the fields are memory
+    # maps and materializing them here to hand to write_netcdf is exactly what
+    # streaming exists to avoid.
+    if store is None:
+        h_3d, projection_h = _compose_output(
+            h_pert, deficit_h, h_mean_final, h_min, h_max, device=device,
+            ledger=run_ledger.projection.get('h'))
+        qt_3d, projection_qt = _compose_output(
+            qt_pert, deficit_qt, qt_mean_final, qt_min, qt_max, device=device,
+            ledger=run_ledger.projection.get('qt'))
+        del deficit_h, deficit_qt
 
-    flux_3d, run_ledger.flux_output = _compose_flux_output(
-        flux_field, deficit_flux, ledger=run_ledger.flux_output)
-    del deficit_flux
-    if projection_h is not None:
-        run_ledger.projection['h'] = projection_h
-    if projection_qt is not None:
-        run_ledger.projection['qt'] = projection_qt
+        flux_3d, run_ledger.flux_output = _compose_flux_output(
+            flux_field, deficit_flux, ledger=run_ledger.flux_output)
+        del deficit_flux
+        if projection_h is not None:
+            run_ledger.projection['h'] = projection_h
+        if projection_qt is not None:
+            run_ledger.projection['qt'] = projection_qt
 
-    nx_final_val = h_3d.shape[0]
-    ny_final_val = h_3d.shape[1]
+    nx_final_val = h_pert.shape[0]
+    ny_final_val = h_pert.shape[1]
     dx_final = (nx * dx) / nx_final_val
     dy_final = (ny * dy) / ny_final_val
     x_coords = np.arange(nx_final_val, dtype=np.float32) * dx_final
@@ -1126,6 +1182,36 @@ def simulate(
         'root_domain_height': domain_height,
     }
 
+    class_grids = [{'k': grids['k'][i], 'dx': grids['dx'][i],
+                    'dy': grids['dy'][i], 'z': grids['z_arrays'][i]}
+                   for i in range(n_classes)]
+
+    if store is not None:
+        from .streaming import compose_and_write
+        try:
+            projections, flux_output = compose_and_write(
+                store, increment_store,
+                (h_pert, qt_pert, flux_field, deficit_h, deficit_qt,
+                 deficit_flux, final_grid, run_ledger),
+                grids, plan,
+                (h_profile, qt_profile, z_profile),
+                (h_min, h_max, qt_min, qt_max),
+                simulation_params, output_path, class_grids,
+                (x_coords, y_coords), (k_values, k_z_values),
+                (C_h_k_stored, C_qt_k_stored),
+                save_for_refinement, compress, device)
+            run_ledger.projection.update(projections)
+            if flux_output is not None:
+                run_ledger.flux_output = flux_output
+        finally:
+            # Scratch is deleted on success and KEPT on failure: a crashed
+            # run's scratch plus its progress markers is the only thing that
+            # makes it resumable, and resume is component 5's work.
+            store.destroy()
+            if increment_store is not None:
+                increment_store.destroy()
+        return output_path
+
     write_netcdf(
         output_path, h_3d, qt_3d,
         x_coords, y_coords, z_final,
@@ -1142,11 +1228,8 @@ def simulate(
     if increment_dir is not None:
         from .output import write_class_increments
         import shutil
-        write_class_increments(
-            output_path, increment_dir,
-            [{'k': grids['k'][i], 'dx': grids['dx'][i], 'dy': grids['dy'][i],
-              'z': grids['z_arrays'][i]} for i in range(n_classes)],
-            compress=compress)
+        write_class_increments(output_path, increment_dir, class_grids,
+                               compress=compress)
         shutil.rmtree(increment_dir, ignore_errors=True)
     return output_path
 

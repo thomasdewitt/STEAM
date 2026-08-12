@@ -48,8 +48,10 @@ import torch
 from .ledger import (
     BoundedAddLedger,
     FluxAdvanceLedger,
+    FluxOutputLedger,
     MeanReduction,
     PatternLedger,
+    ProjectionLedger,
     RunLedger,
 )
 
@@ -1036,3 +1038,243 @@ def streamed_cascade_loop(
             deficit_or_none('h_deficit'), deficit_or_none('qt_deficit'),
             deficit_or_none('flux_deficit'),
             final_grid_info, ledger, store)
+
+
+# ---------------------------------------------------------------------------
+# Streamed composition (component 4)
+# ---------------------------------------------------------------------------
+#
+# The composition is per-LEVEL work (the mean-preserving projection) followed by
+# per-TILE work (the NetCDF write). Those want opposite layouts, and both get
+# the one they want: the projection runs on the store's z-major planes, where a
+# level is contiguous, and the write reads x-y tiles back out through the store's
+# raw-buffer window reader, matching the output variable's (64, 64, nz) chunking.
+# Composing straight into the NetCDF variable plane by plane would touch every
+# chunk of the file per level -- the same trap as the memmap layout, one level up.
+
+COMPOSED_FIELDS = {'h': 'h_composed', 'qt': 'qt_composed',
+                   'flux': 'flux_composed'}
+
+
+def compose_scalar(store, index, state_name, deficit_name, composed_name,
+                   mean_1d, phi_min, phi_max, device='cpu', ledger=None):
+    """state + deficit + mean, projected onto the bounds, into a store field.
+
+    The streamed form of _compose_output, level by level. The projection is the
+    mean-preserving one (_project_onto_bounds' s = 1 family) and it is per level,
+    so a plane at a time IS the whole operation rather than an approximation of
+    it -- the levels are independent and every reduction is within a level.
+
+    Returns the ProjectionLedger. The composition is deliberately the LAST thing
+    that happens and touches nothing a descendant nest reads: a nest continues
+    from the STATE, which is why it is the state the store keeps.
+    """
+    from .simulate import _project_onto_bounds
+
+    state_planes = store.plane_array(index, state_name)
+    nz = state_planes.shape[0]
+    has_deficit = store.exists(index, deficit_name)
+    deficit_planes = store.plane_array(index, deficit_name) if has_deficit else None
+    store.create(index, composed_name,
+                 (state_planes.shape[1], state_planes.shape[2], nz))
+    composed_planes = store.plane_array(index, composed_name)
+
+    projection = ledger if ledger is not None else ProjectionLedger(
+        np.full(nz, np.nan, dtype=np.float64))
+    for level in range(nz):
+        plane = np.array(state_planes[level], dtype=np.float32)
+        if has_deficit:
+            plane += deficit_planes[level]
+            # Restoring amplitude to under-resolved classes can push the sum
+            # past the bounds the per-class bounded add held the STATE inside,
+            # so the composition is projected onto them -- exactly as
+            # _compose_output does, and only when there is a deficit to add.
+            level_ledger = ProjectionLedger(projection.mu[level:level + 1].copy())
+            solved = _project_onto_bounds(
+                plane[:, :, None], mean_1d[level:level + 1], phi_min, phi_max,
+                window=None, device=device,
+                ledger=level_ledger if ledger is not None else None)
+            projection.mu[level] = solved.mu[0]
+        plane += np.float32(mean_1d[level])
+        # The bounds now hold up to float32 rounding of the (perturbation +
+        # mean) reassembly, which can undershoot by ~1 ulp of the field value.
+        # Clamp that residue only -- at most one ulp, not a physics clip.
+        np.clip(plane, np.float32(phi_min), np.float32(phi_max), out=plane)
+        composed_planes[level] = plane
+    composed_planes.flush()
+    return projection
+
+
+def compose_flux(store, index, state_name, deficit_name, composed_name,
+                 ledger=None):
+    """(flux + deficit) clipped at zero, restored to the state's volume mean.
+
+    The flux analogue of compose_scalar, and its bounds discipline is the flux's
+    own: positivity, and the volume mean the uncompensated state carries. Two
+    plane passes -- the realized mean cannot be known until the clip has run
+    everywhere -- with the entering mean accumulated on the first one's read, so
+    it costs no extra traversal.
+    """
+    state_planes = store.plane_array(index, state_name)
+    nz = state_planes.shape[0]
+    has_deficit = store.exists(index, deficit_name)
+    if not has_deficit:
+        # No class was under-resolved: the state IS the output.
+        return None, state_name
+    deficit_planes = store.plane_array(index, deficit_name)
+    store.create(index, composed_name,
+                 (state_planes.shape[1], state_planes.shape[2], nz))
+    composed_planes = store.plane_array(index, composed_name)
+
+    if ledger is None:
+        entering = MeanReduction(np.float64(0.0), 0)
+        realized = MeanReduction(np.float64(0.0), 0)
+    else:
+        entering, realized = ledger.entering, ledger.realized
+    for level in range(nz):
+        state_plane = np.array(state_planes[level], dtype=np.float32)
+        if ledger is None:
+            entering = entering + MeanReduction(
+                state_plane.sum(dtype=np.float64), state_plane.size)
+        plane = state_plane + deficit_planes[level]
+        np.maximum(plane, np.float32(0.0), out=plane)
+        if ledger is None:
+            realized = realized + MeanReduction(
+                plane.sum(dtype=np.float64), plane.size)
+        composed_planes[level] = plane
+
+    output_ledger = FluxOutputLedger(entering, realized)
+    rescale = output_ledger.rescale
+    for level in range(nz):
+        if rescale is not None:
+            composed_planes[level] *= np.float32(rescale)
+        else:
+            # Everything clipped to zero: restore the entering mean flat, as
+            # _compose_flux_output does.
+            composed_planes[level] = np.float32(entering.mean)
+    composed_planes.flush()
+    return output_ledger, composed_name
+
+
+def tile_writer_from_store(store, index, name_map, tile=64):
+    """A write_netcdf `tile_writer`: fill a 3D variable from the store in tiles.
+
+    x-y tiles with the full z extent, which is the shape of the output
+    variable's own chunks -- writing z-planes instead would touch every chunk of
+    the file per level. Reads come through the store's raw-buffer window reader,
+    so the source side is contiguous runs too.
+    """
+    def write(name, variable, source):
+        field = name_map.get(name)
+        if field is None:
+            variable[:] = source
+            return
+        class_index, store_name = field
+        nx, ny = variable.shape[0], variable.shape[1]
+        for x_lo in range(0, nx, tile):
+            x_hi = min(x_lo + tile, nx)
+            for y_lo in range(0, ny, tile):
+                y_hi = min(y_lo + tile, ny)
+                variable[x_lo:x_hi, y_lo:y_hi, :] = store.read_window(
+                    class_index, store_name, x_lo, x_hi, y_lo, y_hi)
+    return write
+
+
+class IncrementReader:
+    """A write_class_increments `reader`, backed by a streamed run's store."""
+
+    __slots__ = ('_store', '_index', 'shape')
+
+    def __init__(self, store, index, shape):
+        self._store = store
+        self._index = index
+        self.shape = tuple(int(n) for n in shape)
+
+    def __call__(self, name, x_lo, x_hi):
+        return self._store.read_window(self._index, name, x_lo, x_hi,
+                                       0, self.shape[1])
+
+
+def compose_and_write(store, increment_store, result, grids, plan,
+                      profiles, bounds, simulation_params, output_path,
+                      class_grids, coordinates, k_arrays, C_stored,
+                      save_for_refinement, compress, device):
+    """Compose a streamed run's states and write the output file.
+
+    The composition runs on the store's z-major planes (per level, which is what
+    the projection is) and the file is written in x-y tiles (which is what the
+    NetCDF chunks are). Both layouts get the access they want; neither field is
+    ever resident.
+
+    Returns the ProjectionLedger / FluxOutputLedger entries so the caller can
+    put them in the run's ledger before it is written.
+    """
+    from .output import write_class_increments, write_netcdf
+
+    h_profile, qt_profile, z_profile = profiles
+    h_min, h_max, qt_min, qt_max = bounds
+    final = len(grids['k']) - 1
+    z_final = np.asarray(result[6]['z'], dtype=np.float32)
+    h_mean = np.interp(z_final, z_profile, h_profile).astype(np.float32)
+    qt_mean = np.interp(z_final, z_profile, qt_profile).astype(np.float32)
+
+    projections = {}
+    projections['h'] = compose_scalar(
+        store, final, 'h_perturbation', 'h_deficit', COMPOSED_FIELDS['h'],
+        h_mean, h_min, h_max, device=device)
+    projections['qt'] = compose_scalar(
+        store, final, 'qt_perturbation', 'qt_deficit', COMPOSED_FIELDS['qt'],
+        qt_mean, qt_min, qt_max, device=device)
+    flux_output_ledger, flux_field = compose_flux(
+        store, final, 'flux', 'flux_deficit', COMPOSED_FIELDS['flux'])
+
+    # Into the ledger BEFORE it is written: write_netcdf serializes the ledger
+    # group, so a projection merged after the write would be recorded nowhere.
+    # (Caught 2026-08-12 by the ledger round-trip test, which found the streamed
+    # file's projection group empty while every field agreed.)
+    run_ledger = result[7]
+    run_ledger.projection.update(projections)
+    if flux_output_ledger is not None:
+        run_ledger.flux_output = flux_output_ledger
+
+    # Which store field backs each output variable. The perturbations and the
+    # flux STATE are written as they are -- a nest continues from those, so they
+    # must not carry the composition.
+    name_map = {
+        'h': (final, COMPOSED_FIELDS['h']),
+        'qt': (final, COMPOSED_FIELDS['qt']),
+        'flux': (final, flux_field),
+        'h_perturbation': (final, 'h_perturbation'),
+        'qt_perturbation': (final, 'qt_perturbation'),
+        'flux_state': (final, 'flux'),
+    }
+    write_netcdf(
+        output_path, result[0], result[1],
+        coordinates[0], coordinates[1], z_final,
+        h_profile, qt_profile, z_profile,
+        k_arrays[0], k_arrays[1], C_stored[0], C_stored[1],
+        simulation_params, compress=compress,
+        flux_3d=result[2],
+        h_pert_3d=result[0] if save_for_refinement else None,
+        qt_pert_3d=result[1] if save_for_refinement else None,
+        flux_state_3d=result[2] if save_for_refinement else None,
+        run_ledger=result[7],
+        tile_writer=tile_writer_from_store(store, final, name_map),
+    )
+
+    if increment_store is not None:
+        # Classes above the horizon staged npy the way cascade_loop does; the
+        # streamed ones are read straight out of the store.
+        readers = []
+        for index in range(len(class_grids)):
+            if index < plan.horizon:
+                readers.append(None)
+            else:
+                readers.append(IncrementReader(
+                    increment_store, index,
+                    (int(grids['nx'][index]), int(grids['ny'][index]),
+                     int(grids['nz'][index]))))
+        write_class_increments(
+            output_path, Path(store.directory) / "head_increments",
+            class_grids, compress=compress, readers=readers)
+    return projections, flux_output_ledger
