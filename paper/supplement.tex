@@ -47,14 +47,14 @@ The inputs are listed in Table \ref{tab:steam inputs}.
 Symbol & Input & Notes \\
 \hline
 $\langle h \rangle_t(z)$, $\langle q_t \rangle_t(z)$ & ensemble mean profiles & horizontally uniform, sampled at spacing $\Delta z_p$ \\
-$l_s(z)$ & spheroscale profile & \\
+$\ell_s(z)$ & spheroscale profile & \\
 $L$ & outer scale & conventionally a power-of-two multiple of $dx$ \\
 $L_x$, $L_y$ & horizontal domain size & \\
 $dx$, $dy$ & finest (output) grid spacing & \\
 $L_z$ & domain height & \\
 $[\Phi_{\min}, \Phi_{\max}]$ & physical bounds & one pair per scalar \\
 $n_b$ & bound-buffer multiple & default 3 \\
-$m$ & minimum center distance to ground & in units of $k_z(k)$, default 1 \\
+$m$ & minimum center distance to ground & in units of $\ell_z(\ell)$, default 1 \\
 $p_s$ & surface pressure & \\
 --- & random seed & \\
 $s_x$, $s_y$, $s_z$ & sparsity factors & positive integers, default 1 \\
@@ -64,18 +64,18 @@ $n_c$ & cascade density & size classes per octave, default 1 \\
 \caption{Inputs to the STEAM algorithm.}\label{tab:steam inputs}
 \end{table}
 
-The implied vertical outer scale $k_{z,L}(z) = l_s(z)\left(L/l_s(z)\right)^{H_z}$ is enforced to be smaller than the domain height at every level.
-Logarithmically spaced size classes are defined as $k_i = L\, 2^{-i/n_c}$
+The implied vertical outer scale $\ell_{z,L}(z) = \ell_s(z)\left(L/\ell_s(z)\right)^{H_z}$ is enforced to be smaller than the domain height at every level.
+Logarithmically spaced size classes are defined as $\ell_i = L\, 2^{-i/n_c}$
 for $i = 0, 1, \dots, n$, proceeding from the outer scale down to the
-class nearest $k = 2dx$, the smallest turbulon that is Nyquist-sampled
+class nearest $\ell = 2dx$, the smallest turbulon that is Nyquist-sampled
 by the output grid such that $n = \mathrm{round}[n_c\log_2(L/(2dx))]$. When the
 outer scale is a power-of-two multiple of $dx$, the conventional
-configuration, the finest class is $2dx$ exactly. For each $k_i$ the vertical turbulon size is $k_{z,i}(z) =
-l_s(z)(k_i / l_s(z))^{H_z}$, evaluated with the local spheroscale. The value of $H_z$ is set to $5/9$ for $k_i>l_s$ and 1 otherwise when the default ``piecewise isotropic'' scaling function is used, as in all simulations in this work. The alternative ``canonical'' scaling function keeps $H_z=5/9$ for all sizes.
+configuration, the finest class is $2dx$ exactly. For each $\ell_i$ the vertical turbulon size is $\ell_{z,i}(z) =
+\ell_s(z)(\ell_i / \ell_s(z))^{H_z}$, evaluated with the local spheroscale. The value of $H_z$ is set to $5/9$ for $\ell_i>\ell_s$ and 1 otherwise when the default ``piecewise isotropic'' scaling function is used, as in all simulations in this work. The alternative ``canonical'' scaling function keeps $H_z=5/9$ for all sizes.
 
 The list of size classes does not depend on the
 sparsity factors, and so the cascade always terminates at the class nearest
-$k = 2dx$. The sparsity factors
+$\ell = 2dx$. The sparsity factors
 instead set how finely each class is resolved on its own working grid
 as described in the following section. At $s = 1$ the finest class works directly on the
 output grid, while for $s > 1$ every class works on a
@@ -88,48 +88,48 @@ The outer-scale amplitude profile $C_{\Phi, L}(z)$ is computed for each
 scalar $\Phi \in \{h, q_t\}$ from the mean profile as described in
 Appendix A. At each profile level, the Haar fluctuation at the local
 vertical outer scale is computed by taking the mean of the profile over the upper half of
-a $k_{z,L}(z)$-wide window minus the mean over the lower half. The
+a $\ell_{z,L}(z)$-wide window minus the mean over the lower half. The
 profile is read as the piecewise-linear function its samples define,
 and the two half-window means are its exact integrals over
-$[z, z + k_{z,L}/2]$ and $[z - k_{z,L}/2, z]$. Beyond its ends the
+$[z, z + \ell_{z,L}/2]$ and $[z - \ell_{z,L}/2, z]$. Beyond its ends the
 profile is extended by its end values. The windows are therefore not
 rounded to whole profile cells, which would otherwise bias the
 response high wherever a half-window spans only a few cells. The result is multiplied by the calibration
-constant $\lambda$ and taken in absolute value.
+constant $\vartheta$ and taken in absolute value.
 
-$\lambda$ is set by the consistency requirement of Appendix A: the
+$\vartheta$ is set by the consistency requirement of Appendix A: the
 vertical Haar fluctuation of the simulated fields at the vertical outer
 scale must equal that of the mean profile. It is calibrated by running
 a full simulation on linear mean profiles for both scalars, on a domain
 whose vertical extent contains one vertical outer scale. The
 calibration runs place the scalar bounds far beyond any value the
-fields can reach, so the bound projection described in Appendix A never engages and the value of $\lambda$ does not depend on the bound configuration.
+fields can reach, so the bound projection described in Appendix A never engages and the value of $\vartheta$ does not depend on the bound configuration.
 The mean
 absolute vertical Haar fluctuation of the simulated columns is computed
 at logarithmically spaced lags. A line of fixed slope $H_v = H_h/H_z$ is
 anchored to the fluctuation at the second-smallest lag (the smallest,
 at two grid cells, is more affected by discretization) and extrapolated to
-$k_{z,L}$. The criterion is evaluated on this extrapolated line rather
-than on the fluctuations measured at $k_{z,L}$ itself, because near the
+$\ell_{z,L}$. The criterion is evaluated on this extrapolated line rather
+than on the fluctuations measured at $\ell_{z,L}$ itself, because near the
 outer scale the Haar response contains contributions from both the fluctuations and the mean profile itself. The ratio of
-the profile's Haar fluctuation at $k_{z,L}$ to the extrapolated value,
-averaged geometrically over the two scalars, multiplies $\lambda$, and
+the profile's Haar fluctuation at $\ell_{z,L}$ to the extrapolated value,
+averaged geometrically over the two scalars, multiplies $\vartheta$, and
 the calibration is repeated until the ratio converges to one. Convergence to $\sim 1\%$ is typically achieved in three to five iterations.
 
 Because
 the same Haar operator is applied to the profile and to the simulated
 field, conventions defining the envelope amplitude, the Haar definition, and the interpolation compensation factors described below are absorbed
-into $\lambda$. For unknown reasons the converged values for $\lambda$ depend on the value of the horizontal Hurst exponent. For the runs here $H_h = 0.45$ and $\lambda = 0.25518$. 
+into $\vartheta$. For unknown reasons the converged values for $\vartheta$ depend on the value of the horizontal Hurst exponent. For the runs here $H_h = 0.45$ and $\vartheta = 0.25518$. 
 
 The scale-dependent amplitudes
-follow $C_{\Phi,k}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(k/L)^{H_h}$
+follow $C_{\Phi,\ell}(z) = n_c^{-1/\alpha}\, C_{\Phi,L}(z)(\ell/L)^{H_h}$
 as described in Appendix A and are interpolated
 to each size class's vertical grid.
 
 The bound buffer widths are computed from the same amplitude profiles
 as
 \begin{align}
-  b_{\Phi,k}(z) = n_b\, \frac{C_{\Phi,k}(z)}{1 - 2^{-H_h/n_c}},
+  b_{\Phi,\ell}(z) = n_b\, \frac{C_{\Phi,\ell}(z)}{1 - 2^{-H_h/n_c}},
 \end{align}
 the geometric sum, in closed form, of the mean absolute amplitudes of
 the current class and of every class the cascade could ever add below
@@ -142,34 +142,34 @@ run (Sect.~\ref{sect:nested refinement}).
 \subsection{Working grids}\label{ssect:working grids}
 
 For computational efficiency, each size class works on its own grid
-with $\Delta x_k = k/(2s_x)$ and $\Delta y_k = k/(2s_y)$ --- coarser
+with $\Delta x_\ell = \ell/(2s_x)$ and $\Delta y_\ell = \ell/(2s_y)$ --- coarser
 than the output grid for all but the finest classes. When $s = 1$, the
 spacing is half the turbulon size and the turbulon is represented
 coarsely, as shown in Figure (GET FIG NUM) of Appendix A.
-The horizontal dimensions $n_{x,k} = L_x/\Delta x_k$ and $n_{y,k} =
-L_y/\Delta y_k$ are exact integers provided $L_x$ and $L_y$ are integer
+The horizontal dimensions $n_{x,\ell} = L_x/\Delta x_\ell$ and $n_{y,\ell} =
+L_y/\Delta y_\ell$ are exact integers provided $L_x$ and $L_y$ are integer
 multiples of $L$. Each horizontal domain dimension is enforced to be either an integer multiple of the outer scale or smaller than it.
 Grid counts along a narrower dimension are rounded to at least one cell, and any turbulon
 envelope wider than the extent is periodically folded onto it by summation.
 
-The vertical grid requires more care because $k_z(z)$ varies with
+The vertical grid requires more care because $\ell_z(z)$ varies with
 height. To compute $\Delta z$, cells are accumulated upward from the surface with local
-spacing $k_z(k, l_s(z))/(2s_z)$ until the accumulated grid first reaches
+spacing $\ell_z(\ell, \ell_s(z))/(2s_z)$ until the accumulated grid first reaches
 or overshoots the domain top, with the overshooting cell retained. The resulting spacings are then rescaled by a single common factor
 $\le 1$ so that they tile $L_z$ exactly. For a constant spheroscale this reduces
 to a uniform grid at least as fine as the Nyquist target.
 
 As described below, at each cascade step the fields are trilinearly interpolated to the next working grid dimensions. The interpolation is cell-consistent: source and target cells tile the same extent, and values are sampled at cell centers. In $x$ and $y$ the grid is periodic. To enforce this the source is padded with wrapped cells and the margin cropped after the interpolation. In the vertical direction, the convolutions are not periodic and are instead zero-padded. 
 
-Due to the coarseness of the grid, interpolation does not preserve the mean absolute value of the turbulon perturbations. A size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,k}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $k/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the output is composed, not inside the cascade itself, and therefore the gradient weighting and the bound factor are computed from the running, uncompensated state. 
+Due to the coarseness of the grid, interpolation does not preserve the mean absolute value of the turbulon perturbations. A size class that is poorly resolved on the output grid introduces more variability than its $C_{\Phi,\ell}$ factor alone would imply. To account for this, each class carries a compensation factor $\digamma$ that depends on $\ell/\Delta x$, the turbulon size in units of the output grid spacing (Table \ref{tab:interpolation compensation}). The factor is applied when the output is composed, not inside the cascade itself, and therefore the gradient weighting and the bound factor are computed from the running, uncompensated state. 
 
 To keep track of the compensation factors, the cascade accumulates a compensation deficit field for each scalar, $\sum_i (\digamma_i - 1)\,\Delta_i$, where $\Delta_i$ is the increment class $i$ actually added. The deficit is a three-dimensional field rather than a per-class constant because the correction must restore a fraction of each class's particular increment, and so inherits the increments' spatial structure. The deficit is interpolated between classes together with the state, and the output is the sum of the two as described in Sect.~\ref{ssect:final fields} below. The flux accumulates a deficit in the same way as well. The ``retention'' factors underlying $\digamma$, defined as the fraction of the mean absolute amplitude that survives one interpolation step, are measured by rerunning a single size class of the full algorithm at successively finer output resolutions and taking ratios of the resulting mean absolute perturbations.
 
-Two effects contribute to the resolution dependence. First, at small $k/\Delta x$ the sampled points on the envelope curve land preferentially near the envelope peaks; at the extreme $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $1/0.337 \approx 3\times$ the amplitude of a well resolved one. Second, at large $k/\Delta x$, each regrid resamples the piecewise linear field at points that do not exactly coincide with the previous ones, especially in the vertical direction where upsampling occurs by a non-integer factor $2^{H_z}$. This removes 1--3\% of the amplitude per octave out to at least $k/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $k/\Delta x = 512$, the largest class used by any simulation in this work. The choice of reference is a single overall constant and is absorbed into the calibration factor $\lambda$ above.
+Two effects contribute to the resolution dependence. First, at small $\ell/\Delta x$ the sampled points on the envelope curve land preferentially near the envelope peaks; at the extreme $s = 1$ the grid points coincide with the turbulon centers. A marginally resolved class therefore reads up to $1/0.337 \approx 3\times$ the amplitude of a well resolved one. Second, at large $\ell/\Delta x$, each regrid resamples the piecewise linear field at points that do not exactly coincide with the previous ones, especially in the vertical direction where upsampling occurs by a non-integer factor $2^{H_z}$. This removes 1--3\% of the amplitude per octave out to at least $\ell/\Delta x = 256$. There is consequently no fully converged reference resolution. The factors in Table \ref{tab:interpolation compensation} are instead normalized to $\ell/\Delta x = 512$, the largest class used by any simulation in this work. The choice of reference is a single overall constant and is absorbed into the calibration factor $\vartheta$ above.
 
 Retentions differ between the isotropic and anisotropic regimes because of the different vertical upsampling factors ($2$ versus $2^{H_z}$ per step), and were therefore measured separately in the two regimes (Table \ref{tab:hop retention}). A class's compensation factor is computed from the retention factors for all regrids that its perturbation field will eventually undergo, each taken from the regime of that regrid's destination grid at each height level. A cascade crossing the spheroscale therefore composes isotropic retentions below it and anisotropic retentions above it, with the crossing step approximated by the regime of its destination grid.
 
-The specific rule is as follows. Write $r(y)$ for the retention of one regrid, with $y$ the class's value of $k/\Delta x$ on the grid the regrid starts from. A class's perturbation field is created at $y = 2$, on the class's own working grid, and $y$ doubles at each subsequent regrid. Intermediate $y$ (which arise for $n_c > 1$) are interpolated linearly in $\log_2 y$. A regrid at $y$ at or beyond twice the last tabulated value retains 1, the class being well resolved by then; between the last tabulated value and twice it, the last tabulated retention applies. At each level $z$, a class whose perturbation field has yet to traverse regrids $m = 1, 2, \dots$ carries
+The specific rule is as follows. Write $r(y)$ for the retention of one regrid, with $y$ the class's value of $\ell/\Delta x$ on the grid the regrid starts from. A class's perturbation field is created at $y = 2$, on the class's own working grid, and $y$ doubles at each subsequent regrid. Intermediate $y$ (which arise for $n_c > 1$) are interpolated linearly in $\log_2 y$. A regrid at $y$ at or beyond twice the last tabulated value retains 1, the class being well resolved by then; between the last tabulated value and twice it, the last tabulated retention applies. At each level $z$, a class whose perturbation field has yet to traverse regrids $m = 1, 2, \dots$ carries
 \begin{align}
   \digamma(z) = D_{512} \Big/ \prod_m r_{\rho_m(z)}(y_m), \qquad
   D_{512} = \prod_{y = 2, 4, \dots, 256} r_{\mathrm{ani}}(y) \approx 0.337,
@@ -192,16 +192,16 @@ $r_{\mathrm{iso}}(y)$ & 0.5401 & 0.8362 & 0.9587 & 0.9839 & 0.9956 & --- & --- &
 \centering
 \begin{tabular}{lccccccccc}
 \hline
-$k/\Delta x$ & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 & 512 \\
+$\ell/\Delta x$ & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 & 512 \\
 $\digamma$ & 0.337 & 0.595 & 0.798 & 0.894 & 0.925 & 0.950 & 0.975 & 0.988 & 1 \\
 \hline
 \end{tabular}
-\caption{Compensation factors for the resolution dependence of mean absolute turbulon amplitudes, where $\Delta x$ is the final output grid resolution in the horizontal direction. Factors are measured on the full algorithm (\texttt{tests/heavy/interpolation\_compensation.py}) and normalized to the $k/\Delta x = 512$ reference; intermediate values are interpolated linearly in $\log_2(k/\Delta x)$.}\label{tab:interpolation compensation}
+\caption{Compensation factors for the resolution dependence of mean absolute turbulon amplitudes, where $\Delta x$ is the final output grid resolution in the horizontal direction. Factors are measured on the full algorithm (\texttt{tests/heavy/interpolation\_compensation.py}) and normalized to the $\ell/\Delta x = 512$ reference; intermediate values are interpolated linearly in $\log_2(\ell/\Delta x)$.}\label{tab:interpolation compensation}
 \end{table}
 
 \subsection{Cascade loop}
 
-The perturbation fields $\widetilde{h}$ and $\widetilde{q_t}$ are
+The perturbation fields $\sum_\ell h_\ell$ and $\sum_\ell q_{t,\ell}$ are
 initialized to zero and the flux field $\mathcal{F}$ to one on the
 coarsest grid. The algorithm then iterates over size classes from large
 to small, performing the following sequence of operations at each class.
@@ -215,10 +215,10 @@ vertical grid.
 The flux is then advanced by one size class. A sparse field $\gamma$ of
 independent extremal ($\beta = -1$) L\'evy $\alpha$-stable variables with
 $\alpha = 1.8$ is drawn at the turbulon centers every $s_x, s_y, s_z$
-cells. This corresponds exactly to every $k/2$ in physical space horizontally, but vertically the common rescaling of the
-vertical grid (Sect. \ref{ssect:working grids}) makes the less than or equal to
-$k_z/2$. No centers are placed within $2 s_z m$ vertical cells of the
-surface or of the domain top, corresponding to approximately $m\, k_z(k)$ in physical space with $m$
+cells. This corresponds exactly to every $\ell/2$ in physical space horizontally, but vertically the common rescaling of the
+vertical grid (Sect. \ref{ssect:working grids}) makes them less than or equal to
+$\ell_z/2$. No centers are placed within $2 s_z m$ vertical cells of the
+surface or of the domain top, corresponding to approximately $m\, \ell_z(\ell)$ in physical space with $m$
 defined in Table \ref{tab:steam inputs} (default 1). The L\'evy noise is scaled by
 $c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
 constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
@@ -230,37 +230,37 @@ finite because $\beta = -1$ places the heavy tail on the side the
 exponential suppresses. 
 
 Once L\'evy noise is generated and scaled, the flux is updated additively as
-$\mathcal{F} \mathrel{+}= \mathfrak{T}_k * [(e^\gamma - 1)\mathcal{F}]$. After the addition, any negative values are set to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
+$\mathcal{F} \mathrel{+}= \mathfrak{T}_\ell * [(e^\gamma - 1)\mathcal{F}]$. After the addition, any negative values are set to zero. The clipped flux is then rescaled by a multiplicative factor that restores the volume
 mean the field had before the perturbation was added.
-The signed scalar noise $S_k$ is defined as the increment $(e^\gamma -
+The signed scalar noise $S_\ell$ is defined as the increment $(e^\gamma -
 1)\mathcal{F}$, evaluated with the entering flux and normalized by the mean
 absolute value of $e^\gamma - 1$ over the turbulon centers. The scalar noise is shared
 between $h$ and $q_t$.
 
 
-Next, the scalar amplitudes are computed from the noise, bound factor, and gradient weighing factor. The bound factor $g_\Phi$ is evaluated pointwise from the running field $f = \langle \Phi \rangle_t + \widetilde{\Phi}$ using the buffer width $b_{\Phi,k}(z)$ defined in Appendix A.
+Next, the scalar amplitudes are computed from the noise, bound factor, and gradient weighing factor. The bound factor $g_\Phi$ is evaluated pointwise from the running field $\Phi_{>\ell}$ using the buffer width $b_{\Phi,\ell}(z)$ defined in Appendix A.
  
 Gradients are taken with periodic
 central differences in $x$ and $y$ and with one-sided differences at the
-vertical boundaries (central in the interior). The gradient weight is computed as $W_{\Phi,k} =
-|\nabla_h f| + (k_z/k)|\partial f/\partial z|$. The overall weighing factor $g_\Phi W_{\Phi,k} S_k$ is divided
+vertical boundaries (central in the interior). The gradient weight is computed as $W_{\Phi,\ell} =
+|\nabla_h \Phi_{>\ell}| + (\ell_z/\ell)|\partial \Phi_{>\ell}/\partial z|$. The overall weighing factor $g_\Phi W_{\Phi,\ell} S_\ell$ is divided
 by its mean absolute value over the turbulon centers at each level.
 The mean is taken over the centers where the product is nonzero, whether that
 center is pinned to zero by the bound taper or has an exactly zero gradient
 weight. 
 Finally, the normalized product
-is multiplied by $C_{\Phi,k}(z)$, giving the amplitude field
+is multiplied by $C_{\Phi,\ell}(z)$, giving the amplitude field
 $A_\Phi$.
 
 The amplitude fields are then convolved with the turbulon envelope. The 3D
 Mexican hat defined in Appendix A is constructed
-with $\sigma = k/\pi$ isotropically in grid-index space and truncated at a distance $3k$ from its center along each
+with $\sigma = \ell/\pi$ isotropically in grid-index space and truncated at a distance $3\ell$ from its center along each
 axis. If the kernel exceeds
 the field extent horizontally it is periodically folded by summation onto the field
 period. $A_\Phi$ is convolved with this kernel using a horizontally periodic and vertically zero-padded convolution to obtain a candidate perturbation field for
-$\widetilde{\Phi}_k$. 
+$\Phi_\ell$. 
 
-Because the candidate perturbation field may cause the running sum $\sum_{k\ge k_i} \widetilde{\Phi_k}$ to exceed its bounds, it cannot be straightforwardly added to $\sum_{k > k_i} \widetilde{\Phi_k}$. Instead, 
+Because the candidate perturbation field may cause the running field $\Phi_{\ge\ell}$ to exceed its bounds, it cannot be straightforwardly added to $\Phi_{>\ell}$. Instead, 
 a bounded,
 amplitude-preserving projection is used. At every level the added perturbation
 must satisfy three conditions: (i) zero horizontal mean; (ii) mean
@@ -290,7 +290,7 @@ amplitude no larger than $2\min(\langle\Phi\rangle - \Phi_{\min},\;
 excursions must balance and the smaller of the two headrooms limits
 both. The target amplitude exceeds this limit wherever the level mean
 sits too close to a bound. For $q_t$ this happens at dry upper levels,
-where the summed amplitudes $\sum_k C_{q_t,k}$ can reach ten times the
+where the summed amplitudes $\sum_\ell C_{q_t,\ell}$ can reach ten times the
 level mean. On such levels the iteration stops at the largest amplitude
 the bounds permit, and conditions (i) and (iii) still hold exactly.
 Once accepted, the perturbation is added to the running field, so
@@ -301,7 +301,7 @@ subsequent size classes see the gradients of the bounded field.
 After the finest class, the outputs are composed from the cascade
 states and their compensation deficits. Each scalar output is 
 $$\Phi =
-\langle \Phi \rangle_t + \widetilde{\Phi} + \sum_i (\digamma_i - 1)
+\langle \Phi \rangle_t + \sum_\ell \Phi_\ell + \sum_i (\digamma_i - 1)
 \Delta_{\Phi,i},$$
 projected onto $[\Phi_{\min}, \Phi_{\max}]$ with each level's horizontal mean preserved. A clipped level is replaced by the closest in-bounds field with the same mean, using the shift-and-clip construction of the bounded projection above without its mean absolute amplitude condition. This final projection is needed because
 adding the compensation $\sum_i (\digamma_i - 1)
@@ -326,7 +326,7 @@ the fields use the \verb|blosc-zstd filter| (byte-shuffled, compression level
 inputs are stored alongside the outputs and scalar attributes record the full configuration:
 grid dimensions and spacings, outer scale, domain height, bounds,
 sparsity factors, cascade density, surface pressure, random seed,
-$H_h$, $H_z$, $\lambda$, the flux parameters $c$ and $\alpha$, and
+$H_h$, $H_z$, $\vartheta$, the flux parameters $c$ and $\alpha$, and
 the envelope and anisotropy options. 
 
 If nested simulations are to be performed, the flag \texttt{save\_for\_refinement} is required, which additionally stores the cascade states and per-class increments: \texttt{h\_perturbation}, \texttt{qt\_perturbation}, \texttt{flux\_state}, and \texttt{class\_increments}. This allows nested simulations to continue the cascade without reading the final compensated fields. Compensation is only done at final output resolution and not mid-cascade.
@@ -352,8 +352,8 @@ Variable & Dimensions & Units & Description \\
 \texttt{h\_profile}, \texttt{qt\_profile} & $(z_p)$ & J\,kg$^{-1}$, kg\,kg$^{-1}$ & input mean profiles \\
 \texttt{spheroscale\_profile} & $(z_p)$ & m & input spheroscale profile \\
 \hline
-\texttt{k\_values}, \texttt{k\_z\_values} & $(k)$ & m & horizontal and vertical size classes \\
-\texttt{C\_h\_k}, \texttt{C\_qt\_k} & $(k, z_k)$ & J\,kg$^{-1}$, kg\,kg$^{-1}$ & per-class amplitude profiles \\
+\texttt{k\_values}, \texttt{k\_z\_values} & $(\ell)$ & m & horizontal and vertical size classes \\
+\texttt{C\_h\_k}, \texttt{C\_qt\_k} & $(\ell, z_\ell)$ & J\,kg$^{-1}$, kg\,kg$^{-1}$ & per-class amplitude profiles \\
 \texttt{dz}, \texttt{spheroscale} & $(z)$ & m & cell heights and spheroscale, output grid \\
 \hline
 \texttt{p\_bottom} & $(x,y)$ & Pa & basal pressure (elevated nests only) \\
@@ -386,9 +386,9 @@ from which its hydrostatic integration starts.
 \subsection{Nested refinement}\label{sect:nested refinement}
 
 A completed simulation can be ``refined'' to finer resolution over a portion of its domain by simply continuing the cascade within the desired region. The design requirement is that a nest be the same cascade carried further: a nest spanning the full parent domain is identical, cell for cell, to a root run taken directly to the nest's resolution. A nest covering part of the domain deviates from that identity only in that the global statistics (the weight normalization, the mean absolute multiplier noise, and the flux volume means) are evaluated over the nest's own region rather than the full domain. The nest therefore continues from the stored cascade states of Table \ref{tab:output file}, extracted over the nest region and interpolated trilinearly onto the nest's grids. A parent intended for refinement must therefore store intermediate cascade states, because the final projection is not always invertible. The
-amplitude profiles $C_{\Phi,k}$ are re-derived from the mean profile
+amplitude profiles $C_{\Phi,\ell}$ are re-derived from the mean profile
 by exactly the computation the root performed, with the root's outer
-scale, $H_h$, and $\lambda$. Because the Haar response is evaluated
+scale, $H_h$, and $\vartheta$. Because the Haar response is evaluated
 exactly on the profile's own grid (Sect.~\ref{ssect:normalization}), this
 reproduces the root's amplitudes class by class with no discontinuity
 at the overlap scale. The
@@ -516,7 +516,7 @@ With the exception of the mean profiles, no STEAM inputs are
 calibrated to any individual host. The spheroscale is a constant 10~m,
 with turbulons isotropic below it
 (\texttt{piecewise\_isotropic\_below\_spheroscale}); the Hurst
-exponents, $\lambda$, the turbulon envelope, the cascade density, and
+exponents, $\vartheta$, the turbulon envelope, the cascade density, and
 the flux noise parameters $\alpha$ and $\beta$ are those of
 Sect.~\ref{ssect:steam algorithm spec}. The two values $c = 0.05$ and $c = 0.17$ are used for the flux noise amplitude throughout the comparison. The simulated depth is 20~km and
 the input profiles are sampled at 50~m. The run sets are listed in
