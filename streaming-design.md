@@ -578,6 +578,8 @@ cleanup on success, retention + resume instructions on failure.
 
 In rough priority order, as of 2026-08-12 with components 1-5 landed:
 
+0. **Streamed apply-only replay.** `ledger=` under `stream_to_disk` raises today:
+   the ledger would have to be distributed back over the tiles and planes.
 1. **GPU-resident tiles** (the original component 6, below): tiles sized to VRAM
    rather than RAM, per-tile work running device-resident end to end. Nothing in
    1-5 precludes it — the per-tile work unit is a pure function of (slab arrays
@@ -609,6 +611,55 @@ benchmark conclusions then. Nothing in 1-5 may preclude this: keep the
 per-tile work unit a pure function of (slab arrays in, slab arrays out,
 scalars) with `device=` plumbed through.
 
+## Component 6 — independent codex review, all 12 findings resolved
+
+Thomas asked for a codex pass over the whole branch; it found 12 issues,
+concentrated exactly where toy-scale tests are structurally blind. **Two of the
+three coverage holes it exposed are now their own test classes.**
+
+**Feature-defeating.** (F1) The resident OOM preflight ran unconditionally,
+before the streaming branch — so every run big enough to need streaming was
+refused, and the feature could not exceed RAM at all. (F2) Horizontal halos were
+derived from the **vertical** kernel width; the kernel's cell extent scales with
+its own axis's sparsity, so at s=(3,1,1) x needed 19 halo cells and got 7,
+letting per-tile convolution wrap reach the inner region. Reintroducing it
+reproduces h error 6.784e-03 against codex's reported ~7e-3.
+
+**Noise restriction.** (F3) The sub-lattice phase was chosen on the UNWRAPPED
+index, which is only equivalent when `world_n % s == 0`. Reachable on
+narrow-strip grids at s>1; fixed at the root, standard configs unaffected (the
+pinned references confirm it).
+
+**Resume crash-consistency** (F4, F5, F6) — one protocol, not three patches.
+Every phase is now: pure writes to `*_next`, flush, persist what the marker
+implies exists, **atomic marker commit** (temp file + `os.replace`, settle
+actions recorded beside it), then **settle** (renames and drops, idempotent,
+replayed on every resume). Restart is a single clause: before the marker all
+inputs are intact so re-run; after it, settle and continue.
+
+**Manifest** (F7, F8, F9). The fingerprint had omitted H_h and lambda — module
+constants read at run time, and actively swept in constants.py, so a resume
+across an edit would have spliced two realizations — plus device (CPU/CUDA differ
+at ULP, so a mixed resume matches neither pure run) and seven others. `seed=None`
+runs could never resume, i.e. the DEFAULT API path was unresumable; the manifest
+now carries a seedless digest and the drawn seed. And `prepare_scratch` treated
+"no manifest" like `fresh=True` and rmtree'd the directory, so pointing
+`scratch_dir` at any existing directory destroyed it — now always refused, with
+nothing deleted, and `destroy()` removes only store-owned files.
+
+**API honesty** (F10, F11, F12). `ledger=` under streaming raises rather than
+silently measuring afresh; scratch accounting covers every tenant including the
+degenerate no-tiling plan; a resume credits the scratch it already owns.
+
+**A bug the new crash-window test caught in my own fix:** the settle protocol was
+defined and never invoked on resume — `settle_all()` existed, the call site did
+not — and the flux diverged 53%. Defining a mechanism is not wiring it in, and
+only a test that crashes inside the window could tell.
+
+**New coverage classes**, both permanent: *won't-fit-in-RAM* (memory patched down
+so the preflight would fire; the streamed run must proceed while the resident one
+refuses) and *anisotropic sparsity* (s=(3,1,1), (1,3,1), (2,3,1)).
+
 ## Measured numbers, all configurations (2026-08-12)
 
 One table, so the merge review has them in one place.
@@ -628,10 +679,24 @@ One table, so the merge review has them in one place.
 | per-level I/O amplification, (nx,ny,nz) → (nz,nx,ny) | **256.0× → 13.3×** |
 | ledger agreement, flux entering / mean-abs noise | exact |
 | scratch accounting | predicted peak bounds actual, within 4× |
+| **anisotropic s=(3,1,1)** | floor 5.0e-06, seams 1.25 / 1.18 / 1.13 |
+| **anisotropic s=(1,3,1)** | floor 3.7e-06, seams 1.13 / 1.10 / 1.05 |
+| **anisotropic s=(2,3,1)** | floor 3.5e-06, seams 1.06 / 1.19 / 1.12 |
 
 float32 eps is 1.2e-07 throughout. The seam ratio is the seam-adjacent
 difference bin divided by the interior median; ~1 means no seam-correlated
 structure, which is the criterion the whole design is held to.
+
+## Merge criteria
+
+- Components 1-5 landed; every measured number above current.
+- Full suite green (318 tests) and `tests/heavy/test_nest_identity.py` bit-exact
+  on all eight configurations.
+- Pinned pre-refactor references unchanged and passing.
+- **The branch passed an independent codex review (Thomas's explicit request)
+  with all 12 findings resolved**, each with a regression test, and the two
+  feature-defeating ones verified non-vacuously by reintroducing the bug.
+- Remaining work is in Future work above; nothing there blocks merge.
 
 ## Conventions for this branch
 
