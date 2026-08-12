@@ -273,6 +273,23 @@ def write_netcdf(
     ds.root_outer_scale = np.float64(p['root_outer_scale'])
     ds.root_seed = np.int32(p['root_seed']) if p['root_seed'] is not None else -1
     ds.n_classes_consumed = np.int32(p['n_classes_consumed'])
+    # Which noise scheme produced the file. 'world_keyed_philox4x32_10' draws
+    # the generator at the world lattice site (a pure function of root seed,
+    # class index and world site); the 'stream' files written before
+    # 2026-08-12 drew it in array order, so the same configuration and seed
+    # gives a DIFFERENT realization either side of that change. Statistics are
+    # unaffected; single-realization comparisons across the boundary are not
+    # meaningful. Absent means 'stream'.
+    ds.noise_scheme = p.get('noise_scheme', 'world_keyed_philox4x32_10')
+    # The ROOT's full domain, carried unchanged down every generation of
+    # nesting. World-keyed noise is defined on the grid a root run over this
+    # domain has at each class, so a descendant needs the domain itself, not
+    # just its own extent, to locate its cells in the world. (Its own world
+    # origin it reads off its x/y coordinate variables, which are already
+    # world-absolute, and its z, which is absolute height.)
+    for attr in ('root_domain_x', 'root_domain_y', 'root_domain_height'):
+        if attr in p:
+            ds.setncattr(attr, np.float64(p[attr]))
 
     # Refinement-specific attributes. periodic_x / periodic_y record whether
     # the group's own x / y axis wraps: a root always does, a nest only where

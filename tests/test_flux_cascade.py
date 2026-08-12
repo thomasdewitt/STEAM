@@ -50,13 +50,13 @@ def test_flux_only_rejects_class_spacing_inconsistent_with_density():
 def test_advance_flux_multiplier_and_signed_scalar(monkeypatch):
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel, device="cpu": field.copy())
     gamma0 = np.array([-2.0, 0.0, 1.0, 0.5], dtype=np.float32).reshape(2, 2, 1)
-    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: gamma0.copy())
+    monkeypatch.setattr(sm, "_keyed_sparse_levy", lambda *args: gamma0.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
     c = 0.4
     amplitude, diagnostics = sm._advance_flux(
-        flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
-        c, 1, (1, 1, 1),
+        flux, sm.NoiseRegion.root(np.random.SeedSequence(1), flux.shape),
+        np.ones((1, 1, 1), dtype=np.float32), c, 1, (1, 1, 1),
     )
 
     # n_scale_classes_per_dyad=1: per-class scale = c, multiplier noise
@@ -84,14 +84,14 @@ def test_advance_flux_scales_generator_by_class_density(monkeypatch):
     # c / n**(1/alpha) (per-octave invariance by alpha-stability); a single
     # advance draws ONE generator field and counts each point once.
     gamma0 = np.full((2, 2, 1), -0.25, dtype=np.float32)
-    monkeypatch.setattr(sm, "_sparse_levy", lambda *args: gamma0.copy())
+    monkeypatch.setattr(sm, "_keyed_sparse_levy", lambda *args: gamma0.copy())
     monkeypatch.setattr(sm, "CONVOLVE", lambda field, kernel, device="cpu": field.copy())
     flux = np.ones((2, 2, 1), dtype=np.float32)
 
     c, n = 0.4, 2
     amplitude, diagnostics = sm._advance_flux(
-        flux, np.random.default_rng(1), np.ones((1, 1, 1), dtype=np.float32),
-        c, n, (1, 1, 1),
+        flux, sm.NoiseRegion.root(np.random.SeedSequence(1), flux.shape),
+        np.ones((1, 1, 1), dtype=np.float32), c, n, (1, 1, 1),
     )
 
     # Equal draws give |noise| = mean_abs, so S_k = sign(noise) exactly.
@@ -174,7 +174,8 @@ def test_scalar_convolutions_receive_positive_flux_center_amplitudes(monkeypatch
     qt_profile = 0.005 + 0.0001 * z_profile
     convolved_fields = []
 
-    def fake_advance(flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
+    def fake_advance(flux, noise_region, kernel, flux_noise_scale,
+                     n_scale_classes_per_dyad,
                      sparsity_factors, n_zero, zero_bottom, zero_top,
                      device="cpu", window=None):
         return np.ones_like(flux), {"n_clipped": 0}

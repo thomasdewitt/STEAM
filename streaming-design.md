@@ -27,13 +27,14 @@ paper-production figure pipeline in turbulon-analysis.
 The streamed run is the same cascade with the loops reordered. Three
 couplings block a naive port, each with its fix:
 
-1. **Noise is keyed to draw order.** `_sparse_levy` reshapes one linear RNG
-   stream over whatever array it is handed, so the same world position draws
-   different values in different regions. Fix: counter-based noise, a pure
-   function of (root_seed, class index, world lattice site). Any region's
-   noise is then the restriction of the root's. Seed compatibility with
-   existing runs is explicitly NOT required (Thomas ruling) — realizations
-   will change; bump a `noise_scheme` attribute in the output file.
+1. **Noise is keyed to draw order.** [FIXED — component 1, 2026-08-12]
+   `_sparse_levy` reshaped one linear RNG stream over whatever array it was
+   handed, so the same world position drew different values in different
+   regions. Fix: counter-based noise, a pure function of (root_seed, class
+   index, world lattice site). Any region's noise is now the restriction of
+   the root's. Seed compatibility with existing runs is explicitly NOT
+   required (Thomas ruling) — realizations changed; the output file records
+   `noise_scheme`.
 
 2. **Realized global reductions mid-class.** Per class the model takes: the
    joint product norm <|g W S|> per level over turbulon centers
@@ -87,7 +88,61 @@ Each lands separately, each independently verifiable. 1 and 2 are
 prerequisites and are behavior-changing (1) / behavior-neutral (2) on the
 NORMAL path; 3-6 are additive.
 
-### 1. World-keyed noise  [delegated]
+### 1. World-keyed noise  [LANDED 2026-08-12]
+
+Implemented as described below. What landed, and what the implementation had
+to decide that this spec did not cover:
+
+- **Generator: Philox4x32-10** (`steam/noise.py`), jitted, counter =
+  (ix, iy, iz, key2), key = (key0, key1) — 96 bits of per-class key from the
+  class's SeedSequence child. Validated against all three published Random123
+  known-answer vectors, and the shared round structure at 64-bit width against
+  numpy's own Philox bit generator. 4x32 rather than 4x64 because its round
+  needs only a 32x32 -> 64 multiply, native in numba's uint64.
+- **The uniforms are numpy's own conversion** (24 bits x 2**-24), so they sit
+  on the identical discrete lattice the stream drew from; with `_levy_chunk`
+  unchanged the two schemes are distributionally identical rather than merely
+  close. `_levy_from_uniforms` is the shared transform; `_extremal_levy` and
+  `_parallel_uniform_float32` are kept OFF the cascade path as the reference
+  the keyed uniforms are tested against (a KS test at three alphas).
+- **Throughput: faster, not slower.** 1.06x at 1.93 G draws (6.67 -> 6.29 s),
+  1.03-1.13x at smaller sizes; the requirement was 1.5x. Being counter-based
+  it has no sequential dependency, and the transform is shared, so there was
+  nothing to lose. `tests/heavy/keyed_noise_throughput.py`.
+- **`NoiseRegion`** (key, world origin, world shape) is the per-array
+  descriptor; `cascade_loop` takes `world_origins` / `world_shapes` (None =
+  root) alongside `inner_windows`. This is the seam a tile will use unchanged.
+- **`class_seeds` replaces `seeds_or_rng`.** The shared-Generator "legacy
+  behavior" is gone — a stream cannot be world-keyed, so it raises rather than
+  silently reseeding. Nothing in the package used it.
+- **New file attributes:** `noise_scheme` (records which scheme drew the
+  file — realizations changed), and `root_domain_x/y/height`, the ROOT's
+  domain, inherited unchanged down every generation of nesting. Keyed noise is
+  defined on the grid a root run over that domain has at each class, so a
+  descendant needs the domain itself, not just its own extent. `refine` on a
+  parent lacking them REFUSES: such a file predates the change and its
+  realization came from the stream anyway.
+
+LIMITATION, documented per the delegation rather than forced. Two sub-cell
+mismatches exist between a nest's grid and the world grid at the same class,
+both properties of the existing gridding and not of the keying:
+
+1. `dx` is the padded extent divided by a rounded cell count, so a nest's dx
+   differs from the world's at the same class by O(1/nx);
+2. a partial-height nest rescales dz to span its own padded height
+   (`_compute_all_grids`), so its z levels are not a subset of the world's at
+   all — the vertical world index is genuinely ill-defined there.
+
+So the world index is the NEAREST world cell: exact when a nest's grid
+coincides with the world's (full-span, full-height) and accurate to a fraction
+of a cell otherwise. This costs the actual target nothing — tiles share the
+full vertical extent and are exact integer offsets on a common horizontal
+grid, so for tiles the restriction is exact in both index and physical space.
+For nests it means "consistent with the root to within the regrid the nest was
+already doing", which is the same standard the inherited state meets.
+
+The original component description follows.
+
 
 Replace stream-ordered draws in `_sparse_levy` / `_extremal_levy` /
 `_parallel_uniform_float32` with counter-based generation: gamma at class i,

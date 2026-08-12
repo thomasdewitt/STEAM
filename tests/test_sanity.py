@@ -10,7 +10,8 @@ from steam.simulate import (
     simulate,
     _compute_all_grids,
     _turbulon_envelope,
-    _sparse_levy,
+    _keyed_sparse_levy,
+    NoiseRegion,
     _gradient_components,
 )
 from steam.utils import (
@@ -399,16 +400,16 @@ def test_kernel_shape_is_odd():
 
 
 def test_sparse_levy_density():
-    rng = np.random.default_rng(0)
-    field = _sparse_levy(20, 20, 20, 2, 2, 2, 1.8, rng)
+    region = NoiseRegion.root(np.random.SeedSequence(0), (20, 20, 20))
+    field = _keyed_sparse_levy((20, 20, 20), (2, 2, 2), 1.8, region)
     n_nonzero = np.count_nonzero(field)
     expected = 10 * 10 * 10  # (20/2)^3
     assert n_nonzero == expected
 
 
 def test_sparse_levy_s1_all_nonzero():
-    rng = np.random.default_rng(0)
-    field = _sparse_levy(10, 10, 10, 1, 1, 1, 1.8, rng)
+    region = NoiseRegion.root(np.random.SeedSequence(0), (10, 10, 10))
+    field = _keyed_sparse_levy((10, 10, 10), (1, 1, 1), 1.8, region)
     # Probability of any element being exactly 0.0 is essentially 0
     assert np.count_nonzero(field) == 1000
 

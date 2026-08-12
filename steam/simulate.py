@@ -6,6 +6,7 @@ import torch
 from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 from . import constants
 from .constants import (
     hurst_horizontal as H_h,
@@ -13,6 +14,7 @@ from .constants import (
     haar_to_mhat as HAAR_TO_MHAT,
 )
 from . import turbulons as _turbulons
+from .noise import center_indices, class_key, keyed_uniforms
 from .utils import (
     convolve_periodic_xy_zeropad_z,
     convolve_periodic_xy_zeropad_z_ndimage,
@@ -359,6 +361,12 @@ LEVY_WORKERS = 8
 def _parallel_uniform_float32(rng, size):
     """``rng.random(size, dtype=float32)``, drawn on a thread pool.
 
+    STREAM-ORDERED, and therefore no longer on the cascade's path: the noise
+    is world-keyed as of 2026-08-12 (see NoiseRegion). Kept as the reference
+    the keyed uniforms are validated against -- it is the generator whose
+    distribution the new one has to match, and matching it is checked, not
+    assumed (tests/test_world_keyed_noise.py).
+
     A float32 draw consumes one uint32, and PCG64 yields two of those per
     64-bit state and caches the unused half (``has_uint32``). So a chunk that
     starts on a whole state consumes exactly ``len // 2`` states, and a clone
@@ -421,27 +429,20 @@ def _levy_chunk(alpha, phi, R, phi0, sign, eps):
     return shifted
 
 
-def _extremal_levy(alpha, size, rng):
-    """Extremal (maximally skewed, beta=-1) Levy alpha-stable draws.
+def _levy_from_uniforms(alpha, phi, R):
+    """The CMS transform of two float32 uniform lanes, in place on ``phi``.
 
-    Chambers-Mallows-Stuck generator, reusing the convention of Thomas's
-    ``scaleinvariance.extremal_levy`` (its universal-multifractal log-generator).
-    The distribution is maximally skewed toward -inf, so the RIGHT tail is light
-    and <exp(gamma)> is finite -- the property that lets the multiplier be
-    renormalized to unit mean. At alpha=2 it is exactly N(0, 2), i.e. the
-    lognormal case. Valid for alpha in (1, 2].
+    Split out of _extremal_levy (2026-08-12) so the world-keyed generator and
+    the stream-ordered reference share it EXACTLY: the transform, its float32
+    discipline and the eps clamp below are the audited part (item 33), and
+    world-keying changed only where the two uniforms come from. ``phi`` and
+    ``R`` are both consumed; the draws come back in ``phi``'s buffer.
 
-    Assembled with in-place float32 ops (commutative reorderings of the single
-    CMS expression) so only a few field-sized buffers are ever live -- the
-    generator is drawn at the flux cascade's finest resolution.
-
-    Both the draw and the arithmetic run on a thread pool over 4 M-element
-    chunks (3.4x at the production size, 5.60 -> 1.66 s). This is BIT-IDENTICAL
-    to the serial version: the arithmetic is purely elementwise, so a chunk of
-    it is the same numbers, and the RNG stream is split exactly rather than
-    reseeded (see _parallel_uniform_float32). Chunking also helps a single
-    thread, because a 16 MB chunk stays in L3 across the ten elementwise passes
-    instead of streaming the whole 1.8 GiB array from DRAM ten times.
+    Both arrays run through the thread pool in 4 M-element chunks. The
+    arithmetic is purely elementwise, so a chunk of it is the same numbers as
+    the serial version; chunking also helps a single thread, because a 16 MB
+    chunk stays in L3 across the ten elementwise passes instead of streaming
+    the whole 1.8 GiB array from DRAM ten times.
     """
     alpha = float(alpha)
     phi0 = np.float32(-(np.pi / 2.0) * (1.0 - abs(1.0 - alpha)) / alpha)
@@ -457,9 +458,7 @@ def _extremal_levy(alpha, size, rng):
     # far-negative tail at smaller magnitude, which is invisible through
     # exp(gamma) -- both map to multiplier -1.
     eps = np.float32(1e-6)
-
-    phi = _parallel_uniform_float32(rng, size)
-    R = _parallel_uniform_float32(rng, size)     # -log(U) ~ Exp(1), all float32
+    size = phi.size
 
     def compute(start):
         stop = min(start + LEVY_CHUNK_ELEMENTS, size)
@@ -469,6 +468,29 @@ def _extremal_levy(alpha, size, rng):
     with ThreadPoolExecutor(LEVY_WORKERS) as pool:
         list(pool.map(compute, range(0, size, LEVY_CHUNK_ELEMENTS)))
     return phi
+
+
+def _extremal_levy(alpha, size, rng):
+    """Extremal Levy draws from a STREAM -- the pre-2026-08-12 generator.
+
+    No longer on the cascade's path (see NoiseRegion and _keyed_sparse_levy);
+    retained as the distributional reference for the keyed generator, which
+    shares the transform and differs only in where its uniforms come from.
+
+    Chambers-Mallows-Stuck generator, reusing the convention of Thomas's
+    ``scaleinvariance.extremal_levy`` (its universal-multifractal log-generator).
+    The distribution is maximally skewed toward -inf, so the RIGHT tail is light
+    and <exp(gamma)> is finite -- the property that lets the multiplier be
+    renormalized to unit mean. At alpha=2 it is exactly N(0, 2), i.e. the
+    lognormal case. Valid for alpha in (1, 2].
+
+    Assembled with in-place float32 ops (commutative reorderings of the single
+    CMS expression) so only a few field-sized buffers are ever live -- the
+    generator is drawn at the flux cascade's finest resolution.
+    """
+    phi = _parallel_uniform_float32(rng, size)
+    R = _parallel_uniform_float32(rng, size)     # -log(U) ~ Exp(1), all float32
+    return _levy_from_uniforms(alpha, phi, R)
 
 
 # log<exp(gamma_0)> for the unit-scale extremal generator above. Subtracting
@@ -486,22 +508,84 @@ def _extremal_levy(alpha, size, rng):
 LEVY_LOG_MEAN = 1.0 / (FLUX_ALPHA - 1.0)
 
 
-def _sparse_levy(nx, ny, nz, factor_x, factor_y, factor_z, alpha, rng):
-    """Sparse extremal-Levy generator field, one draw per turbulon center.
+class NoiseRegion(NamedTuple):
+    """Where a working array sits in the world, for the keyed generator.
 
-    Zero everywhere except every s grid points (one turbulon center per k
-    spacing at the oversampled resolution); at s=1 every cell is a center.
+    The cascade's noise is a pure function of (class key, world lattice site)
+    as of 2026-08-12, so any array the model runs the cascade on -- the root's
+    own grid, a nest's padded grid, a tile of a streamed run -- has to say
+    which world cells it covers. That is all this carries.
+
+    key : (uint64, uint64, uint64)
+        The class's 96-bit Philox key, from noise.class_key of the class's
+        SeedSequence child. Distinct per size class; identical for every
+        region of the same class, which is exactly what makes two regions of
+        one class agree where they overlap.
+    origin : (int, int, int)
+        World index of the array's (0, 0, 0) cell on THIS CLASS's world grid
+        (the grid a root run over the whole domain has at this class). A root
+        is (0, 0, 0).
+    world_shape : (int, int, int)
+        Dimensions of that world grid. Only x and y are used, to wrap an index
+        that runs off a periodic edge onto the world cell it lands on; z never
+        wraps.
     """
-    if factor_x == 1 and factor_y == 1 and factor_z == 1:
-        return _extremal_levy(alpha, nx * ny * nz, rng).reshape(nx, ny, nz)
+    key: tuple
+    origin: tuple
+    world_shape: tuple
 
+    @classmethod
+    def root(cls, seed_sequence, shape):
+        """The whole-domain region: origin at the world origin, world grid its
+        own grid. Wrapping is then a no-op and the sub-lattice phase is zero,
+        so a root draws exactly the lattice it always did."""
+        return cls(class_key(seed_sequence), (0, 0, 0), tuple(int(n) for n in shape))
+
+
+def _keyed_sparse_levy(shape, sparsity_factors, alpha, region):
+    """Sparse extremal-Levy generator field, one draw per turbulon center,
+    keyed to the world.
+
+    Zero everywhere except at turbulon centers -- the world sites whose index
+    is a multiple of s on each axis (at s=1 every cell is a center). WHICH
+    local cells those are follows from the region's world origin, not from the
+    array corner: array-corner-relative phase is what made two nests of the
+    same class disagree about where their turbulons were.
+
+    The value at a center is a pure function of (region.key, world site), so
+    this field is the restriction of the class's world noise field to the
+    region -- bit for bit, whatever the array's shape, offset or wrap.
+    """
+    nx, ny, nz = (int(n) for n in shape)
+    s_x, s_y, s_z = sparsity_factors
+    origin_x, origin_y, origin_z = region.origin
+    world_nx, world_ny, world_nz = region.world_shape
+
+    # x and y wrap: a halo running off a periodic edge covers the world cells
+    # it wraps onto, and must draw their noise. z never wraps.
+    local_x, world_x = center_indices(nx, origin_x, world_nx, s_x, wrap=True)
+    local_y, world_y = center_indices(ny, origin_y, world_ny, s_y, wrap=True)
+    local_z, world_z = center_indices(nz, origin_z, world_nz, s_z, wrap=False)
+
+    n_centers = local_x.size * local_y.size * local_z.size
+    if n_centers == 0:
+        # A region thinner than the sub-lattice spacing with a phase that
+        # misses it entirely: no centers, so no turbulons of this class.
+        return np.zeros((nx, ny, nz), dtype=np.float32)
+
+    phi = np.empty(n_centers, dtype=np.float32)
+    R = np.empty(n_centers, dtype=np.float32)
+    keyed_uniforms(world_x, world_y, world_z,
+                   region.key[0], region.key[1], region.key[2], phi, R)
+    draws = _levy_from_uniforms(alpha, phi, R)
+
+    center_shape = (local_x.size, local_y.size, local_z.size)
+    if center_shape == (nx, ny, nz):
+        # s = 1 on every axis: every cell is a center, so the scatter below
+        # would be an identity gather over a 7.7 GB field. Reshape instead.
+        return draws.reshape(nx, ny, nz)
     field = np.zeros((nx, ny, nz), dtype=np.float32)
-    ix = np.arange(0, nx, factor_x)
-    iy = np.arange(0, ny, factor_y)
-    iz = np.arange(0, nz, factor_z)
-    field[np.ix_(ix, iy, iz)] = _extremal_levy(
-        alpha, len(ix) * len(iy) * len(iz), rng
-    ).reshape(len(ix), len(iy), len(iz))
+    field[np.ix_(local_x, local_y, local_z)] = draws.reshape(center_shape)
     return field
 
 
@@ -1007,6 +1091,11 @@ def simulate(
         'root_outer_scale': outer_scale,
         'root_seed': seed,
         'n_classes_consumed': n_classes,
+        # This run IS the world: its grid at each class is the grid the keyed
+        # noise is defined on, and descendants locate themselves against it.
+        'root_domain_x': domain_x,
+        'root_domain_y': domain_y,
+        'root_domain_height': domain_height,
     }
 
     write_netcdf(
@@ -1041,7 +1130,7 @@ def cascade_loop(
     h_min, h_max, qt_min, qt_max,
     min_distance_to_ground,
     sparsity_factors,
-    seeds_or_rng,
+    class_seeds,
     n_scale_classes_per_dyad=1,
     h_perturbation=None,
     qt_perturbation=None,
@@ -1050,6 +1139,8 @@ def cascade_loop(
     deficit_qt=None,
     deficit_flux=None,
     inner_windows=None,
+    world_origins=None,
+    world_shapes=None,
     flux_noise_scale=None,
     turbulon_shape='mexican_hat',
     zero_bottom=True,
@@ -1095,10 +1186,12 @@ def cascade_loop(
         of the noise field are zeroed at every scale class.
     sparsity_factors : tuple of 3 ints
         (s_x, s_y, s_z) oversampling factors.
-    seeds_or_rng : list of SeedSequence, or numpy.random.Generator
-        If a list of SeedSequence, each element seeds one size class
-        independently. If a Generator, it is used directly for all
-        classes (legacy behavior).
+    class_seeds : list of SeedSequence
+        One per size class, from ``SeedSequence(root_seed).spawn(n_classes)``.
+        Each becomes that class's Philox key (noise.class_key), so the class
+        index -- not a position in a stream -- is what distinguishes classes.
+        A shared Generator used to be accepted here and no longer is: a stream
+        cannot be world-keyed, so there is nothing for it to mean.
     n_scale_classes_per_dyad : int
         Cascade density: number of size classes per octave. Must match the
         multiplicative spacing of ``grids['k']`` (adjacent-class ratio
@@ -1128,6 +1221,17 @@ def cascade_loop(
         norm, and the bounded amplitude-preserving add — is taken over this window,
         so the halo carries context into the domain without contaminating the
         domain's statistics. See _inner_view.
+    world_origins : list of (ox, oy, oz) or None
+        Per-class world index of this array's (0, 0, 0) cell, on the world grid
+        of that class (the grid a root run over the whole domain has there).
+        None (a root) means the array IS the world grid: origin (0, 0, 0) at
+        every class. A nest passes the world position of its padded grid, which
+        is what makes its noise the restriction of the root's rather than a
+        fresh field laid over the region (see refine).
+    world_shapes : list of (Nx, Ny, Nz) or None
+        Dimensions of those world grids, used to wrap an index that runs off a
+        periodic edge. None means each class's own grid shape, so wrapping is
+        a no-op -- correct for a root, which spans the world.
     zero_bottom, zero_top : bool
         Whether to zero the bottom/top n_zero cells of the sparse noise
         at each class. True when the z-boundary corresponds to ground or
@@ -1184,8 +1288,19 @@ def cascade_loop(
                       _interpolation_compensation(2.0 * grids['k'][i] / k_fin)))
                   for i in range(n_classes)]
 
-    # Determine whether we have per-class seeds or a shared Generator
-    use_per_class_seeds = isinstance(seeds_or_rng, (list, tuple))
+    if not isinstance(class_seeds, (list, tuple, np.ndarray)):
+        raise TypeError(
+            "class_seeds must be a sequence of SeedSequence, one per size "
+            f"class, got {type(class_seeds).__name__}. The noise is keyed to "
+            "the world lattice site as of 2026-08-12, so a shared Generator "
+            "(the former legacy path) has no meaning here."
+        )
+    if len(class_seeds) != n_classes:
+        raise ValueError(
+            f"class_seeds has {len(class_seeds)} entries for {n_classes} "
+            f"size classes"
+        )
+    class_keys = [class_key(child) for child in class_seeds]
 
     # Kernel is identical every iteration — hoist it out of the loop
     kernel = _turbulon_envelope(1, 1/(2*s_x), 1/(2*s_y), 1/(2*s_z),
@@ -1276,10 +1391,17 @@ def cascade_loop(
         qt_mean_1d = np.interp(z_k, z_profile, qt_profile).astype(np.float32)
 
         # Extremal-Levy multiplier — same S_k for both h and qt (Apxeq:mean turbulon amplitude)
-        if use_per_class_seeds:
-            rng = np.random.default_rng(seeds_or_rng[i])
-        else:
-            rng = seeds_or_rng
+        #
+        # Where this array sits in the world at this class. The default is the
+        # root's: the array spans the world, so the origin is the world origin
+        # and there is nothing to wrap.
+        noise_region = NoiseRegion(
+            class_keys[i],
+            (0, 0, 0) if world_origins is None
+            else tuple(int(v) for v in world_origins[i]),
+            (nx_k, ny_k, nz_k) if world_shapes is None
+            else tuple(int(v) for v in world_shapes[i]),
+        )
 
         # This class's compensation deficit, f_i(z) - 1. Zero for every
         # well-resolved class, so the deficit fields are not allocated until
@@ -1304,7 +1426,7 @@ def cascade_loop(
         need_flux_increment = class_has_deficit or increment_dir is not None
         flux_before = flux.copy() if need_flux_increment else None
         S_k, _ = _advance_flux(
-            flux, rng, kernel,
+            flux, noise_region, kernel,
             FLUX_SCALE if flux_noise_scale is None else flux_noise_scale,
             n_scale_classes_per_dyad,
             sparsity_factors, n_zero, zero_bottom, zero_top,
@@ -1450,7 +1572,7 @@ def _inner_view(field, window):
 
 
 def _advance_flux(
-    flux, rng, kernel, flux_noise_scale, n_scale_classes_per_dyad,
+    flux, noise_region, kernel, flux_noise_scale, n_scale_classes_per_dyad,
     sparsity_factors, n_zero=0, zero_bottom=False, zero_top=False,
     device='cpu', window=None,
 ):
@@ -1486,6 +1608,12 @@ def _advance_flux(
     halo. Both the volume means above and the mean absolute multiplier noise
     are taken over it; None means the whole array, as for a root.
 
+    ``noise_region`` (a NoiseRegion) says which world cells ``flux`` covers, so
+    the generator field is the world's noise restricted to them. It replaced a
+    Generator on 2026-08-12: with a stream, the same world position drew
+    different values in different arrays, which blocked tiling and made
+    sibling nests noise clones of one another.
+
     Returns ``(scalar_amplitude, diagnostics)``. The flux STATE carries no
     interpolation compensation; the compensation belongs to the output
     composition (_compose_flux_output, fed by a deficit accumulated in
@@ -1509,7 +1637,8 @@ def _advance_flux(
     # full-size arrays on top of it (three field-sized buffers at once became
     # one plus the off-center mask, which is a quarter of a field). At the
     # 4096^2 finest class a field is 7.7 GB.
-    generator = _sparse_levy(*flux.shape, s_x, s_y, s_z, FLUX_ALPHA, rng)
+    generator = _keyed_sparse_levy(flux.shape, (s_x, s_y, s_z), FLUX_ALPHA,
+                                   noise_region)
     if zero_bottom and n_zero > 0:
         generator[:, :, :n_zero] = 0
     if zero_top and n_zero > 0:
@@ -1652,7 +1781,9 @@ def simulate_flux_only(
         elif flux.shape != shape:
             flux = zoom_trilinear(flux, shape)
 
-        rng = np.random.default_rng(seeds[i])
+        # A root's grid at each class IS the world grid at that class, so the
+        # cheap path needs no world bookkeeping of its own.
+        noise_region = NoiseRegion.root(seeds[i], shape)
         # No interpolation compensation: this cheap path returns the raw
         # cascade state. The full model composes a compensated flux OUTPUT
         # (2026-08-04, _compose_flux_output) but never compensates the
@@ -1660,8 +1791,8 @@ def simulate_flux_only(
         # account for the composition (see the FLUX_SCALE provenance
         # caveat).
         scalar_amplitude, advance = _advance_flux(
-            flux, rng, kernel, c, n_scale_classes_per_dyad, sparsity_factors,
-            n_zero, zero_bottom, zero_top,
+            flux, noise_region, kernel, c, n_scale_classes_per_dyad,
+            sparsity_factors, n_zero, zero_bottom, zero_top,
         )
         del scalar_amplitude
 
@@ -3017,6 +3148,24 @@ def refine(
                 f"it predates continuation bookkeeping. Regenerate it with the "
                 f"current version of simulate()."
             )
+    # World-keyed noise needs the ROOT's domain, because that is the grid the
+    # noise is defined on (see NoiseRegion). A file written before 2026-08-12
+    # does not record it AND was drawn from the stream-ordered generator, so
+    # its realization cannot be continued under the keyed scheme in any case
+    # -- refusing here is the honest failure rather than inventing a world.
+    for attribute in ('root_domain_x', 'root_domain_y', 'root_domain_height'):
+        if not hasattr(grp, attribute):
+            ds.close()
+            raise ValueError(
+                f"Parent group {parent_group!r} has no {attribute} attribute; "
+                f"it predates world-keyed noise (2026-08-12) and its "
+                f"realization came from the stream-ordered generator. "
+                f"Regenerate the parent with the current version of "
+                f"simulate()."
+            )
+    root_domain_x = float(grp.root_domain_x)
+    root_domain_y = float(grp.root_domain_y)
+    root_domain_height = float(grp.root_domain_height)
     root_outer_scale = float(grp.root_outer_scale)
     root_seed = int(grp.root_seed) if int(grp.root_seed) != -1 else None
     n_classes_consumed = int(grp.n_classes_consumed)
@@ -3346,6 +3495,54 @@ def refine(
         inner_windows.append(
             (window_x_start, window_x_stop, window_y_start, window_y_stop))
 
+    # WORLD ANCHORING of the noise (2026-08-12). The keyed generator draws at
+    # world lattice sites, so the nest has to say where its padded grid sits on
+    # the world grid of each class -- the grid a root run over the ROOT domain
+    # has there. Those grids are rebuilt from the root's extents with the same
+    # call simulate() made (and the nest's own sparsity factors, since they set
+    # the lattice), which reproduces the root's grids for the classes it ran
+    # and extends them below for the nest's own.
+    #
+    # The nest's inner region starts at world_x_min; its class-i array starts
+    # one halo further out. x and y coordinates in the file are already
+    # world-absolute (see x_out below), so composing across generations of
+    # nesting is just addition.
+    world_grids = _compute_all_grids(
+        k_values, root_domain_x, root_domain_y, root_domain_height,
+        sparsity_factors, spheroscale_profile, z_profile,
+        anisotropy=anisotropy,
+    )
+    world_x_min = x_start * parent_dx + float(x_coords[0])
+    world_y_min = y_start * parent_dy + float(y_coords[0])
+
+    # CAVEAT, recorded rather than papered over. Two sub-cell mismatches exist
+    # between a nest's grid and the world grid at the same class, both of them
+    # properties of the existing gridding and not of the keying:
+    #   - dx is the padded extent divided by the rounded cell count, so a
+    #     nest's dx differs from the world's at the same class by O(1/nx);
+    #   - a partial-height nest rescales dz to span its own padded height, so
+    #     its z levels are not a subset of the world's at all.
+    # The world index below is therefore the nearest world cell, exact when the
+    # nest's grid coincides with the world's (a full-span, full-height nest --
+    # and every tile of a streamed run, which is the case this exists for) and
+    # accurate to a fraction of a cell otherwise. See streaming-design.md.
+    world_origins = []
+    world_shapes = []
+    for i in range(n_classes):
+        dx_world = float(world_grids['dx'][i])
+        dy_world = float(world_grids['dy'][i])
+        origin_x = int(round((world_x_min - pad_x_per_class[i]) / dx_world))
+        origin_y = int(round((world_y_min - pad_y_per_class[i]) / dy_world))
+        # z has no periodicity to wrap and a variable dz, so it is matched by
+        # level rather than divided: the world level whose bottom edge is
+        # closest to the nest's first level.
+        z_world = world_grids['z_arrays'][i]
+        origin_z = int(np.argmin(np.abs(z_world - grids['z_arrays'][i][0])))
+        world_origins.append((origin_x, origin_y, origin_z))
+        world_shapes.append((int(world_grids['nx'][i]),
+                             int(world_grids['ny'][i]),
+                             int(world_grids['nz'][i])))
+
     # C_{Phi,k}(z) = n_c^{-1/alpha} C_{Phi,L}(z) (k/L)^H_h is ONE ladder from
     # the ROOT outer scale down; the nest just extends it below the parent's
     # finest class. Re-derived here from the mean profile with exactly the
@@ -3413,6 +3610,8 @@ def refine(
         deficit_qt=inherited_deficit["qt"],
         deficit_flux=inherited_deficit["flux"],
         inner_windows=inner_windows,
+        world_origins=world_origins,
+        world_shapes=world_shapes,
         flux_noise_scale=flux_noise_scale,
         turbulon_shape=turbulon_shape,
         # Turbulon centers are suppressed at the DOMAIN surface and top, not
@@ -3561,6 +3760,11 @@ def refine(
         'root_outer_scale': root_outer_scale,
         'root_seed': root_seed,
         'n_classes_consumed': n_classes_consumed + n_classes,
+        # Inherited unchanged: the world is the root's domain, however many
+        # generations of nesting sit between.
+        'root_domain_x': root_domain_x,
+        'root_domain_y': root_domain_y,
+        'root_domain_height': root_domain_height,
     }
     if p_bottom_field is not None:
         simulation_params['p_bottom'] = p_bottom_field
