@@ -19,3 +19,8 @@ tests/regression_data/
 .codex
 scratch/
 *.egg-info/
+
+# Component-2 bit-exactness gate fixtures: pinned pre-refactor outputs.
+# Deliberately versioned (the *.npz rule above would silently drop them --
+# which it did, caught in review 2026-08-12).
+!tests/reference/*.npz
