@@ -154,3 +154,162 @@ def test_root_cuda_matches_reference(tmp_path):
     simulate(**kwargs)
     _assert_bit_identical(_harvest(tmp_path / "root_cuda.nc"),
                           _reference("root_cuda"), "root_cuda")
+
+
+# ---------------------------------------------------------------------------
+# Replay: the capability the seam buys
+# ---------------------------------------------------------------------------
+
+def test_recorded_ledger_round_trips_through_netcdf(tmp_path):
+    """The ledger is written and reads back as the same numbers, NaN markers
+    included -- a NaN mu means "this level was not projected", so a fill value
+    that swallowed it would silently change what replay does."""
+    from steam.ledger import read_ledger
+
+    kwargs = _base_kwargs(tmp_path, "root_dyadic")
+    simulate(**kwargs)
+    with netCDF4.Dataset(kwargs["output_path"], "r") as ds:
+        ledger = read_ledger(ds)
+
+    assert ledger is not None
+    assert len(ledger.classes) == 4
+    for index, class_ledger in enumerate(ledger.classes):
+        assert class_ledger.flux is not None
+        assert class_ledger.flux.entering.count > 0
+        if index == 0:
+            # The cascade starts the flux at exactly one, and nothing has
+            # regridded it yet.
+            assert class_ledger.flux.entering.mean == 1.0
+        else:
+            # Each class restores the volume mean it entered with, so the mean
+            # only drifts by what the between-class regrid does to it (the
+            # trilinear zoom does not conserve a volume mean exactly). A few
+            # percent, not a factor.
+            assert abs(class_ledger.flux.entering.mean - 1.0) < 0.05
+        for scalar in ("h", "qt"):
+            pattern = class_ledger.pattern[scalar]
+            assert np.all(pattern.level_total >= 0.0)
+            assert np.all(pattern.level_count >= 0)
+            solve = class_ledger.bounded_add[scalar]
+            assert solve.a0.shape == pattern.level_total.shape
+            # NaN survives the round trip as the no-bisection marker.
+            assert solve.mu.dtype == np.float64
+    # The composition's own entries.
+    assert ledger.flux_output is not None
+    assert set(ledger.projection) <= {"h", "qt"}
+
+
+@pytest.mark.parametrize("extra,label", [
+    (None, "dyadic"),
+    ({"sparsity_factors": (2, 2, 2)}, "s2"),
+    ({"n_scale_classes_per_dyad": 2}, "half"),
+])
+def test_apply_only_replay_reproduces_the_run(tmp_path, extra, label):
+    """THE replay test. A second cascade over identical inputs, handed the
+    recorded ledger, with every solve skipped and every reduction injected,
+    must land on the same field bit for bit.
+
+    This is what a streamed tile does: it never re-derives a global scalar, it
+    is handed one. If any reduction were still fused into its application, the
+    injected value would be ignored and this would drift.
+    """
+    from steam.ledger import read_ledger
+
+    kwargs = _base_kwargs(tmp_path, f"replay_{label}")
+    if extra:
+        kwargs.update(extra)
+    simulate(**kwargs)
+    recorded = _harvest(kwargs["output_path"])
+    with netCDF4.Dataset(kwargs["output_path"], "r") as ds:
+        ledger = read_ledger(ds)
+
+    # Poison the inputs to the solves that replay must not consult: if apply
+    # mode still measured anything, it would measure these and diverge.
+    kwargs["output_path"] = tmp_path / f"replay_{label}_again.nc"
+    replayed = _replay_simulate(kwargs, ledger)
+
+    for field, reference in recorded.items():
+        np.testing.assert_array_equal(
+            replayed[field], reference,
+            err_msg=f"apply-only replay of {label} drifted on {field}")
+
+
+def _replay_simulate(kwargs, ledger):
+    """simulate() with a supplied ledger, via the same public path."""
+    simulate(ledger=ledger, **kwargs)
+    return _harvest(kwargs["output_path"])
+
+
+def test_replay_actually_uses_the_injected_values(tmp_path):
+    """Guard against a vacuous replay test: perturb one recorded scalar and the
+    replayed field must move. Otherwise 'replay reproduces the run' could hold
+    simply because apply mode re-solved everything."""
+    from steam.ledger import read_ledger
+
+    kwargs = _base_kwargs(tmp_path, "poison")
+    simulate(**kwargs)
+    baseline = _harvest(kwargs["output_path"])
+    with netCDF4.Dataset(kwargs["output_path"], "r") as ds:
+        ledger = read_ledger(ds)
+
+    # Halve the finest class's h product norm. A genuinely injected value
+    # doubles that class's h amplitude; a re-solved one ignores this entirely.
+    ledger.classes[-1].pattern['h'].level_total *= 0.5
+    kwargs["output_path"] = tmp_path / "poisoned.nc"
+    poisoned = _replay_simulate(kwargs, ledger)
+
+    assert not np.array_equal(poisoned['h_perturbation'],
+                              baseline['h_perturbation'])
+    # And only h moved: the flux state is upstream of the scalar norms.
+    np.testing.assert_array_equal(poisoned['flux_state'],
+                                  baseline['flux_state'])
+
+
+def test_nest_replay_reproduces_the_run(tmp_path):
+    """A nest replays too, and it is the harder case: every realized mean is
+    taken over its inner window rather than the whole array, so a ledger that
+    had quietly recorded whole-array reductions would drift here."""
+    from steam.ledger import read_ledger
+
+    kwargs = _base_kwargs(tmp_path, "nest_replay")
+    path = kwargs["output_path"]
+    simulate(**kwargs)
+    with netCDF4.Dataset(path, "r") as ds:
+        k_finest = float(ds.variables["k_values"][:][-1])
+    refine(path, 4, 12, 4, 12, k_finest / 4, k_finest / 4,
+           output_group="first", save_for_refinement=True)
+    recorded = _harvest(path, "first")
+    with netCDF4.Dataset(path, "r") as ds:
+        ledger = read_ledger(ds, "first")
+
+    refine(path, 4, 12, 4, 12, k_finest / 4, k_finest / 4,
+           output_group="replayed", save_for_refinement=True, ledger=ledger)
+    replayed = _harvest(path, "replayed")
+    for field, reference in recorded.items():
+        np.testing.assert_array_equal(
+            replayed[field], reference,
+            err_msg=f"nest apply-only replay drifted on {field}")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="no GPU on this machine")
+def test_cuda_replay_reproduces_the_run(tmp_path):
+    """The GPU solves record their own ledger in their own arithmetic. Replay is
+    same-device-exact only -- a CPU ledger would not replay here and is not
+    asked to -- but on the device that recorded it, it is exact."""
+    from steam.ledger import read_ledger
+
+    kwargs = _base_kwargs(tmp_path, "cuda_replay")
+    kwargs["device"] = "cuda"
+    simulate(**kwargs)
+    recorded = _harvest(kwargs["output_path"])
+    with netCDF4.Dataset(kwargs["output_path"], "r") as ds:
+        ledger = read_ledger(ds)
+
+    kwargs["output_path"] = tmp_path / "cuda_replay_again.nc"
+    simulate(ledger=ledger, **kwargs)
+    replayed = _harvest(kwargs["output_path"])
+    for field, reference in recorded.items():
+        np.testing.assert_array_equal(
+            replayed[field], reference,
+            err_msg=f"cuda apply-only replay drifted on {field}")

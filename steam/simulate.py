@@ -658,6 +658,7 @@ def simulate(
     hurst_horizontal=None,
     haar_to_mhat=None,
     bound_buffer_multiple=None,
+    ledger=None,
 ):
     """Run STEAM cascade with coarsening, write results to NetCDF.
 
@@ -756,6 +757,13 @@ def simulate(
         Normalization). None (default) uses the module constant
         BOUND_BUFFER_MULTIPLE = 3. Stored in the file; a nest inherits
         the parent's value.
+    ledger : steam.ledger.RunLedger or None
+        None runs normally, recording a ledger into the output file. A ledger
+        read back from an earlier run (steam.ledger.read_ledger) runs
+        APPLY-ONLY: every solve and every realized reduction is skipped and the
+        recorded scalars are injected instead, reproducing that run bit-for-bit
+        on the same device. This is the replay primitive the streamed path is
+        built on -- a tile is never asked to re-derive a global scalar.
 
     Returns
     -------
@@ -1026,6 +1034,7 @@ def simulate(
         device=device,
         increment_dir=increment_dir,
         comp_k=comp_k,
+        ledger=ledger,
     )
 
     # Construct final 3D fields
@@ -3269,6 +3278,7 @@ def refine(
     compress=None,
     device='cpu',
     save_for_refinement=False,
+    ledger=None,
 ):
     """Continue a completed simulation's cascade over a subdomain, finer.
 
@@ -3332,6 +3342,10 @@ def refine(
         The stored class_increments cover the WHOLE root ladder — the
         classes this nest inherited followed by its own — so a nest of a
         nest re-weights the same uniform ladder as a nest of a root.
+    ledger : steam.ledger.RunLedger or None
+        As in simulate(): None records one, a recorded one replays apply-only.
+        A nest's ledger is the harder replay case, since every realized mean it
+        records was taken over its inner window rather than the whole array.
 
     Returns
     -------
@@ -3754,6 +3768,11 @@ def refine(
     # one halo further out. x and y coordinates in the file are already
     # world-absolute (see x_out below), so composing across generations of
     # nesting is just addition.
+    # Built with the NEST's sparsity factors, since those set the lattice the
+    # keying lives on. A nest overriding sparsity_factors therefore draws on a
+    # different world lattice than its parent did and is not noise-consistent
+    # with it -- which was already true physically (the turbulon centers sit
+    # somewhere else), so it is a property of the override, not of the keying.
     world_grids = _compute_all_grids(
         k_values, root_domain_x, root_domain_y, root_domain_height,
         sparsity_factors, spheroscale_profile, z_profile,
@@ -3860,6 +3879,7 @@ def refine(
         inner_windows=inner_windows,
         world_origins=world_origins,
         world_shapes=world_shapes,
+        ledger=ledger,
         flux_noise_scale=flux_noise_scale,
         turbulon_shape=turbulon_shape,
         # Turbulon centers are suppressed at the DOMAIN surface and top, not

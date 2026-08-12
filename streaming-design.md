@@ -36,7 +36,8 @@ couplings block a naive port, each with its fix:
    required (Thomas ruling) — realizations changed; the output file records
    `noise_scheme`.
 
-2. **Realized global reductions mid-class.** Per class the model takes: the
+2. **Realized global reductions mid-class.** [SEAM BUILT — component 2,
+   2026-08-12; the two-sweep DRIVER is component 3] Per class the model takes: the
    joint product norm <|g W S|> per level over turbulon centers
    (simulate.py cascade_loop, the level_sum/level_cnt block); the flux
    entering/realized volume means and the mean-abs multiplier noise
@@ -187,7 +188,68 @@ tests — realizations change, properties must hold; update any test pinning
 exact values to a seed); (d) throughput within ~1.5x of current at a
 production-shaped draw.
 
-### 2. Measure/apply split of the class body  [delegated, after 1]
+### 2. Measure/apply split of the class body  [LANDED 2026-08-12]
+
+Implemented as described below. What landed, and the decisions the spec did
+not cover:
+
+- **`steam/ledger.py`.** `RunLedger` -> per-class `ClassLedger` -> the flux
+  advance's means, the per-scalar product norms, the per-scalar bounded-add
+  solve; plus a composition entry (projection mu per scalar, flux output
+  clip-and-restore). Every mean is a `MeanReduction(total, count)`, never a
+  mean: a mean is not additive across tiles and a sum is.
+- **`ledger=` on `cascade_loop`, `simulate`, `refine`.** None records; a
+  recorded ledger runs APPLY-ONLY, every solve skipped and every scalar
+  injected. Same-device-exact (the GPU's reduction order is not numpy's).
+- **BIT-EXACT on all five pinned configurations, CUDA included.** References
+  pinned on 959f925 first, by `tests/heavy/make_refactor_references.py`;
+  `tests/test_measure_apply.py` is the gate, and it was verified to be a real
+  gate (a plausible float64 "improvement" turns it red).
+- **The flux advance is FOUR phases**, structured honestly rather than forced
+  into two: measure_entering -> apply_update -> measure_realized ->
+  apply_rescale. The post-clip mean can only be measured after the update
+  whose bias it corrects.
+
+**SPEC CORRECTION — the bounded add's ledger is a scalar SEQUENCE, not
+(s, mu).** The spec assumed the solve's candidate family is
+clip(s*d - mu, caps), as its own docstring says. The implementation clips
+INSIDE the demean/rescale loop, so the composite is a chain of
+affine-then-clip steps that no single pair can express: measured on a qt-like
+level against the lower bound, clip(s_total*d - mu_total) misses 58% of cells
+by up to 11% of the field scale, while replaying the recorded sequence is
+bit-exact. So the ledger records, per level: a0, the loop demeans and scales
+with their counts, the final demean, and mu (NaN where no bisection ran). This
+tiles exactly as well as (s, mu) would have — every recorded entry is a
+per-level scalar and every step between them is a pointwise clip — so nothing
+downstream is harder, it is just more numbers.
+
+**FOUND, NOT FIXED (bit-exactness was the gate).** The flux's mean-abs
+multiplier noise is accumulated in **float32** — `np.abs(noise_inner).sum()`
+with no dtype argument — unlike the float64 volume means beside it, while
+reducing over a field that reaches ~1e9 cells at the production finest class.
+It feeds S_k (not the flux state), so it moves the scalar realization. Two
+consequences: it is a candidate float32-accumulator bug in its own right, and
+summing float32 partials across tiles in component 3 is exact only to fp32
+rounding rather than exactly. Recorded as-is and reported.
+
+**Float-discipline trap worth knowing for component 3.** The division in a
+realized mean is float64 in every case, and that is not a choice: inline, a
+float32 total was divided by a numpy int64 count, and NEP 50 promotes that
+pair to float64 because an int64 is strong. Coercing the count to a Python int
+makes the pair float32 (a Python int is weak) and moved 19 cells of h by one
+ULP — caught by the pinned gate, not by reading. `MeanReduction.mean` divides
+in float64 explicitly rather than relying on promotion.
+
+**Ledger format: ragged via subgroups** (`ledger/cNN/`), following
+`class_increments`. nz differs from class to class, so a padded
+(n_classes, nz_max) array plus a validity mask would put every reader in the
+business of knowing which entries are real. Each class subgroup carries its
+own `z` and `rescale` dimensions. `mu` variables are written with
+`fill_value=False` because NaN is the load-bearing "not projected" / "not
+bisected" marker and a fill value would swallow it. Kilobytes per run.
+
+The original component description follows.
+
 
 Refactor `cascade_loop`'s per-class body so every realized global reduction
 is hoisted into a MEASURE phase (accumulate partial sums: product level
