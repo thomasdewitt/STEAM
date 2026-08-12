@@ -715,6 +715,46 @@ run whose scratch directory it had just created.
 
 **No realization change**, asserted by the pinned references passing untouched.
 
+### Round 3 — final scoped pass (data safety, marker durability)
+
+Four findings against the durability boundary stated under Future work. Three
+were branch defects, all fixed; one is pre-existing.
+
+**#1 output inside the store was deleted on success.** With
+`output_path = scratch_dir/steam-scratch-store/result.nc` the cleanup removed the
+file the run had just written and `simulate()` returned a path to nothing.
+Refused at preflight, resolved paths, in both directions. Checked on *both* entry
+points unlike the tmpfs check — that one is a performance trap, this is data loss.
+
+**#2 `destroy()` checks its own precondition.** The constructor mkdirs its root
+with `exist_ok=True`, so a caller using the store directly could adopt a
+pre-existing directory and then delete it. Rather than add a check at every call
+site now and forever, ownership is established where the directory comes into
+existence: a store that *creates* its root stamps it immediately, a store handed a
+non-empty unstamped root does not claim it, and `destroy()` refuses anything
+unstamped.
+
+**#3 the settle record bypassed `_atomic_write`** — `write_text` + `os.replace`,
+so it was never fsynced while its marker was. A host crash could leave a durable
+marker whose settle record was lost, and `settle()` then returned silently on the
+malformed JSON, skipping the phase with its *old* fields active. Routed through
+the helper; a lost or malformed record is now a hard error naming `fresh=True`.
+
+**AND THE CLASS IS CLOSED.** #3 was the fourth instance on this branch of "a
+structural change lands and a call site drifts". The first three were caught by
+behavioural tests. This one could not be: **a missing fsync changes nothing a
+passing process can observe** — only a host crash can — so it survived two review
+rounds and every test in the suite. `test_no_raw_durability_writes` is therefore
+an AST source scan asserting no raw `os.replace`/`write_text`/`write_bytes` in
+`steam/streaming.py` outside `_atomic_write`, with `rename()` allowlisted and its
+reasoning recorded. Crude on purpose: it makes the next instance fail at test
+collection rather than at someone's power cut. Verified non-vacuous.
+
+**Pre-existing, NOT a branch change:** `output_path` is opened `"w"`, which
+truncates an existing file. That is main's behaviour since February and the
+simulator's standing convention; recorded here for Thomas, deliberately not
+changed on this branch.
+
 ## Measured numbers, all configurations (2026-08-12)
 
 One table, so the merge review has them in one place.
@@ -750,11 +790,13 @@ structure, which is the criterion the whole design is held to.
   on all eight configurations.
 - Pinned pre-refactor references unchanged and passing.
 - **The branch passed independent codex review (Thomas's explicit request) in
-  two rounds — 12 findings then 8 — with all 20 resolved**, each with a
-  regression test, and the feature-defeating ones verified non-vacuously by
+  three rounds — 12, then 8, then 4 findings. 23 of 24 resolved**, each with a
+  regression test; the feature-defeating ones verified non-vacuously by
   reintroducing the bug and watching the test fail. Round 2 confirmed the
-  numerics clean and was confined to the resume/durability layer; the remaining
-  boundary of that layer is recorded under Future work rather than left implicit.
+  numerics clean; round 3 was scoped to data safety and marker durability against
+  the boundary recorded under Future work. The one unresolved finding
+  (`output_path` opened `"w"`, truncating an existing file) is **pre-existing
+  main behaviour**, not a branch regression, and is left for Thomas to rule on.
 - Remaining work is in Future work above; nothing there blocks merge.
 
 ## Conventions for this branch
