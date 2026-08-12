@@ -111,7 +111,7 @@ def _run_streamed(config, tmp_path, horizon, tiles_x, tiles_y):
     s_x, s_y, s_z = config['sparsity_factors']
     kernel = _turbulon_envelope(1, 1 / (2 * s_x), 1 / (2 * s_y), 1 / (2 * s_z),
                                 support_factor=SUPPORT_FACTOR)
-    plan = plan_tiling(config['grids'], kernel.shape[2],
+    plan = plan_tiling(config['grids'], kernel.shape,
                        force=(horizon, tiles_x, tiles_y))
     return streamed_cascade_loop(
         config['h_profile'], config['qt_profile'], config['z_profile'],
@@ -238,7 +238,7 @@ def test_planner_finds_a_horizon_and_tiles_below_it():
     from steam.streaming import _working_bytes
     budget = _working_bytes(int(grids['nx'][-2]), int(grids['ny'][-2]),
                             int(grids['nz'][-2]), kernel_nz, 'cpu')
-    plan = plan_tiling(grids, kernel_nz, budget_bytes=budget)
+    plan = plan_tiling(grids, (kernel_nz,)*3, budget_bytes=budget)
     assert plan.horizon == config['n_classes'] - 1
     assert plan.tiles[config['n_classes'] - 1][0] >= 2
     assert plan.peak_scratch_bytes > 0
@@ -246,7 +246,7 @@ def test_planner_finds_a_horizon_and_tiles_below_it():
 
 def test_planner_accepts_a_forced_plan():
     config = _config()
-    plan = plan_tiling(config['grids'], 13, force=(2, 2, 2))
+    plan = plan_tiling(config['grids'], (13, 13, 13), force=(2, 2, 2))
     assert plan.horizon == 2
     assert set(plan.tiles) == {2, 3}
     assert all(count == (2, 2) for count in plan.tiles.values())
@@ -263,7 +263,7 @@ def test_scratch_accounting_matches_actual_peak(tmp_path):
     a planner that under-predicts is worse than none, because the run dies deep
     instead of refusing up front."""
     config = _config()
-    plan = plan_tiling(config['grids'], 13, force=(2, 2, 2))
+    plan = plan_tiling(config['grids'], (13, 13, 13), force=(2, 2, 2))
     result = _run_streamed(config, tmp_path, 2, 2, 2)
     store = result[8]
     try:
@@ -496,7 +496,7 @@ def test_increment_store_records_what_a_nest_would_replay(resident, tmp_path):
     s_x, s_y, s_z = config['sparsity_factors']
     kernel = _turbulon_envelope(1, 1 / (2 * s_x), 1 / (2 * s_y), 1 / (2 * s_z),
                                 support_factor=SUPPORT_FACTOR)
-    plan = plan_tiling(config['grids'], kernel.shape[2], force=(2, 2, 2),
+    plan = plan_tiling(config['grids'], kernel.shape, force=(2, 2, 2),
                        save_increments=True)
     result = streamed_cascade_loop(
         config['h_profile'], config['qt_profile'], config['z_profile'],
@@ -529,3 +529,84 @@ def test_increment_store_records_what_a_nest_would_replay(resident, tmp_path):
     finally:
         store.destroy()
         increments.destroy()
+
+
+# ---------------------------------------------------------------------------
+# codex review 2026-08-12: the two coverage classes toy tests were blind to
+# ---------------------------------------------------------------------------
+
+def test_streaming_proceeds_when_the_resident_run_would_not_fit(tmp_path,
+                                                               monkeypatch):
+    """The missing "too big for RAM actually works" test.
+
+    simulate()'s resident preflight sized the FULL finest grid and raised
+    MemoryError before the streaming branch was reached, so every run big enough
+    to need streaming was refused -- the feature could not exceed RAM, which was
+    its entire purpose. No toy test could see it: a toy run fits either way.
+    Here the available memory is monkeypatched down so the preflight WOULD fire,
+    and the streamed run must proceed while the resident one refuses.
+    """
+    import importlib
+    from steam import simulate
+
+    # steam.simulate the NAME is the function (steam/__init__ rebinds it), so
+    # the module has to be fetched explicitly -- the same reason every test file
+    # here does importlib.import_module.
+    module = importlib.import_module("steam.simulate")
+    monkeypatch.setattr(module, 'available_memory_bytes', lambda: 4 * 1024**3)
+    monkeypatch.setattr(module, 'MEMORY_HEADROOM_BYTES', 4 * 1024**3)
+
+    z = np.arange(PROFILE_NZ) * PROFILE_DZ
+    common = dict(
+        h_profile=(340e3 - 20e3 * (z / z.max())),
+        qt_profile=(0.018 - 0.016 * (z / z.max())),
+        nx=32, ny=32, dx=125.0, dy=125.0, outer_scale=2000.0,
+        spheroscale=SPHEROSCALE, domain_height=DOMAIN_HEIGHT,
+        profile_dz=PROFILE_DZ, seed=SEED)
+
+    with pytest.raises(MemoryError, match="refusing to risk OOM"):
+        simulate(output_path=tmp_path / "resident.nc", **common)
+
+    # The same configuration, streamed, must RUN -- the preflight is a
+    # resident-path check and must not gate the path that exists to escape it.
+    simulate(output_path=tmp_path / "streamed.nc",
+             _force_tiling=(2, 2, 2), **common)
+    assert (tmp_path / "streamed.nc").exists()
+
+
+@pytest.mark.parametrize("sparsity_factors", [(3, 1, 1), (1, 3, 1), (2, 3, 1)])
+def test_streamed_equals_resident_with_anisotropic_sparsity(tmp_path,
+                                                            sparsity_factors):
+    """codex's repro config. The turbulon kernel's cell extent scales with the
+    sparsity factor of ITS OWN axis, so at s = (3, 1, 1) the kernel is
+    (37, 13, 13) and the x halo needs 19 cells. plan_tiling derived both
+    horizontal halos from the VERTICAL width and gave 7, letting the per-tile
+    convolution's wrap contamination reach the inner region: h/qt errors ~7e-3
+    with 6.2x and 17.9x seam enrichment. Every other test on this branch used
+    isotropic sparsity, where the wrong derivation happens to give the right
+    number -- which is precisely why it survived five components.
+    """
+    config = _config(sparsity_factors=sparsity_factors)
+    resident = _run_resident(config)
+    result = _run_streamed(config, tmp_path, 2, 2, 2)
+    store = result[8]
+    try:
+        for name, index in (('h', 0), ('qt', 1), ('flux', 2)):
+            relative = _relative(result[index], resident[index])
+            assert relative < 1e-5, (
+                f"s={sparsity_factors}: {name} differs by {relative:.3e}")
+    finally:
+        store.destroy()
+
+
+def test_halo_is_derived_per_axis_from_the_kernel():
+    """The fix itself, stated directly: each horizontal halo comes from its own
+    axis of the kernel, and the full 3D shape is required rather than an int."""
+    config = _config(sparsity_factors=(3, 1, 1))
+    kernel = _turbulon_envelope(1, 1 / 6, 1 / 2, 1 / 2,
+                                support_factor=SUPPORT_FACTOR)
+    assert kernel.shape == (37, 13, 13)
+    plan = plan_tiling(config['grids'], kernel.shape, force=(2, 2, 2))
+    assert plan.halo == (37 // 2 + 1, 13 // 2 + 1) == (19, 7)
+    with pytest.raises(ValueError, match="full 3D shape"):
+        plan_tiling(config['grids'], 13, force=(2, 2, 2))

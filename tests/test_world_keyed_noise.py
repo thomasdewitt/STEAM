@@ -24,7 +24,7 @@ from scipy import stats
 
 sm = importlib.import_module("steam.simulate")
 
-from steam.noise import class_key
+from steam.noise import center_indices, class_key
 from steam.simulate import (
     FLUX_ALPHA,
     NoiseRegion,
@@ -440,3 +440,44 @@ def test_cascade_loop_rejects_a_shared_generator():
             0.0, 1e9, -1.0, 1.0, 0, (1, 1, 1),
             np.random.default_rng(0),
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: the sub-lattice phase must be selected on the WRAPPED index
+# ---------------------------------------------------------------------------
+
+def test_center_phase_is_selected_after_wrapping():
+    """codex review 2026-08-12. Testing divisibility on the UNWRAPPED world
+    index and wrapping afterwards is only equivalent when the world extent is
+    itself a multiple of the sparsity factor. Their exact repro: world 5,
+    factor 2, origin 4 -- cells 0..2 land on world 4, 0, 1, so the centers are
+    locals 0 and 1, where the old code invented local 2 and missed local 1.
+    """
+    local, world = center_indices(3, 4, 5, 2, wrap=True)
+    np.testing.assert_array_equal(local, [0, 1])
+    np.testing.assert_array_equal(world, [4, 0])
+    # Every returned world index really is a center, and none is missed.
+    mapped = [(4 + a) % 5 for a in range(3)]
+    np.testing.assert_array_equal(
+        local, [a for a, w in enumerate(mapped) if w % 2 == 0])
+
+
+@pytest.mark.parametrize("world_n,factor", [(5, 2), (7, 2), (9, 2), (10, 3),
+                                            (6, 4), (16, 2), (12, 3)])
+def test_restriction_survives_a_wrap_crossing_sub_lattice(world_n, factor):
+    """The property the phase fix protects: a region crossing the periodic edge
+    at s > 1 must still be the exact restriction of the world field, including
+    when the world extent is NOT a multiple of the sparsity factor."""
+    world_shape = (world_n, world_n, 6)
+    sparsity = (factor, factor, 1)
+    key = class_key(np.random.SeedSequence(4242))
+    world = _world_field(key, world_shape, sparsity)
+
+    shape = (min(world_n, 5), min(world_n, 4), 4)
+    for origin in ((world_n - 2, world_n - 1, 0), (world_n - 1, 0, 1),
+                   (1, world_n - 3, 0)):
+        region = _keyed_sparse_levy(
+            shape, sparsity, ALPHA, NoiseRegion(key, origin, world_shape))
+        np.testing.assert_array_equal(
+            region, _restriction(world, origin, shape),
+            err_msg=f"world_n={world_n} factor={factor} origin={origin}")

@@ -827,6 +827,9 @@ def simulate(
     if compress is None:
         compress = constants.output_compress
     output_path = Path(output_path)
+    # Whether the CALLER named a seed, which is what decides whether an
+    # unseeded resume may adopt the seed a previous attempt drew (F8).
+    seed_was_none = seed is None
     if seed is None:
         # An unseeded run draws a random 31-bit seed and records it, so
         # that any root can later be continued by a nest (the file stores
@@ -1017,6 +1020,14 @@ def simulate(
     if device != 'cuda':
         peak_bytes += fft_convolution_bytes(nx_f, ny_f, nz_f, unit_turbulon.shape[2], 4)
     available = available_memory_bytes()
+    # RESIDENT ONLY. This preflight sizes the FULL finest grid, which a streamed
+    # run never holds: it pages the state through RAM in tiles and has its own
+    # budget and planner below. Left ungated it refused every run big enough to
+    # need streaming -- i.e. it made the feature unable to exceed RAM, which was
+    # the entire point of it (found by codex review, 2026-08-12; the toy-scale
+    # tests could not see it because a toy run fits either way).
+    if (stream_to_disk or _force_tiling is not None):
+        available = None
     if available is not None and peak_bytes > available - MEMORY_HEADROOM_BYTES:
         raise MemoryError(
             f"STEAM needs ~{peak_bytes / 1024**3:.1f} GiB (approximate) for the "
@@ -1079,6 +1090,13 @@ def simulate(
     # the cascade itself and the composition/write differ.
     store = increment_store = None
     resume_completed = None
+    if (stream_to_disk or _force_tiling is not None) and ledger is not None:
+        raise NotImplementedError(
+            "ledger= (apply-only replay) is not implemented for the streamed "
+            "path: a streamed run would need the ledger distributed back over "
+            "its tiles and planes, which is future work. Silently ignoring it "
+            "and measuring afresh would be worse than refusing. Run the replay "
+            "in RAM, or drop ledger=.")
     if stream_to_disk or _force_tiling is not None:
         from .streaming import (
             TileStore, available_memory_budget, build_manifest,
@@ -1086,7 +1104,7 @@ def simulate(
             plan_tiling, prepare_scratch)
         budget = (memory_budget if memory_budget is not None
                   else available_memory_budget())
-        plan = plan_tiling(grids, unit_turbulon.shape[2],
+        plan = plan_tiling(grids, unit_turbulon.shape,
                            budget_bytes=budget, device=device,
                            force=_force_tiling,
                            save_increments=save_for_refinement)
@@ -1107,15 +1125,56 @@ def simulate(
             # for the internal hook takes on the checks it skips; a caller
             # setting stream_to_disk=True gets them all.
             check_scratch_filesystem(scratch_root)
-        check_scratch_space(scratch_root, plan.peak_scratch_bytes)
         check_output_space(output_path, grids, save_for_refinement)
-        manifest = build_manifest(
-            grids, plan, seed, sparsity_factors, n_scale_classes_per_dyad,
-            (h_min, h_max, qt_min, qt_max),
-            (h_profile, qt_profile, z_profile),
-            FLUX_SCALE, 'world_keyed_philox4x32_10')
-        store, resume_completed = prepare_scratch(scratch_root, manifest,
-                                                  fresh=fresh)
+        # EVERYTHING that changes the answer. Assembled here rather than inside
+        # build_manifest so that an omission is visible at the call site -- the
+        # first version silently omitted H_h and lambda, which are module
+        # constants read at run time and which Thomas actively sweeps, so a
+        # resume across an edit to constants.py would have spliced two
+        # realizations together (codex review, 2026-08-12).
+        fingerprint = {
+            'sparsity_factors': tuple(sparsity_factors),
+            'n_scale_classes_per_dyad': n_scale_classes_per_dyad,
+            'bounds': (h_min, h_max, qt_min, qt_max),
+            'h_profile': np.asarray(h_profile, dtype=np.float64),
+            'qt_profile': np.asarray(qt_profile, dtype=np.float64),
+            'z_profile': np.asarray(z_profile, dtype=np.float64),
+            'spheroscale_profile': np.asarray(spheroscale_profile,
+                                              dtype=np.float64),
+            'outer_scale': float(outer_scale),
+            'domain_height': float(domain_height),
+            'flux_noise_scale': float(FLUX_SCALE),
+            'flux_alpha': float(FLUX_ALPHA),
+            'noise_scheme': 'world_keyed_philox4x32_10',
+            'hurst_horizontal': (H_h if hurst_horizontal is None
+                                 else float(hurst_horizontal)),
+            'haar_to_mhat': (HAAR_TO_MHAT if haar_to_mhat is None
+                             else float(haar_to_mhat)),
+            'bound_buffer_multiple': (BOUND_BUFFER_MULTIPLE
+                                      if bound_buffer_multiple is None
+                                      else float(bound_buffer_multiple)),
+            'min_distance_to_ground': int(min_distance_to_ground),
+            'turbulon_shape': turbulon_shape,
+            'anisotropy': anisotropy,
+            'save_for_refinement': bool(save_for_refinement),
+            # CPU and CUDA differ at ULP level, so a mixed resume is
+            # bit-identical to neither pure run.
+            'device': device,
+        }
+        manifest = build_manifest(grids, plan, seed, fingerprint)
+        store, resume_completed, adopted_seed = prepare_scratch(
+            scratch_root, manifest, fresh=fresh, seed_was_none=seed_was_none)
+        # A resuming run already owns the bytes its store occupies.
+        check_scratch_space(scratch_root, plan.peak_scratch_bytes,
+                            already_owned=store.total_bytes())
+        if adopted_seed is not None and adopted_seed != seed:
+            # An unseeded run resuming: the earlier attempt's seed IS what this
+            # command means, so take it and re-derive the per-class keys.
+            print(f"Resuming an unseeded run: adopting seed {adopted_seed} "
+                  f"from the existing scratch manifest")
+            seed = adopted_seed
+            seed_sequence = np.random.SeedSequence(seed)
+            child_seeds = seed_sequence.spawn(n_classes)
         if resume_completed:
             print(f"Resuming streamed run from {scratch_root} "
                   f"({len(resume_completed)} phases already complete)")

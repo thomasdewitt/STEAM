@@ -13,6 +13,7 @@ tile order and the recomputation is exact, so there is nothing left to differ,
 and asserting identity is what pins the idempotency.
 """
 
+import json
 import shutil
 
 import numpy as np
@@ -248,6 +249,10 @@ def _crash_at(target_index, target_phase):
     ('plane_qt_mid', "mid plane pass on the second scalar"),
     ('class_done', "between classes"),
     ('regrid_done', "after the regrid, before any measurement"),
+    # Added after codex review 2026-08-12: the flux rescale loop used to
+    # multiply flux_next in place, so a crash here and a resume rescaled the
+    # completed prefix twice. It is a buffered write now, and this is the hole.
+    ('flux_rescale_mid', "mid flux rescale -- the F4 double-rescale hole"),
 ])
 def test_resume_is_bit_identical(tmp_path, target_phase, what):
     """Interrupt a streamed run, re-run it, and demand the SAME BITS.
@@ -339,8 +344,15 @@ def test_mismatched_scratch_is_refused_and_fresh_clears_it(tmp_path):
 
 
 def test_manifest_fingerprints_the_things_that_change_the_answer():
-    """A manifest that ignored the seed, the grid or the tiling would let a
-    resume mix two different runs."""
+    """A manifest that ignored any realization-changing input would let a resume
+    splice two different runs together.
+
+    The list grew after codex review (2026-08-12): H_h and lambda are module
+    constants read at RUN time and Thomas actively sweeps H_h, so a resume
+    across an edit to constants.py was a live hazard, not a hypothetical. device
+    is here because the CPU and CUDA paths differ at ULP level, so a mixed
+    resume is bit-identical to neither pure run.
+    """
     from steam.simulate import _compute_all_grids
     from steam.streaming import plan_tiling
 
@@ -348,29 +360,73 @@ def test_manifest_fingerprints_the_things_that_change_the_answer():
     grids = _compute_all_grids(np.array([2000.0, 1000.0]), 4000.0, 4000.0,
                                DOMAIN_HEIGHT, (1, 1, 1),
                                np.full(PROFILE_NZ, 100.0), z)
-    plan = plan_tiling(grids, 13, force=(1, 2, 2))
-    profiles = (np.zeros(PROFILE_NZ), np.zeros(PROFILE_NZ), z)
-    base = build_manifest(grids, plan, 1, (1, 1, 1), 1, (0, 1, 0, 1),
-                          profiles, 0.2, 'world_keyed_philox4x32_10')
-    same = build_manifest(grids, plan, 1, (1, 1, 1), 1, (0, 1, 0, 1),
-                          profiles, 0.2, 'world_keyed_philox4x32_10')
-    assert base['config_sha256'] == same['config_sha256']
+    plan = plan_tiling(grids, (13, 13, 13), force=(1, 2, 2))
+    base_inputs = dict(
+        sparsity_factors=(1, 1, 1), n_scale_classes_per_dyad=1,
+        bounds=(0.0, 1.0, 0.0, 1.0),
+        h_profile=np.zeros(PROFILE_NZ), qt_profile=np.zeros(PROFILE_NZ),
+        z_profile=z, spheroscale_profile=np.full(PROFILE_NZ, 100.0),
+        outer_scale=2000.0, domain_height=DOMAIN_HEIGHT,
+        flux_noise_scale=0.2085, flux_alpha=1.8,
+        noise_scheme='world_keyed_philox4x32_10',
+        hurst_horizontal=0.45, haar_to_mhat=0.25518,
+        bound_buffer_multiple=3.0, min_distance_to_ground=1,
+        turbulon_shape='mexican_hat',
+        anisotropy='piecewise_isotropic_below_spheroscale',
+        save_for_refinement=False, device='cpu')
 
-    for changed in (
-            build_manifest(grids, plan, 2, (1, 1, 1), 1, (0, 1, 0, 1),
-                           profiles, 0.2, 'world_keyed_philox4x32_10'),
-            build_manifest(grids, plan, 1, (2, 2, 2), 1, (0, 1, 0, 1),
-                           profiles, 0.2, 'world_keyed_philox4x32_10'),
-            build_manifest(grids, plan, 1, (1, 1, 1), 1, (0, 2, 0, 1),
-                           profiles, 0.2, 'world_keyed_philox4x32_10'),
-            build_manifest(grids, plan, 1, (1, 1, 1), 1, (0, 1, 0, 1),
-                           profiles, 0.3, 'world_keyed_philox4x32_10'),
-            build_manifest(grids, plan, 1, (1, 1, 1), 1, (0, 1, 0, 1),
-                           profiles, 0.2, 'stream'),
-            build_manifest(grids, plan_tiling(grids, 13, force=(1, 1, 1)), 1,
-                           (1, 1, 1), 1, (0, 1, 0, 1), profiles, 0.2,
-                           'world_keyed_philox4x32_10')):
-        assert changed['config_sha256'] != base['config_sha256']
+    base = build_manifest(grids, plan, 1, base_inputs)
+    assert build_manifest(grids, plan, 1, dict(base_inputs))[
+        'config_sha256'] == base['config_sha256']
+
+    # Every one of these must move the fingerprint.
+    perturbations = {
+        'sparsity_factors': (2, 2, 2),
+        'n_scale_classes_per_dyad': 2,
+        'bounds': (0.0, 2.0, 0.0, 1.0),
+        'h_profile': np.ones(PROFILE_NZ),
+        'qt_profile': np.ones(PROFILE_NZ),
+        'spheroscale_profile': np.full(PROFILE_NZ, 200.0),
+        'outer_scale': 4000.0,
+        'domain_height': 900.0,
+        'flux_noise_scale': 0.3,
+        'flux_alpha': 1.9,
+        'noise_scheme': 'stream',
+        'hurst_horizontal': 0.5,
+        'haar_to_mhat': 0.19691,
+        'bound_buffer_multiple': 4.0,
+        'min_distance_to_ground': 2,
+        'turbulon_shape': 'gaussian',
+        'anisotropy': 'canonical',
+        'save_for_refinement': True,
+        'device': 'cuda',
+    }
+    for key, value in perturbations.items():
+        changed = dict(base_inputs)
+        changed[key] = value
+        assert build_manifest(grids, plan, 1, changed)['config_sha256'] \
+            != base['config_sha256'], f"{key} does not move the fingerprint"
+
+    # The seed, the tiling plan, and the vertical gridding.
+    assert build_manifest(grids, plan, 2, base_inputs)['config_sha256'] \
+        != base['config_sha256']
+    other_plan = plan_tiling(grids, (13, 13, 13), force=(1, 1, 1))
+    assert build_manifest(grids, other_plan, 1, base_inputs)['config_sha256'] \
+        != base['config_sha256']
+    taller = _compute_all_grids(np.array([2000.0, 1000.0]), 4000.0, 4000.0,
+                                DOMAIN_HEIGHT * 1.5, (1, 1, 1),
+                                np.full(PROFILE_NZ, 100.0), z)
+    assert build_manifest(taller, plan, 1, base_inputs)['config_sha256'] \
+        != base['config_sha256']
+
+    # The SEEDLESS digest ignores the seed and nothing else -- that is what lets
+    # an unseeded run resume (F8).
+    assert build_manifest(grids, plan, 2, base_inputs)[
+        'config_seedless_sha256'] == base['config_seedless_sha256']
+    changed = dict(base_inputs)
+    changed['device'] = 'cuda'
+    assert build_manifest(grids, plan, 1, changed)[
+        'config_seedless_sha256'] != base['config_seedless_sha256']
 
 
 # ---------------------------------------------------------------------------
@@ -395,3 +451,181 @@ def test_scratch_is_retained_on_failure_with_a_message(tmp_path, capsys):
     assert str(scratch) in printed and "resume" in printed.lower(), (
         "a retained scratch directory must say so, and say that re-running "
         f"resumes. got: {printed[-400:]}")
+
+
+# ---------------------------------------------------------------------------
+# codex review 2026-08-12: crash windows around the marker, and API honesty
+# ---------------------------------------------------------------------------
+
+def _crash_in_store(store_method, target_class, target_phase):
+    """Interrupt INSIDE the store, between the marker and its settle."""
+    from steam.streaming import TileStore
+
+    original = getattr(TileStore, store_method)
+    state = {'fired': False}
+
+    def patched(self, class_index, phase, *args, **kwargs):
+        result = original(self, class_index, phase, *args, **kwargs)
+        if (not state['fired'] and class_index == target_class
+                and phase == target_phase):
+            state['fired'] = True
+            raise Crash(f"injected after {store_method}({phase})")
+        return result
+    return original, patched
+
+
+@pytest.mark.parametrize("target_phase", ['plane_flux', 'plane_h', 'class'])
+def test_resume_after_a_marker_but_before_its_settle(tmp_path, monkeypatch,
+                                                    target_phase):
+    """The window the atomic-marker protocol closes.
+
+    A phase now commits its marker atomically and THEN performs its renames and
+    drops; a crash in between must leave the store recoverable, because the
+    settle is recorded alongside the marker and replayed idempotently on resume.
+    Interrupting immediately after mark_atomic returns is the closest a test can
+    get to that window from outside.
+    """
+    from steam.streaming import TileStore
+
+    reference = _kwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
+    simulate(**reference)
+    expected = _read(reference["output_path"])
+
+    original, patched = _crash_in_store('mark', 2, target_phase)
+    monkeypatch.setattr(TileStore, 'mark', patched)
+    scratch = tmp_path / "settle_scratch"
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch))
+    monkeypatch.undo()
+
+    simulate(**_kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+                       scratch_dir=scratch))
+    actual = _read(tmp_path / "resumed.nc")
+    for name in expected:
+        np.testing.assert_array_equal(
+            actual[name], expected[name],
+            err_msg=f"resume after the {target_phase} marker was not "
+                    f"bit-identical on {name}")
+
+
+def test_unseeded_run_can_resume(tmp_path):
+    """seed=None must be resumable, which is the DEFAULT API path.
+
+    An unseeded run draws a fresh seed every time, so before the fix its retry
+    looked like a different configuration and was refused -- the default path
+    could never resume. The manifest now records the drawn seed and an unseeded
+    resume adopts it when everything else matches.
+    """
+    scratch = tmp_path / "unseeded"
+    interrupted = _kwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
+                          scratch_dir=scratch,
+                          _crash_hook=_crash_at(2, 'apply_done'))
+    interrupted['seed'] = None
+    with pytest.raises(Crash):
+        simulate(**interrupted)
+
+    manifest = json.loads((scratch / "manifest.json").read_text())
+    drawn = manifest['seed']
+    assert drawn is not None
+
+    resumed = _kwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
+                      scratch_dir=scratch)
+    resumed['seed'] = None
+    simulate(**resumed)
+    with netCDF4.Dataset(tmp_path / "unseeded.nc") as ds:
+        assert int(ds.seed) == drawn, (
+            "the resumed run must adopt the seed the first attempt drew")
+
+    # And it equals a clean run with that seed explicitly.
+    reference = _kwargs(tmp_path, "explicit", _force_tiling=(2, 2, 2))
+    reference['seed'] = drawn
+    simulate(**reference)
+    expected = _read(tmp_path / "explicit.nc")
+    actual = _read(tmp_path / "unseeded.nc")
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
+def test_a_foreign_directory_is_refused_and_left_alone(tmp_path):
+    """scratch_dir is caller-supplied and scratch is deleted on success, so a
+    non-empty directory without a valid manifest must be refused and NOT
+    touched. Before the fix "no manifest" was treated like fresh=True and the
+    directory was rmtree'd -- pointing scratch_dir at anything existing
+    destroyed it."""
+    scratch = tmp_path / "not_a_store"
+    scratch.mkdir()
+    treasure = scratch / "thesis_chapter.tex"
+    treasure.write_text("do not delete me")
+
+    kwargs = _kwargs(tmp_path, "foreign", _force_tiling=(2, 2, 2),
+                     scratch_dir=scratch)
+    with pytest.raises(OSError, match="not a STEAM scratch store"):
+        simulate(**kwargs)
+    assert treasure.exists() and treasure.read_text() == "do not delete me"
+
+    # fresh=True must NOT override this: it applies to stores, not to whatever
+    # else a path happens to hold.
+    kwargs['fresh'] = True
+    with pytest.raises(OSError, match="not a STEAM scratch store"):
+        simulate(**kwargs)
+    assert treasure.exists()
+
+
+def test_a_corrupt_manifest_is_refused_not_destroyed(tmp_path):
+    """A store whose manifest will not parse reports as "not a store", which is
+    the right side to fail on: it might be a store mid-write, or not one."""
+    scratch = tmp_path / "corrupt"
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch,
+                           _crash_hook=_crash_at(2, 'apply_done')))
+    (scratch / "manifest.json").write_text("{ this is not json")
+    with pytest.raises(OSError, match="not a STEAM scratch store"):
+        simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch))
+    assert (scratch / "manifest.json").exists(), "refused, not destroyed"
+
+
+def test_streamed_replay_is_refused_rather_than_ignored(tmp_path):
+    """ledger= asks for apply-only replay, which the streamed path does not
+    implement. Silently measuring afresh would look like it worked."""
+    from steam.ledger import RunLedger
+    kwargs = _kwargs(tmp_path, "replay", _force_tiling=(2, 2, 2),
+                     ledger=RunLedger(4))
+    with pytest.raises(NotImplementedError, match="apply-only replay"):
+        simulate(**kwargs)
+
+
+def test_scratch_accounting_covers_every_tenant(tmp_path):
+    """The planner must bound the ACTUAL peak, including the head's staged
+    increments, the composed-output staging, and the degenerate no-tiling plan
+    (where the plumbing still writes stores while the old estimate said zero)."""
+    from steam.simulate import _compute_all_grids
+    from steam.streaming import plan_tiling
+
+    z = np.arange(PROFILE_NZ) * PROFILE_DZ
+    grids = _compute_all_grids(GRID['outer_scale'] / 2.0 ** np.arange(4),
+                               GRID['nx'] * GRID['dx'], GRID['ny'] * GRID['dy'],
+                               DOMAIN_HEIGHT, (1, 1, 1),
+                               np.full(PROFILE_NZ, 100.0), z)
+    plain = plan_tiling(grids, (13, 13, 13), force=(2, 2, 2))
+    with_increments = plan_tiling(grids, (13, 13, 13), force=(2, 2, 2),
+                                  save_increments=True)
+    assert with_increments.peak_scratch_bytes > plain.peak_scratch_bytes
+
+    # The degenerate plan: horizon at or past the last class, nothing tiles.
+    degenerate = plan_tiling(grids, (13, 13, 13), force=(4, 1, 1))
+    assert degenerate.peak_scratch_bytes > 0, (
+        "a no-tiling plan still writes stores; predicting zero is a confident lie")
+
+
+def test_resume_credits_the_scratch_it_already_owns(tmp_path):
+    """A resuming run must not be refused for space it is already using."""
+    from steam.streaming import check_scratch_space
+    import shutil as _shutil
+    free = _shutil.disk_usage(tmp_path).free
+    # Needs more than free, but owns most of it already.
+    check_scratch_space(tmp_path, free + (1 << 20), already_owned=free)
+    with pytest.raises(OSError):
+        check_scratch_space(tmp_path, free + (1 << 30), already_owned=0)

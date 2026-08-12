@@ -158,10 +158,25 @@ def center_indices(n, origin, world_n, factor, wrap):
     ``wrap`` takes the world index modulo ``world_n``, which is what makes a
     halo that runs off a periodic edge draw the noise of the world cells it
     actually wraps onto. z never wraps.
+
+    The divisibility test is applied to the WRAPPED world index, which matters
+    when ``world_n`` is not itself a multiple of ``factor`` (2026-08-12, codex
+    review). Testing the unwrapped index first and wrapping afterwards is only
+    equivalent when world_n % factor == 0: at world_n = 5, factor = 2,
+    origin = 4, cells 0..2 map to world 4, 0, 1 and the true centers are locals
+    0 and 1, where the unwrapped test returned locals 0 and 2 -- one center
+    invented, one missed. The extent rules make world_n % s == 0 for standard
+    configurations (nx_k = 2*s*m*2^i), so this reached only narrow-strip grids at
+    s > 1; fixed at the root rather than asserted away, because a silent wrong
+    lattice is exactly the class of bug world-keying exists to remove.
+
+    A consequence: the local indices are no longer a regular stride when a
+    region crosses the periodic boundary, so callers must scatter by index array
+    rather than assuming an arange.
     """
-    phase = (-int(origin)) % int(factor)
-    local = np.arange(phase, n, factor, dtype=np.int64)
-    world = local + int(origin)
+    local_all = np.arange(n, dtype=np.int64)
+    world_all = local_all + int(origin)
     if wrap:
-        world = world % int(world_n)
-    return local, world
+        world_all = world_all % int(world_n)
+    keep = (world_all % int(factor)) == 0
+    return local_all[keep], world_all[keep]

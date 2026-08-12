@@ -362,13 +362,74 @@ class TileStore:
             path.unlink()
 
     def rename(self, class_index, name, new_name):
-        """Move a field, for a double-buffer swap. Cheap: one directory entry."""
+        """Move a field, for a double-buffer swap. Cheap: one directory entry.
+
+        os.replace rather than unlink-then-rename: atomic, so a crash cannot
+        leave the target missing, and the whole operation is then idempotent
+        (source gone means it already happened).
+        """
         self.close(class_index, name)
         self.close(class_index, new_name)
-        target = self._path(class_index, new_name)
-        if target.exists():
-            target.unlink()
-        self._path(class_index, name).rename(target)
+        source = self._path(class_index, name)
+        if not source.exists():
+            return
+        os.replace(source, self._path(class_index, new_name))
+
+    def mark_atomic(self, class_index, phase, pending_renames=(),
+                    pending_drops=()):
+        """Commit a phase marker ATOMICALLY, recording its settle actions.
+
+        The crash-consistency protocol (2026-08-12, codex review). Every phase
+        is: pure writes to *_next names, flush, persist whatever the marker
+        implies exists, ATOMIC marker commit, then SETTLE (the renames and
+        drops). The marker is written to a temp file and os.replace'd, which is
+        atomic on POSIX, so a crash either leaves the marker absent -- all the
+        phase's inputs are still intact and it simply re-runs -- or present with
+        its settle actions recorded, and the settle is idempotent and re-run on
+        resume.
+
+        Without this the windows were real: a crash between a rename and its
+        marker stranded the resume with missing inputs, and a crash between two
+        renames of a multi-field settle left half the fields swapped.
+        """
+        record = {
+            'class': int(class_index), 'phase': phase,
+            'renames': [list(pair) for pair in pending_renames],
+            'drops': list(pending_drops),
+        }
+        settle_path = self.directory / f"settle_{class_index:02d}_{phase}.json"
+        temporary = settle_path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(record))
+        os.replace(temporary, settle_path)
+        self.mark(class_index, phase)
+        self.settle(class_index, phase)
+
+    def settle(self, class_index, phase):
+        """Perform (or finish) a marked phase's renames and drops.
+
+        Idempotent by construction: a rename whose source is gone was already
+        done, and a drop of a missing file is a no-op. Re-run on every resume for
+        every marked phase, which is what makes the restart rule a single clause
+        -- before the marker, re-run the phase; after it, settle and continue.
+        """
+        settle_path = self.directory / f"settle_{class_index:02d}_{phase}.json"
+        if not settle_path.exists():
+            return
+        try:
+            record = json.loads(settle_path.read_text())
+        except ValueError:
+            return
+        for source, target in record.get('renames', []):
+            source_path = self._path(class_index, source)
+            if source_path.exists():
+                self.rename(class_index, source, target)
+        for name in record.get('drops', []):
+            self.drop(class_index, name)
+
+    def settle_all(self, completed):
+        """Finish the settle of every already-marked phase, before resuming."""
+        for class_index, phase in sorted(completed):
+            self.settle(class_index, phase)
 
     def mark(self, class_index, phase):
         """Record that (class, phase) COMPLETED. Appended, so the file is a log
@@ -408,10 +469,41 @@ class TileStore:
         return sum(path.stat().st_size
                    for path in self.directory.glob("*.npy"))
 
+    OWNED_SUFFIXES = ('.npy',)
+    OWNED_NAMES = (PROGRESS_FILE, MANIFEST_FILE)
+
     def destroy(self):
+        """Remove the files this store owns, then the directory if it empties.
+
+        NOT rmtree (2026-08-12, codex review + coordinator): scratch_dir is a
+        caller-supplied path, and a blanket rmtree of it would delete whatever
+        else happens to live there. Only the store's own artifacts go -- field
+        .npy files, per-class ledger npzs, the progress log, the manifest -- and
+        the directory is removed only if that leaves it empty. Anything foreign
+        survives and keeps the directory alive, which is the visible signal that
+        something unexpected was in there.
+        """
         for key in list(self._open):
             self.close(*key)
-        shutil.rmtree(self.directory, ignore_errors=True)
+        if not self.directory.exists():
+            return
+        for path in list(self.directory.iterdir()):
+            if path.is_dir():
+                # The increments sub-store owns itself; recurse only into ours.
+                if path.name == 'increments' or path.name == 'head_increments':
+                    shutil.rmtree(path, ignore_errors=True)
+                continue
+            owned = (path.suffix in self.OWNED_SUFFIXES
+                     or path.name in self.OWNED_NAMES
+                     or (path.name.startswith('ledger_c')
+                         and path.suffix == '.npz')
+                     or path.name.startswith('settle_'))
+            if owned:
+                path.unlink(missing_ok=True)
+        try:
+            self.directory.rmdir()
+        except OSError:
+            pass        # something foreign is still in there: leave it be
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +553,8 @@ def _working_bytes(nx, ny, nz, kernel_nz, device):
     return total
 
 
-def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
-                save_increments=False):
+def plan_tiling(grids, kernel_shape, budget_bytes=None, device='cpu',
+                force=None, save_increments=False):
     """Choose the RAM horizon, the per-class tile grids, and the halo.
 
     ``force`` is (horizon, tiles_x, tiles_y) and overrides the search entirely:
@@ -471,14 +563,32 @@ def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
     apply to every streamed class.
 
     Halo per side, in cells of the class's own grid, and constant across classes
-    because the kernel is: the convolution reaches ``kernel_nz // 2`` cells
-    (SUPPORT_FACTOR * k in physical units, which is 6 * s cells at every class),
-    and the advective weight's gradient stencil reaches one more. Anything
-    beyond that is slack, and slack in a halo is only cost.
+    because the kernel is: the convolution reaches ``kernel_shape[axis] // 2``
+    cells (SUPPORT_FACTOR * k in physical units, which is 6 * s_axis cells at
+    every class), and the advective weight's gradient stencil reaches one more.
+    Anything beyond that is slack, and slack in a halo is only cost.
+
+    PER AXIS, and that is the point. The kernel's cell extent scales with the
+    sparsity factor of ITS OWN axis, so at s = (3, 1, 1) the kernel is
+    (37, 13, 13) and x needs 19 cells of halo where y needs 7. Deriving both
+    from the VERTICAL width -- which is what this did until 2026-08-12 -- left
+    the x halo at 7 and let the convolution's wrap contamination reach the inner
+    region: measured h/qt errors ~7e-3 with 6.2x and 17.9x seam enrichment
+    (codex review). Every test on this branch had used isotropic sparsity, which
+    is exactly why it survived: with s_x == s_y == s_z the wrong derivation gives
+    the right number.
     """
     n_classes = len(grids['k'])
-    halo_cells = kernel_nz // 2 + 1
-    halo = (halo_cells, halo_cells)
+    try:
+        kernel_shape = tuple(int(n) for n in kernel_shape)
+    except TypeError:
+        kernel_shape = ()
+    if len(kernel_shape) != 3:
+        raise ValueError(
+            f"plan_tiling needs the kernel's full 3D shape to size the halo per "
+            f"axis, got {kernel_shape!r}")
+    kernel_nz = kernel_shape[2]
+    halo = (kernel_shape[0] // 2 + 1, kernel_shape[1] // 2 + 1)
 
     if force is not None:
         horizon, tiles_x, tiles_y = force
@@ -548,19 +658,36 @@ def plan_tiling(grids, kernel_nz, budget_bytes=None, device='cpu', force=None,
                    + 11 * _field_bytes(grids, index))
     if horizon == 0:
         peak = max(peak, 11 * _field_bytes(grids, 0))
+    # Every other scratch tenant, none of which the first version counted
+    # (2026-08-12, codex review). An under-predicting planner is worse than no
+    # planner: the run dies deep instead of refusing up front.
     if save_increments:
         # Three applied increments per class, kept until the output file is
         # written. A geometric pyramid over the ladder, not a per-class cost.
         peak += 3 * sum(_field_bytes(grids, index)
                         for index in range(horizon, n_classes))
+        # The resident head stages its own increments as npy beside the store.
+        peak += 3 * sum(_field_bytes(grids, index) for index in range(horizon))
+    # The composition stages h, qt and flux at the finest grid before the write.
+    peak += 3 * _field_bytes(grids, n_classes - 1)
+    if horizon >= n_classes:
+        # Degenerate plan: nothing streams, but the plumbing still writes the
+        # head's state into a store and composes out of it, so the scratch is
+        # not zero. Accounted rather than special-cased, so the number is never
+        # a confident lie.
+        peak = max(peak, 6 * _field_bytes(grids, n_classes - 1))
     return TilePlan(horizon, tiles, halo, peak)
 
 
-def check_scratch_space(directory, needed_bytes):
+def check_scratch_space(directory, needed_bytes, already_owned=0):
     """Refuse up front, with the number, rather than dying mid-cascade."""
     directory = Path(directory)
     probe = directory if directory.exists() else directory.parent
     free = shutil.disk_usage(probe).free
+    # A resuming run already OWNS the bytes its store occupies, and demanding
+    # the full peak on top of them would refuse a resume that fits perfectly
+    # well (2026-08-12, codex review).
+    needed_bytes = max(0, needed_bytes - int(already_owned))
     if needed_bytes > free:
         raise OSError(
             f"streamed run needs {needed_bytes / 1024**3:.2f} GiB of scratch in "
@@ -698,6 +825,11 @@ def streamed_cascade_loop(
     # The one thing that cannot be recomputed is a completed class's LEDGER
     # entry, so each class's entry is persisted as it completes and read back.
     completed = set() if completed is None else set(completed)
+    # Finish any settle a crash interrupted between a marker commit and its
+    # renames. Idempotent -- a rename whose source is gone already happened, a
+    # drop of a missing file is a no-op -- so replaying it for every marked
+    # phase costs nothing and makes the restart rule a single clause.
+    store.settle_all(completed)
 
     def phase_done(index, phase):
         return (index, phase) in completed
@@ -826,18 +958,22 @@ def streamed_cascade_loop(
                                       (x_lo, x_hi, y_lo, y_hi)))
             store.plane_array(index, name).flush()
             store.close(index, name)
-        for name in (() if phase_done(index, 'regrid') else carried):
-            store.drop(previous, name)
-        # A class whose compensation differs from one starts the deficits if no
-        # earlier class already did. Once they exist they are carried on, even
-        # through classes with f == 1, because the accumulated sum is what the
-        # composition adds.
-        if class_has_deficit and not phase_done(index, 'regrid'):
-            for name in DEFICIT_FIELDS.values():
-                if not store.exists(index, name):
-                    store.create(index, name, world_shape, fill=0.0)
         if not phase_done(index, 'regrid'):
-            store.mark(index, 'regrid')
+            # A class whose compensation differs from one starts the deficits if
+            # no earlier class already did. Once they exist they are carried on,
+            # even through classes with f == 1, because the accumulated sum is
+            # what the composition adds.
+            if class_has_deficit:
+                for name in DEFICIT_FIELDS.values():
+                    if not store.exists(index, name):
+                        store.create(index, name, world_shape, fill=0.0)
+            # Marker FIRST, then the previous class's fields go. Dropping them
+            # before the marker left a window in which a crash stranded the
+            # resume with neither the source (deleted) nor a marker saying the
+            # regrid had finished (codex review, 2026-08-12).
+            store.mark_atomic(index, 'regrid')
+            for name in carried:
+                store.drop(previous, name)
         hook(index, 'regrid_done')
 
         per_class_scale = scale_c / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
@@ -931,7 +1067,7 @@ def streamed_cascade_loop(
                     raw_pattern[name].level_count)
             level_means = {name: class_ledger.pattern[name].level_mean
                            for name in raw_pattern}
-            store.mark(index, 'measure')
+            store.mark_atomic(index, 'measure')
 
             # ---- pass 2: APPLY --------------------------------------------------
             print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
@@ -1016,8 +1152,8 @@ def streamed_cascade_loop(
                     f"in-RAM path handles by flattening the flux to its entering "
                     f"mean. Not reachable at any sane amplitude, and not "
                     f"implemented streamed rather than implemented untested.")
-            store.mark(index, 'apply')
             persist(index)
+            store.mark_atomic(index, 'apply')
         hook(index, 'apply_done')
 
         # ---- pass 3: PLANE PASS (the bounded add) --------------------------
@@ -1034,7 +1170,7 @@ def streamed_cascade_loop(
         # invariant, and hands the deficit and save_for_refinement the increment
         # they need.
         if phase_done(index, 'plane_flux'):
-            entering_planes = advanced_planes = None
+            entering_planes = advanced_planes = None      # settled already
         else:
             entering_planes = store.plane_array(index, 'flux')
             advanced_planes = store.plane_array(index, 'flux_next')
@@ -1049,6 +1185,12 @@ def streamed_cascade_loop(
             if record_flux:
                 increment_store.create(index, 'flux', world_shape)
                 flux_increment_planes = increment_store.plane_array(index, 'flux')
+            # PURE WRITES to a third buffer, never an in-place multiply of
+            # flux_next. Rescaling in place made this loop non-idempotent: a
+            # crash halfway through and then a resume would rescale the
+            # completed prefix a second time (codex review, 2026-08-12).
+            store.create(index, 'flux_rescaled', world_shape)
+            rescaled_planes = store.plane_array(index, 'flux_rescaled')
             for level in range(nz_k):
                 advanced = advanced_planes[level] * np.float32(flux_rescale)
                 if flux_deficit_planes is not None or record_flux:
@@ -1059,18 +1201,24 @@ def streamed_cascade_loop(
                             + np.float32(deficit_i[level]) * applied)
                     if record_flux:
                         flux_increment_planes[level] = applied
-                advanced_planes[level] = advanced
+                rescaled_planes[level] = advanced
+                if level == nz_k // 2:
+                    hook(index, 'flux_rescale_mid')
             if record_flux:
                 increment_store.plane_array(index, 'flux').flush()
                 increment_store.close(index, 'flux')
-            store.plane_array(index, 'flux_next').flush()
-            store.drop(index, 'flux')
-            store.rename(index, 'flux_next', 'flux')
+            rescaled_planes.flush()
             if flux_deficit_next is not None:
                 flux_deficit_next.flush()
-                store.drop(index, 'flux_deficit')
-                store.rename(index, 'flux_deficit_next', 'flux_deficit')
-            store.mark(index, 'plane_flux')
+            # ATOMIC marker, then settle. Every rename and drop below happens
+            # AFTER the marker commits and is replayed idempotently on resume,
+            # so no crash window can leave the fields half-swapped.
+            renames = [('flux_rescaled', 'flux')]
+            drops = ['flux_next']
+            if flux_deficit_next is not None:
+                renames.append(('flux_deficit_next', 'flux_deficit'))
+            store.mark_atomic(index, 'plane_flux', pending_renames=renames,
+                              pending_drops=drops)
 
         for (name, state_name, increment_name, mean_1d, _, _, phi_min,
              phi_max) in scalars:
@@ -1135,20 +1283,24 @@ def streamed_cascade_loop(
                 solve.scale[level] = level_solve.scale[0]
             class_ledger.bounded_add[name] = solve
             state_next_planes.flush()
-            store.drop(index, state_name)
-            store.rename(index, state_name + '_next', state_name)
             if deficit_next_planes is not None:
                 deficit_next_planes.flush()
-                store.drop(index, deficit_name)
-                store.rename(index, deficit_name + '_next', deficit_name)
             if increment_planes is not None:
                 increment_store.plane_array(index, name).flush()
                 increment_store.close(index, name)
-            store.drop(index, increment_name)
+            # Persist BEFORE the marker: the marker's presence is what makes a
+            # resume load this ledger file, so committing the marker first left a
+            # window where the resume looked for an npz that did not exist yet
+            # (codex review, 2026-08-12).
             persist(index)
-            store.mark(index, f'plane_{name}')
+            renames = [(state_name + '_next', state_name)]
+            if deficit_next_planes is not None:
+                renames.append((deficit_name + '_next', deficit_name))
+            store.mark_atomic(index, f'plane_{name}',
+                              pending_renames=renames,
+                              pending_drops=[increment_name])
         persist(index)
-        store.mark(index, 'class')
+        store.mark_atomic(index, 'class')
         hook(index, 'class_done')
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
@@ -1517,69 +1669,129 @@ def check_output_space(output_path, grids, save_for_refinement):
     return needed
 
 
-def build_manifest(grids, plan, seed, sparsity_factors,
-                   n_scale_classes_per_dyad, bounds, profiles,
-                   flux_noise_scale, noise_scheme):
+def build_manifest(grids, plan, seed, fingerprint_inputs):
     """The fingerprint a resume must match before it reuses a scratch store.
 
-    Everything that would change the answer: the class ladder and every grid
-    shape, the seed, the tiling plan, the bounds, the input profiles, the flux
-    parameters, and the noise scheme. Hashed rather than stored field by field,
-    with the shapes kept readable so a mismatch can be diagnosed by eye.
+    ``fingerprint_inputs`` is every scalar, array and string that would change
+    the answer; the caller assembles it so nothing can be forgotten here without
+    being visibly absent there. Two digests come out:
+
+    - ``config_sha256`` over everything including the seed;
+    - ``config_seedless_sha256`` over everything except it.
+
+    The seedless one exists for ``seed=None`` runs (2026-08-12, codex review).
+    An unseeded run draws a fresh seed each time, so its retry would always look
+    like a different configuration and the default API path could never resume.
+    With the seedless digest matching, the manifest's recorded seed is ADOPTED
+    and the run continues -- which is what "re-running the same command resumes"
+    has to mean when the command names no seed.
 
     A scratch store whose manifest does not match is NEVER silently reused --
     half a cascade from a different configuration is worse than no cascade.
+
+    What must be in here, learned the hard way: the module constants H_h and
+    lambda are read at RUN time, and Thomas sweeps H_h in constants.py, so a
+    resume across an edit to that file would otherwise splice two realizations
+    together. Likewise ``device``: the CPU and CUDA paths differ at ULP level, so
+    a mixed resume is bit-identical to neither pure run.
     """
-    digest = hashlib.sha256()
-    for part in (np.asarray(grids['k'], dtype=np.float64).tobytes(),
-                 np.asarray(grids['nx']).tobytes(),
-                 np.asarray(grids['ny']).tobytes(),
-                 np.asarray(grids['nz']).tobytes(),
-                 np.asarray(profiles[0], dtype=np.float64).tobytes(),
-                 np.asarray(profiles[1], dtype=np.float64).tobytes(),
-                 np.asarray(profiles[2], dtype=np.float64).tobytes(),
-                 repr((seed, tuple(sparsity_factors),
-                       n_scale_classes_per_dyad, tuple(bounds),
-                       float(flux_noise_scale), noise_scheme,
-                       plan.horizon, sorted(plan.tiles.items()),
-                       plan.halo)).encode()):
-        digest.update(part)
+    def digest_of(items):
+        digest = hashlib.sha256()
+        for value in items:
+            if isinstance(value, np.ndarray):
+                digest.update(np.ascontiguousarray(
+                    value, dtype=np.float64).tobytes())
+            else:
+                digest.update(repr(value).encode())
+            digest.update(b'\x1e')     # separator: keeps fields unambiguous
+        return digest.hexdigest()
+
+    shared = [
+        np.asarray(grids['k'], dtype=np.float64),
+        np.asarray(grids['nx'], dtype=np.float64),
+        np.asarray(grids['ny'], dtype=np.float64),
+        np.asarray(grids['nz'], dtype=np.float64),
+        np.asarray(grids['dz'], dtype=np.float64),
+    ]
+    # Every class's z grid and cell heights: a change in the vertical gridding
+    # changes every level's answer without touching nx/ny/nz.
+    for index in range(len(grids['k'])):
+        shared.append(np.asarray(grids['z_arrays'][index], dtype=np.float64))
+        shared.append(np.asarray(grids['dz_arrays'][index], dtype=np.float64))
+    shared.extend([plan.horizon, sorted(plan.tiles.items()), plan.halo])
+    for key in sorted(fingerprint_inputs):
+        shared.append(key)
+        shared.append(fingerprint_inputs[key])
+
     return {
-        'config_sha256': digest.hexdigest(),
+        'config_sha256': digest_of(shared + ['seed', seed]),
+        'config_seedless_sha256': digest_of(shared),
+        'seed': None if seed is None else int(seed),
         'n_classes': int(len(grids['k'])),
         'horizon': int(plan.horizon),
         'tiles': {str(k): list(v) for k, v in sorted(plan.tiles.items())},
         'halo': list(plan.halo),
-        'noise_scheme': noise_scheme,
         'shapes': [[int(grids['nx'][i]), int(grids['ny'][i]),
                     int(grids['nz'][i])] for i in range(len(grids['k']))],
     }
 
 
-def prepare_scratch(directory, manifest, fresh=False):
-    """Validate or clear a scratch directory. Returns the completed-phase set.
+def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False):
+    """Validate, adopt or clear a scratch directory.
 
-    An existing store whose manifest matches is resumed from; one that does not
-    match, or has no manifest at all, is REFUSED with the option of fresh=True.
-    Silently reusing it would mix two configurations' half-cascades.
+    Returns (store, completed_phases, adopted_seed). ``adopted_seed`` is not None
+    only when an unseeded run is resuming and has taken the seed the earlier
+    attempt drew -- see build_manifest.
+
+    Three cases, and the distinction between the last two is the safety
+    property (2026-08-12, codex review):
+
+    - EMPTY or absent: start fresh, write the manifest.
+    - A STORE (valid manifest) whose fingerprint differs: refuse, offering
+      fresh=True, which discards only the store's own files.
+    - NOT A STORE (non-empty, no valid manifest): refuse ALWAYS, and delete
+      NOTHING. This is the dangerous case -- scratch_dir is a caller-supplied
+      path, and the previous version treated "no manifest" like fresh=True and
+      rmtree'd it, so pointing scratch_dir at any existing directory destroyed
+      it. A corrupt manifest lands here too, which is the right side to fail on.
     """
     directory = Path(directory)
     store = TileStore(directory)
+    non_empty = directory.exists() and any(directory.iterdir())
     existing = store.read_manifest()
-    if fresh or existing is None:
-        if directory.exists() and any(directory.iterdir()):
-            store.destroy()
-            store = TileStore(directory)
-        store.write_manifest(manifest)
-        return store, set()
-    if existing.get('config_sha256') != manifest['config_sha256']:
+
+    if non_empty and existing is None:
+        raise OSError(
+            f"scratch directory {directory} is not empty and is not a STEAM "
+            f"scratch store (no readable manifest.json). Refusing to touch it: "
+            f"this path may hold something else entirely, and a scratch "
+            f"directory is deleted on success. Empty it yourself, or point "
+            f"scratch_dir= somewhere else. (A corrupt manifest reports here "
+            f"too -- if this WAS a store, delete it deliberately.)")
+
+    if existing is not None and not fresh:
+        if existing.get('config_sha256') == manifest['config_sha256']:
+            return store, store.completed(), None
+        if (seed_was_none
+                and existing.get('config_seedless_sha256')
+                == manifest['config_seedless_sha256']
+                and existing.get('seed') is not None):
+            # Same configuration in every respect but the seed, and the caller
+            # named no seed -- so the earlier attempt's seed IS the one this run
+            # means. Adopt it and resume.
+            return store, store.completed(), int(existing['seed'])
         raise OSError(
             f"scratch directory {directory} holds a partial run of a DIFFERENT "
             f"configuration (manifest {existing.get('config_sha256', '?')[:12]} "
             f"against {manifest['config_sha256'][:12]}). Refusing to mix them. "
             f"Pass fresh=True to discard it and start over, or point "
             f"scratch_dir= somewhere else.")
-    return store, store.completed()
+
+    if non_empty:
+        store.destroy()                 # a store, and fresh=True was asked for
+        store = TileStore(directory)
+    store.write_manifest(manifest)
+    return store, set(), None
 
 
 def scratch_hint(grids):

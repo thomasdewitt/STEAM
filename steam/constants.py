@@ -12,7 +12,7 @@ hurst_horizontal = 0.45
 haar_to_mhat = 0.25518 
                                      # (0.45 alternative: see haar_to_mhat --
                                      # the two MUST be changed together)
-hurst_vertical_anisotropy = 5/9      # H_z, aspect-ratio scaling exponent
+hurst_vertical_anisotropy = 5/9
 
 
 # NetCDF output default: whether h, qt, diagnostic variables, and p_bottom
