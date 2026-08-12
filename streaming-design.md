@@ -51,7 +51,10 @@ couplings block a naive port, each with its fix:
    within a class. The reduced scalars ("the ledger") are recorded in the
    output file — kilobytes, and they make any tile replayable tile-locally.
 
-3. **Halo domain of dependence.** A tile descending multiple classes without
+3. **Halo domain of dependence.** [RESOLVED — component 3, 2026-08-12: the
+   per-class re-extraction route was taken, and the halo is kernel_half + 1
+   cells per side, verified sufficient by the seam test] A tile descending
+   multiple classes without
    re-reading neighbors needs its initial halo to cover the accumulated
    domain of dependence: Sigma_j 3 k_j ≈ 6k of the first tiled class
    (constant 12*s cells per side per class on each class's own working
@@ -280,7 +283,80 @@ simulate() calls plus one production-shaped small run (same seed — component
 1 changed realizations, so the reference is regenerated on this branch, not
 main).
 
-### 3. Tile store + streamed driver  [delegated, after 2]
+### 3. Tile store + streamed driver  [LANDED 2026-08-12]
+
+`steam/streaming.py`. Classes above the RAM horizon run in RAM through
+`cascade_loop` unchanged; below it each class runs
+
+    pass 0 REGRID -> pass 1 MEASURE -> reduce -> pass 2 APPLY -> reduce
+    -> pass 3 PLANE (the bounded add on assembled z-planes)
+
+**MEASURED** (16² × 10 through 64² × 10, four classes):
+
+| quantity | result |
+|---|---|
+| streamed vs in-RAM, h_perturbation | 2.6e-06 relative |
+| streamed vs in-RAM, qt_perturbation | 5.9e-07 |
+| streamed vs in-RAM, flux | 2.4e-07 |
+| same floor at 1×1 … 8×8 tiles | yes — error does not grow with tile count |
+| **seam test** (seam bin ÷ interior median) | **0.94 / 0.92 / 0.87**, bins flat to 10% |
+| ledger: flux entering, mean-abs noise | EXACT |
+| ledger: realized mean / product norms | 1e-6 / 1.1e-08 |
+| scratch accounting | predicted peak bounds actual, within 3× |
+
+float32 eps is 1.2e-07, so h at ~20 ULP after four classes of a nonlinear
+multiplicative cascade is where it should be. The seam bin is if anything
+QUIETER than the interior: no seam-correlated structure.
+
+Decisions this spec left open:
+
+- **The store holds WORLD-SIZED fields**, one memory-mapped `.npy` per (class,
+  field) — not per-tile files with a manifest. Tiles partition the WORK, not
+  the data: horizontal tiling never splits z, and a streamed run is a root, so
+  its stored state carries no halo at all (halos are transient, built on
+  page-in by wrapping). One mapping per field serves both required access
+  patterns — tile+halo is a strided slice, a z-plane across all tiles is
+  `array[:, :, lev]` — with none of the stitching bookkeeping. Given this is
+  the area that produced the align_corners=True and never-periodic-resample
+  findings, fewer indexing sites is the right trade.
+- **The tiled regrid is exact and has its own gate test.**
+  align_corners=False makes the target→source map a pure dilation, so with
+  n_in/n_out written as b/a in lowest terms, a source slab quantized to b lands
+  on target-cell boundaries at multiples of a. One extra block of b source
+  cells per side (wrapped) supplies the periodic continuation, exactly as
+  `utils._wrap_plan` does — WITHOUT it torch clamps at the tile edge, which
+  puts a seam in the domain interior. Bit-exact against the full-domain
+  resample for a dyadic ladder; a few float32 ULP for non-dyadic ratios.
+- **THREE passes per class, not two.** Within a class there is a CHAIN of two
+  dependent global reductions: the mean-abs multiplier noise gates S_k, and S_k
+  enters the product whose norm is the second reduction. Rather than pay a
+  third sweep, pass 1 measures the RAW product (the entering flux in place of
+  S_k) and the normalized totals are recovered by one division — a positive
+  scalar factors straight out of a sum of absolute values. Costs one float32
+  multiply's worth of rounding, which is the floor this path is measured at.
+- **Halo = kernel_half + 1 cells per side**, constant across classes because
+  the kernel is (SUPPORT_FACTOR·k is 6·s cells at every class), plus one for
+  the advective weight's gradient stencil. Verified sufficient at halo = 7 with
+  a 13-cell kernel: convolution difference 2.0e-07.
+- **Tile visit order is fixed** (world raster, x-major) and documented, because
+  the float64 partials accumulate in it. Two streamed runs of one configuration
+  are bit-identical; tested.
+
+**BUG THE FUNDAMENTAL TEST CAUGHT, worth recording.** Pass 2 originally wrote
+the updated flux back into the field it read tile halos from, so every tile
+after the first saw a halo of already-advanced values — a 13% error in the
+realized flux mean. Fixed by double-buffering the flux within the class and
+swapping at the end of the pass. Caught on the first run of
+streamed-equals-resident, which is the argument for writing that test first.
+
+Deferred with reasons: the compensation deficits and `save_for_refinement`
+(both belong to the output composition — component 4), and crash resume (the
+progress marker is written from the start, so component 5's lifecycle work is
+cheap). No public `stream_to_disk` flag yet (component 5); an internal entry
+point with forced tiling is what the tests drive.
+
+The original component description follows.
+
 
 The new machinery. A scratch store (npy or zarr per tile per field, chunked
 so a z-plane across tiles is cheaply assemblable — decide during
