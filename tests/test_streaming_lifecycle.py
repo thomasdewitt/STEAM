@@ -22,6 +22,7 @@ import netCDF4
 
 from steam import simulate
 from steam.streaming import (
+    STORE_DIRNAME,
     available_memory_budget,
     build_manifest,
     is_tmpfs,
@@ -253,6 +254,11 @@ def _crash_at(target_index, target_phase):
     # multiply flux_next in place, so a crash here and a resume rescaled the
     # completed prefix twice. It is a buffered write now, and this is the hole.
     ('flux_rescale_mid', "mid flux rescale -- the F4 double-rescale hole"),
+    # Round 2 (codex re-review #2): the class ledger used to be np.savez'd
+    # straight to its live path, so a crash mid-write left a truncated zip that a
+    # resume -- having seen the phase marker -- would try to load. It is written
+    # atomically now, so the committed predecessor always survives.
+    ('persist_mid', "immediately after a ledger persist"),
 ])
 def test_resume_is_bit_identical(tmp_path, target_phase, what):
     """Interrupt a streamed run, re-run it, and demand the SAME BITS.
@@ -277,7 +283,7 @@ def test_resume_is_bit_identical(tmp_path, target_phase, what):
     assert scratch.exists(), (
         f"scratch must be RETAINED after a failure ({what}) or resume is "
         f"impossible")
-    assert (scratch / "manifest.json").exists()
+    assert (scratch / STORE_DIRNAME / "manifest.json").exists()
 
     # Re-run the same command: no crash hook this time.
     resumed = _kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
@@ -293,26 +299,31 @@ def test_resume_is_bit_identical(tmp_path, target_phase, what):
 
 
 def test_resume_actually_skips_completed_work(tmp_path):
-    """Guard against a vacuous resume test: the second run must genuinely reuse
-    the store rather than silently redoing everything (which would also be
-    bit-identical). Checked by the progress log growing, not restarting."""
+    """Guard against a vacuous resume test: the second run must genuinely REUSE
+    the store rather than silently redoing everything from scratch, which would
+    also be bit-identical and would pass the identity assertions.
+
+    Markers are one file per (class, phase) now (codex re-review #1), so "what
+    finished" is a directory scan with nothing to parse and no append to tear.
+    """
     scratch = tmp_path / "skip_scratch"
     interrupted = _kwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
                           scratch_dir=scratch,
                           _crash_hook=_crash_at(3, 'regrid_done'))
     with pytest.raises(Crash):
         simulate(**interrupted)
-    first_log = (scratch_log := scratch / "progress")
-    before = first_log.read_text().splitlines() if first_log.exists() else []
-    # class 2 finished before the class-3 crash, so its marker must be there
-    assert any(line.startswith("2 class") for line in before), before
+
+    root = scratch / STORE_DIRNAME
+    markers = sorted(path.name for path in root.glob("marker_c*"))
+    # Class 2 completed before the class-3 crash, so its marker must be present
+    # -- that is the work the resume is obliged to skip.
+    assert "marker_c02_class" in markers, markers
 
     simulate(**_kwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
-    # The completed markers from the first attempt are still in the log: the
-    # second run appended rather than starting a fresh store.
-    after = first_log.read_text().splitlines() if first_log.exists() else []
-    assert len(after) == 0 or len(after) >= len(before)
+    # The store is gone on success, which is itself the evidence that the second
+    # run adopted this store rather than refusing it or starting elsewhere.
+    assert not root.exists() or not any(root.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +339,7 @@ def test_mismatched_scratch_is_refused_and_fresh_clears_it(tmp_path):
                     scratch_dir=scratch, _crash_hook=_crash_at(2, 'apply_done'))
     with pytest.raises(Crash):
         simulate(**first)
-    assert (scratch / "manifest.json").exists()
+    assert (scratch / STORE_DIRNAME / "manifest.json").exists()
 
     # A different seed is a different realization, so the manifest must not match.
     second = _kwargs(tmp_path, "second", _force_tiling=(2, 2, 2),
@@ -525,7 +536,7 @@ def test_unseeded_run_can_resume(tmp_path):
     with pytest.raises(Crash):
         simulate(**interrupted)
 
-    manifest = json.loads((scratch / "manifest.json").read_text())
+    manifest = json.loads((scratch / STORE_DIRNAME / "manifest.json").read_text())
     drawn = manifest['seed']
     assert drawn is not None
 
@@ -547,29 +558,90 @@ def test_unseeded_run_can_resume(tmp_path):
         np.testing.assert_array_equal(actual[name], expected[name])
 
 
-def test_a_foreign_directory_is_refused_and_left_alone(tmp_path):
-    """scratch_dir is caller-supplied and scratch is deleted on success, so a
-    non-empty directory without a valid manifest must be refused and NOT
-    touched. Before the fix "no manifest" was treated like fresh=True and the
-    directory was rmtree'd -- pointing scratch_dir at anything existing
-    destroyed it."""
-    scratch = tmp_path / "not_a_store"
+def test_foreign_files_in_scratch_dir_are_never_touched(tmp_path):
+    """CONTAINMENT: the store owns a subdirectory and writes nothing outside it.
+
+    scratch_dir is caller-supplied and a scratch store is deleted on success, so
+    the earlier design leaned on a list of "the files we own" to decide what to
+    remove. That is enumeration, and its failure mode is deleting someone's data.
+    The store now writes only under scratch_dir/steam-scratch-store and
+    destroy() rmtree's exactly that subtree, so other contents are irrelevant
+    rather than protected by checks (codex re-review #4).
+
+    Asserted across every lifecycle path: success-cleanup, crash-retention,
+    resume, and fresh=True.
+    """
+    scratch = tmp_path / "shared_dir"
     scratch.mkdir()
     treasure = scratch / "thesis_chapter.tex"
     treasure.write_text("do not delete me")
+
+    def intact():
+        assert treasure.exists()
+        assert treasure.read_text() == "do not delete me"
+
+    # 1. A successful run: the store subtree goes, the neighbour stays.
+    simulate(**_kwargs(tmp_path, "ok", _force_tiling=(2, 2, 2),
+                       scratch_dir=scratch))
+    intact()
+
+    # 2. A crash (scratch retained), then a resume, then success.
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch,
+                           _crash_hook=_crash_at(2, 'apply_done')))
+    intact()
+    simulate(**_kwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
+                       scratch_dir=scratch))
+    intact()
+
+    # 3. fresh=True discarding a mismatched store.
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch,
+                           _crash_hook=_crash_at(2, 'apply_done')))
+    other = _kwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
+                    scratch_dir=scratch, fresh=True)
+    other['seed'] = SEED + 7
+    simulate(**other)
+    intact()
+
+
+def test_a_non_store_subdirectory_is_refused(tmp_path):
+    """A pre-existing steam-scratch-store WITHOUT a valid stamped manifest is
+    refused always, fresh=True included: it is either not ours, or ours with a
+    corrupted manifest, and both are reasons to stop rather than delete."""
+    scratch = tmp_path / "not_a_store"
+    root = scratch / STORE_DIRNAME
+    root.mkdir(parents=True)
+    (root / "something.txt").write_text("hello")
 
     kwargs = _kwargs(tmp_path, "foreign", _force_tiling=(2, 2, 2),
                      scratch_dir=scratch)
     with pytest.raises(OSError, match="not a STEAM scratch store"):
         simulate(**kwargs)
-    assert treasure.exists() and treasure.read_text() == "do not delete me"
-
-    # fresh=True must NOT override this: it applies to stores, not to whatever
-    # else a path happens to hold.
     kwargs['fresh'] = True
     with pytest.raises(OSError, match="not a STEAM scratch store"):
         simulate(**kwargs)
-    assert treasure.exists()
+    assert (root / "something.txt").exists()
+
+
+def test_an_unstamped_manifest_is_not_mistaken_for_a_store(tmp_path):
+    """codex re-review #4's concrete case: a directory holding a PARSEABLE
+    manifest.json -- `{}` included -- was accepted as one of our stores, and
+    fresh=True would then have destroyed it. The ownership stamp is what
+    distinguishes ours from anything else that parses."""
+    scratch = tmp_path / "impostor"
+    root = scratch / STORE_DIRNAME
+    root.mkdir(parents=True)
+    (root / "manifest.json").write_text("{}")
+    (root / "precious.dat").write_text("keep")
+
+    kwargs = _kwargs(tmp_path, "impostor", _force_tiling=(2, 2, 2),
+                     scratch_dir=scratch, fresh=True)
+    with pytest.raises(OSError, match="not a STEAM scratch store"):
+        simulate(**kwargs)
+    assert (root / "precious.dat").exists()
 
 
 def test_a_corrupt_manifest_is_refused_not_destroyed(tmp_path):
@@ -580,11 +652,11 @@ def test_a_corrupt_manifest_is_refused_not_destroyed(tmp_path):
         simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch,
                            _crash_hook=_crash_at(2, 'apply_done')))
-    (scratch / "manifest.json").write_text("{ this is not json")
+    (scratch / STORE_DIRNAME / "manifest.json").write_text("{ this is not json")
     with pytest.raises(OSError, match="not a STEAM scratch store"):
         simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch))
-    assert (scratch / "manifest.json").exists(), "refused, not destroyed"
+    assert (scratch / STORE_DIRNAME / "manifest.json").exists(), "refused, not destroyed"
 
 
 def test_streamed_replay_is_refused_rather_than_ignored(tmp_path):
@@ -629,3 +701,132 @@ def test_resume_credits_the_scratch_it_already_owns(tmp_path):
     check_scratch_space(tmp_path, free + (1 << 20), already_owned=free)
     with pytest.raises(OSError):
         check_scratch_space(tmp_path, free + (1 << 30), already_owned=0)
+
+
+# ---------------------------------------------------------------------------
+# codex re-review round 2: durability of the marker and ledger writes
+# ---------------------------------------------------------------------------
+
+def test_a_truncated_ledger_file_cannot_be_committed(tmp_path):
+    """The atomic-write contract, stated where it can be checked.
+
+    np.savez straight to the live path left a truncated zip if the process died
+    mid-write; a resume that had seen the phase marker would then load it. The
+    write now goes temp -> fsync -> os.replace -> fsync(dir), so a crash leaves
+    either the previous committed file or the new one, never a partial.
+    """
+    from steam.ledger import load_class_ledger, save_class_ledger
+    from steam.ledger import ClassLedger, MeanReduction, FluxAdvanceLedger
+
+    path = tmp_path / "ledger.npz"
+    first = ClassLedger()
+    first.flux = FluxAdvanceLedger(MeanReduction(np.float64(1.0), 1),
+                                   MeanReduction(np.float64(2.0), 1),
+                                   MeanReduction(np.float64(3.0), 1), 0)
+    save_class_ledger(path, first)
+    assert load_class_ledger(path).flux.entering.total == 1.0
+
+    # A write that dies part-way must leave the committed predecessor intact and
+    # no stray live file: the temp name is what gets abandoned.
+    class Boom(RuntimeError):
+        pass
+
+    def exploding(handle):
+        handle.write(b"partial")
+        raise Boom("died mid-write")
+
+    from steam.streaming import _atomic_write
+    with pytest.raises(Boom):
+        _atomic_write(path, exploding)
+    assert load_class_ledger(path).flux.entering.total == 1.0, (
+        "the committed ledger must survive a failed rewrite")
+
+
+def test_markers_are_one_file_each_and_unparsed(tmp_path):
+    """Marker durability by construction rather than by careful parsing.
+
+    An append log could be torn by a crash or ENOSPC mid-write, and the next
+    append would then concatenate onto the fragment -- silently losing a
+    completed phase, which is the worst failure this layer has because the resume
+    re-runs a phase whose inputs the settle already consumed.
+    """
+    from steam.streaming import TileStore
+
+    store = TileStore(tmp_path / "markers")
+    store.mark(3, 'plane_h')
+    store.mark(11, 'class')
+    assert store.completed() == {(3, 'plane_h'), (11, 'class')}
+
+    # A stray temp file (a write interrupted before its replace) is ignored, not
+    # mis-parsed into a phantom marker.
+    (store.root / "marker_c04_apply.tmp").write_text("")
+    assert store.completed() == {(3, 'plane_h'), (11, 'class')}
+
+    # Re-marking is idempotent.
+    store.mark(3, 'plane_h')
+    assert store.completed() == {(3, 'plane_h'), (11, 'class')}
+
+
+def test_resume_recovers_from_a_write_failure_mid_phase(tmp_path, monkeypatch):
+    """An ENOSPC-flavoured interruption: a store write fails part-way through a
+    phase. Nothing is committed, so the resume re-runs that phase from its start
+    and the result is bit-identical."""
+    from steam.streaming import TileStore
+
+    reference = _kwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
+    simulate(**reference)
+    expected = _read(reference["output_path"])
+
+    original = TileStore.write_window
+    state = {'calls': 0}
+
+    def failing(self, class_index, name, *args, **kwargs):
+        state['calls'] += 1
+        if state['calls'] == 3:
+            raise OSError(28, "No space left on device")
+        return original(self, class_index, name, *args, **kwargs)
+
+    monkeypatch.setattr(TileStore, 'write_window', failing)
+    scratch = tmp_path / "enospc"
+    with pytest.raises(OSError, match="No space left"):
+        simulate(**_kwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch))
+    monkeypatch.undo()
+
+    simulate(**_kwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
+                       scratch_dir=scratch))
+    actual = _read(tmp_path / "recovered.nc")
+    for name in expected:
+        np.testing.assert_array_equal(
+            actual[name], expected[name],
+            err_msg=f"recovery from a mid-phase write failure moved {name}")
+
+
+def test_scratch_and_output_are_checked_together_on_one_filesystem(tmp_path):
+    """They share a filesystem by DEFAULT (scratch lives beside the output), and
+    scratch is not cleaned up until after the file is written -- so their peak is
+    concurrent and checking each against the same free space independently passes
+    two demands that cannot both be met (codex re-review #8)."""
+    import shutil as _shutil
+    from steam.simulate import _compute_all_grids
+    from steam.streaming import check_space
+
+    z = np.arange(PROFILE_NZ) * PROFILE_DZ
+    grids = _compute_all_grids(GRID['outer_scale'] / 2.0 ** np.arange(4),
+                               GRID['nx'] * GRID['dx'], GRID['ny'] * GRID['dy'],
+                               DOMAIN_HEIGHT, (1, 1, 1),
+                               np.full(PROFILE_NZ, 100.0), z)
+    free = _shutil.disk_usage(tmp_path).free
+
+    # Comfortably fits.
+    check_space(tmp_path / "scratch", tmp_path / "out.nc", 1 << 20, grids,
+                False)
+    # Scratch alone fits and output alone fits, but not both at once -- the
+    # combined check must refuse exactly where two independent checks pass.
+    from steam.streaming import output_bytes
+    output_need = output_bytes(grids, True)
+    scratch_need = free - output_need // 2
+    assert scratch_need < free and output_need < free   # each alone is fine
+    with pytest.raises(OSError, match="share a filesystem"):
+        check_space(tmp_path / "scratch", tmp_path / "out.nc", scratch_need,
+                    grids, True)

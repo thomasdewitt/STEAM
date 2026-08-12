@@ -415,7 +415,16 @@ def read_ledger(dataset, group=None):
 # crash mid-run, and one file per class is the granularity resume works at.
 
 def save_class_ledger(path, class_ledger):
-    """Write one ClassLedger to an npz. Whatever is present is written."""
+    """Write one ClassLedger to an npz, ATOMICALLY.
+
+    Temp file, fsync, os.replace, fsync the containing directory. Writing
+    straight to the live path left a truncated zip behind if the process died
+    mid-write, and a streamed resume that had already seen the phase marker would
+    then try to load it (codex re-review, 2026-08-12). The committed predecessor
+    now always survives a crash.
+    """
+    from .streaming import _atomic_write
+
     arrays = {}
     flux = class_ledger.flux
     if flux is not None:
@@ -433,7 +442,7 @@ def save_class_ledger(path, class_ledger):
         for field in ('a0', 'demean', 'scale', 'n_loop', 'n_scale',
                       'final_demean', 'mu'):
             arrays[f'{name}_{field}'] = getattr(solve, field)
-    np.savez(path, **arrays)
+    _atomic_write(path, lambda handle: np.savez(handle, **arrays))
 
 
 def load_class_ledger(path):

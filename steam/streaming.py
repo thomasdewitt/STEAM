@@ -65,8 +65,54 @@ from .ledger import (
 # purpose: they exist only for the output composition (component 4), the cascade
 # state never reads them, and carrying them would need the pre-advance flux kept
 # live across the lazy rescale.
-PROGRESS_FILE = 'progress'
 MANIFEST_FILE = 'manifest.json'
+# The store owns a subdirectory of scratch_dir and writes NOTHING outside it
+# (codex re-review #4, 2026-08-12). Containment rather than enumeration: trying
+# to list which files in a caller-supplied directory belong to us is a losing
+# game, and getting it wrong means deleting someone's data. scratch_dir itself is
+# never scanned, never deleted, and never required to be empty.
+STORE_DIRNAME = 'steam-scratch-store'
+# Stamped into the manifest and checked before ANY reuse or destruction, so a
+# directory that merely happens to contain a parseable manifest.json is not
+# mistaken for one of ours.
+STORE_SCHEMA = 'steam_scratch_store'
+STORE_SCHEMA_VERSION = 1
+
+
+def _fsync_directory(path):
+    """Make a directory's entries durable.
+
+    On ext4 a rename can be durable while the directory entry recording it is
+    not, so a host crash can preserve a marker and lose the settle record it was
+    paired with -- which would skip a phase with its old fields still live
+    (codex re-review #1). Every atomic replace in this module goes through
+    _atomic_write, which calls this.
+    """
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass            # some filesystems refuse to fsync a directory fd
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(path, write):
+    """Write via a temporary file and os.replace, durably.
+
+    ``write(handle)`` receives an open binary handle. The sequence is: write,
+    flush, fsync the FILE, replace, fsync the DIRECTORY. A crash at any point
+    leaves either the previous contents or the new ones, never a torn mixture --
+    which is what an append-based log could not promise.
+    """
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    with open(temporary, 'wb') as handle:
+        write(handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    _fsync_directory(path.parent)
 
 STATE_FIELDS = ('h_perturbation', 'qt_perturbation', 'flux')
 # Written within a class by pass 2 and consumed by pass 3.
@@ -262,14 +308,26 @@ class TileStore:
     marker exists from the start so it costs nothing to add later.)
     """
 
-    def __init__(self, directory):
-        self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
+    def __init__(self, scratch_dir, owned_root=None):
+        self.scratch_dir = Path(scratch_dir)
+        # CONTAINMENT (codex re-review #4). Everything this store writes lives
+        # under `root`, a subdirectory it creates itself, and destroy() removes
+        # exactly that subtree. scratch_dir is never scanned, never deleted, and
+        # never required to be empty -- so whatever else the caller keeps there
+        # is irrelevant rather than protected by a list of the files we own.
+        self.root = (Path(owned_root) if owned_root is not None
+                     else self.scratch_dir / STORE_DIRNAME)
+        self.root.mkdir(parents=True, exist_ok=True)
         self._open = {}          # logical (nx, ny, nz) views
         self._raw = {}           # the (nz, nx, ny) buffers they are views of
 
+    @property
+    def directory(self):
+        """The owned subtree; every path goes through here."""
+        return self.root
+
     def _path(self, class_index, name):
-        return self.directory / f"c{class_index:02d}_{name}.npy"
+        return self.root / f"c{class_index:02d}_{name}.npy"
 
     def create(self, class_index, name, shape, fill=None):
         """Allocate a field on disk, given its LOGICAL (nx, ny, nz) shape.
@@ -423,87 +481,99 @@ class TileStore:
             source_path = self._path(class_index, source)
             if source_path.exists():
                 self.rename(class_index, source, target)
-        for name in record.get('drops', []):
-            self.drop(class_index, name)
+        for entry in record.get('drops', []):
+            # Either a bare name in this class, or an explicit (class, name) --
+            # the regrid drops the PREVIOUS class's fields.
+            if isinstance(entry, (list, tuple)):
+                self.drop(int(entry[0]), entry[1])
+            else:
+                self.drop(class_index, entry)
 
     def settle_all(self, completed):
         """Finish the settle of every already-marked phase, before resuming."""
         for class_index, phase in sorted(completed):
             self.settle(class_index, phase)
 
+    def _marker_path(self, class_index, phase):
+        return self.root / f"marker_c{class_index:02d}_{phase}"
+
     def mark(self, class_index, phase):
-        """Record that (class, phase) COMPLETED. Appended, so the file is a log
-        rather than a single value: what resume needs is the last completed
-        phase, and an append cannot lose an earlier one to a partial write."""
-        with open(self.directory / PROGRESS_FILE, 'a') as handle:
-            handle.write(f"{class_index} {phase}\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        """Record that (class, phase) COMPLETED, as ONE EMPTY FILE.
+
+        Not an append log (codex re-review #1, 2026-08-12). A crash or ENOSPC
+        part-way through an append leaves a torn line, and the NEXT append
+        concatenates onto it: "2 plane" followed by "2 plane_h" reads as one
+        nonsense entry that a tolerant parser silently drops. Silently losing a
+        completed phase is the worst failure this layer has, because the resume
+        then re-runs a phase whose inputs the settle already consumed.
+
+        One file per marker makes that impossible BY CONSTRUCTION rather than
+        guarded against: a marker exists or it does not, creation is atomic and
+        durable, and `completed` is a directory scan with nothing to parse.
+        """
+        _atomic_write(self._marker_path(class_index, phase),
+                      lambda handle: None)
 
     def completed(self):
         """The set of (class_index, phase) pairs already finished."""
-        path = self.directory / PROGRESS_FILE
-        if not path.exists():
-            return set()
         done = set()
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            if len(parts) == 2:
-                done.add((int(parts[0]), parts[1]))
+        for path in self.root.glob('marker_c*'):
+            if path.name.endswith('.tmp'):
+                continue
+            _, class_part, phase = path.name.split('_', 2)
+            done.add((int(class_part[1:]), phase))
         return done
 
     def write_manifest(self, manifest):
-        (self.directory / MANIFEST_FILE).write_text(
-            json.dumps(manifest, indent=1, sort_keys=True))
+        stamped = dict(manifest)
+        stamped[STORE_SCHEMA] = STORE_SCHEMA_VERSION
+        payload = json.dumps(stamped, indent=1, sort_keys=True).encode()
+        _atomic_write(self.root / MANIFEST_FILE,
+                      lambda handle: handle.write(payload))
 
     def read_manifest(self):
-        path = self.directory / MANIFEST_FILE
+        """The manifest, or None if this is not one of our stores.
+
+        Checks the OWNERSHIP STAMP, not merely that the JSON parses: a directory
+        holding any parseable manifest.json -- `{}` included -- was previously
+        accepted as a store, and fresh=True would then have destroyed it (codex
+        re-review #4).
+        """
+        path = self.root / MANIFEST_FILE
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text())
+            manifest = json.loads(path.read_text())
         except ValueError:
             return None
+        if not isinstance(manifest, dict):
+            return None
+        if manifest.get(STORE_SCHEMA) != STORE_SCHEMA_VERSION:
+            return None
+        return manifest
 
     def total_bytes(self):
-        return sum(path.stat().st_size
-                   for path in self.directory.glob("*.npy"))
+        """Every byte under the store's subtree, sub-stores included.
 
-    OWNED_SUFFIXES = ('.npy',)
-    OWNED_NAMES = (PROGRESS_FILE, MANIFEST_FILE)
+        rglob, not a top-level glob: the increments and head-increments stores
+        live inside this one, so omitting them under-credited a resuming run for
+        space it already owns (codex re-review #7).
+        """
+        return sum(path.stat().st_size
+                   for path in self.root.rglob('*') if path.is_file())
 
     def destroy(self):
-        """Remove the files this store owns, then the directory if it empties.
+        """Remove the store's own subtree, and nothing else.
 
-        NOT rmtree (2026-08-12, codex review + coordinator): scratch_dir is a
-        caller-supplied path, and a blanket rmtree of it would delete whatever
-        else happens to live there. Only the store's own artifacts go -- field
-        .npy files, per-class ledger npzs, the progress log, the manifest -- and
-        the directory is removed only if that leaves it empty. Anything foreign
-        survives and keeps the directory alive, which is the visible signal that
-        something unexpected was in there.
+        One rmtree of a directory this store created (codex re-review #4). The
+        previous version globbed *.npy and rmtree'd increments/ inside a
+        caller-supplied path, which is enumeration -- and enumeration of "the
+        files we own" in someone else's directory is a losing game whose failure
+        mode is deleting their data. scratch_dir itself is never touched.
         """
         for key in list(self._open):
             self.close(*key)
-        if not self.directory.exists():
-            return
-        for path in list(self.directory.iterdir()):
-            if path.is_dir():
-                # The increments sub-store owns itself; recurse only into ours.
-                if path.name == 'increments' or path.name == 'head_increments':
-                    shutil.rmtree(path, ignore_errors=True)
-                continue
-            owned = (path.suffix in self.OWNED_SUFFIXES
-                     or path.name in self.OWNED_NAMES
-                     or (path.name.startswith('ledger_c')
-                         and path.suffix == '.npz')
-                     or path.name.startswith('settle_'))
-            if owned:
-                path.unlink(missing_ok=True)
-        try:
-            self.directory.rmdir()
-        except OSError:
-            pass        # something foreign is still in there: leave it be
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -672,10 +742,11 @@ def plan_tiling(grids, kernel_shape, budget_bytes=None, device='cpu',
     peak += 3 * _field_bytes(grids, n_classes - 1)
     if horizon >= n_classes:
         # Degenerate plan: nothing streams, but the plumbing still writes the
-        # head's state into a store and composes out of it, so the scratch is
-        # not zero. Accounted rather than special-cased, so the number is never
-        # a confident lie.
-        peak = max(peak, 6 * _field_bytes(grids, n_classes - 1))
+        # head's state into a store and composes out of it. The CONCURRENT peak
+        # is the head's 3 state + 3 deficit fields plus the composition's 3
+        # staged outputs, all live at once -- nine, not the six the first
+        # version floored it at (codex re-review #6).
+        peak = max(peak, 9 * _field_bytes(grids, n_classes - 1))
     return TilePlan(horizon, tiles, halo, peak)
 
 
@@ -839,14 +910,19 @@ def streamed_cascade_loop(
             _crash_hook(index, phase)
 
     def persist(index):
+        # ATOMIC. np.savez straight to the live path left a truncated zip if the
+        # process died mid-write, and a resume that saw the phase marker would
+        # then try to load it (codex re-review #2). Temp file, fsync, replace,
+        # fsync the directory -- so the committed predecessor always survives.
         save_class_ledger(store.directory / f"ledger_c{index:02d}.npz",
                           ledger.classes[index])
+        hook(index, 'persist_mid')
     scale_c = FLUX_SCALE if flux_noise_scale is None else flux_noise_scale
     # The resident head stages its per-class increments the way cascade_loop
     # already does (npy per class), beside the streamed store's own.
     head_increment_dir = None
     if increment_store is not None and horizon > 0:
-        head_increment_dir = Path(scratch_dir) / "head_increments"
+        head_increment_dir = store.root / "head_increments"
         head_increment_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- above the horizon: today's resident loop, unchanged ----------------
@@ -967,13 +1043,14 @@ def streamed_cascade_loop(
                 for name in DEFICIT_FIELDS.values():
                     if not store.exists(index, name):
                         store.create(index, name, world_shape, fill=0.0)
-            # Marker FIRST, then the previous class's fields go. Dropping them
-            # before the marker left a window in which a crash stranded the
-            # resume with neither the source (deleted) nor a marker saying the
-            # regrid had finished (codex review, 2026-08-12).
-            store.mark_atomic(index, 'regrid')
-            for name in carried:
-                store.drop(previous, name)
+            # The previous class's fields are dropped as SETTLE ACTIONS, not by
+            # hand after the marker. Doing it by hand left them undropped forever
+            # if a crash landed in between -- which also broke the planner's
+            # peak-scratch assumption (codex re-review #5). No special cases in
+            # the protocol; that is what makes it a protocol.
+            store.mark_atomic(
+                index, 'regrid',
+                pending_drops=[(previous, name) for name in carried])
         hook(index, 'regrid_done')
 
         per_class_scale = scale_c / n_scale_classes_per_dyad ** (1.0 / FLUX_ALPHA)
@@ -1644,6 +1721,76 @@ def check_scratch_filesystem(directory):
         )
 
 
+def output_bytes(grids, save_for_refinement):
+    """What the finished NetCDF will occupy: h, qt, flux at the finest grid,
+    doubled by save_for_refinement, plus the class-increment pyramid."""
+    field = _field_bytes(grids, len(grids['k']) - 1)
+    needed = 3 * field
+    if save_for_refinement:
+        needed += 3 * field
+        needed += 3 * sum(_field_bytes(grids, index)
+                          for index in range(len(grids['k'])))
+    return needed
+
+
+def check_space(scratch_dir, output_path, scratch_bytes, grids,
+                save_for_refinement, already_owned=0):
+    """One space check for scratch and output TOGETHER when they share a device.
+
+    The default scratch location is beside the output file, so by default they
+    are the same filesystem -- and checking each independently against the same
+    free space passes two demands that cannot both be met (codex re-review #8).
+    The scratch is live until cleanup, which happens AFTER the output is written,
+    so the concurrent peak is their sum.
+    """
+    scratch_dir = Path(scratch_dir)
+    output_parent = Path(output_path).parent
+
+    def probe(path):
+        while not path.exists() and path != path.parent:
+            path = path.parent
+        return path
+
+    scratch_probe, output_probe = probe(scratch_dir), probe(output_parent)
+    scratch_need = max(0, int(scratch_bytes) - int(already_owned))
+    output_need = output_bytes(grids, save_for_refinement)
+
+    same_device = False
+    try:
+        same_device = (os.stat(scratch_probe).st_dev
+                       == os.stat(output_probe).st_dev)
+    except OSError:
+        pass
+
+    if same_device:
+        free = shutil.disk_usage(scratch_probe).free
+        combined = scratch_need + output_need
+        if combined > free:
+            raise OSError(
+                f"scratch and output share a filesystem ({scratch_probe}), and "
+                f"both are live at once -- scratch is not cleaned up until after "
+                f"the file is written. Together they need "
+                f"{combined / 1024**3:.2f} GiB ("
+                f"{scratch_need / 1024**3:.2f} scratch + "
+                f"{output_need / 1024**3:.2f} output) but only "
+                f"{free / 1024**3:.2f} GiB is free. Point scratch_dir= at a "
+                f"different filesystem, or free space.")
+        return
+    check_scratch_space(scratch_dir, scratch_bytes, already_owned=already_owned)
+    _check_output_space(output_path, output_need)
+
+
+def _check_output_space(output_path, needed):
+    destination = Path(output_path).parent
+    free = shutil.disk_usage(destination if destination.exists()
+                             else Path('.')).free
+    if needed > free:
+        raise OSError(
+            f"the output file needs about {needed / 1024**3:.2f} GiB in "
+            f"{destination} but only {free / 1024**3:.2f} GiB is free. "
+            f"Refusing before the cascade rather than after it.")
+
+
 def check_output_space(output_path, grids, save_for_refinement):
     """Refuse up front if the OUTPUT file will not fit where it is going.
 
@@ -1712,6 +1859,15 @@ def build_manifest(grids, plan, seed, fingerprint_inputs):
         np.asarray(grids['ny'], dtype=np.float64),
         np.asarray(grids['nz'], dtype=np.float64),
         np.asarray(grids['dz'], dtype=np.float64),
+        # PHYSICAL geometry, not just the cell counts (codex re-review #3):
+        # nx=2 at dx=25 and nx=2 at dx=24 have identical shapes and different
+        # answers, so a fingerprint over counts alone lets a resume mix them.
+        np.asarray(grids['dx'], dtype=np.float64),
+        np.asarray(grids['dy'], dtype=np.float64),
+        np.asarray(grids['padded_extent_x'], dtype=np.float64),
+        np.asarray(grids['padded_extent_y'], dtype=np.float64),
+        np.asarray(grids['padded_height'], dtype=np.float64),
+        np.asarray(grids['z_min_per_class'], dtype=np.float64),
     ]
     # Every class's z grid and cell heights: a change in the vertical gridding
     # changes every level's answer without touching nx/ny/nz.
@@ -1737,37 +1893,39 @@ def build_manifest(grids, plan, seed, fingerprint_inputs):
 
 
 def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False):
-    """Validate, adopt or clear a scratch directory.
+    """Validate, adopt or clear the scratch STORE inside ``directory``.
 
     Returns (store, completed_phases, adopted_seed). ``adopted_seed`` is not None
     only when an unseeded run is resuming and has taken the seed the earlier
     attempt drew -- see build_manifest.
 
-    Three cases, and the distinction between the last two is the safety
-    property (2026-08-12, codex review):
+    Everything below concerns the store's own subdirectory
+    (``directory/steam-scratch-store``), never ``directory`` itself: with
+    containment, other contents of the scratch directory are simply not our
+    business, so there is nothing to protect them from (codex re-review #4).
 
-    - EMPTY or absent: start fresh, write the manifest.
-    - A STORE (valid manifest) whose fingerprint differs: refuse, offering
-      fresh=True, which discards only the store's own files.
-    - NOT A STORE (non-empty, no valid manifest): refuse ALWAYS, and delete
-      NOTHING. This is the dangerous case -- scratch_dir is a caller-supplied
-      path, and the previous version treated "no manifest" like fresh=True and
-      rmtree'd it, so pointing scratch_dir at any existing directory destroyed
-      it. A corrupt manifest lands here too, which is the right side to fail on.
+    - No store subdirectory, or an empty one: start fresh.
+    - A STORE (manifest present, ownership stamp valid) whose fingerprint
+      differs: refuse, offering fresh=True, which rmtree's only that subtree.
+    - NOT A STORE (subdirectory non-empty, no valid stamped manifest): refuse
+      ALWAYS and delete nothing, fresh=True included. A corrupt or unstamped
+      manifest lands here, which is the right side to fail on.
     """
     directory = Path(directory)
-    store = TileStore(directory)
-    non_empty = directory.exists() and any(directory.iterdir())
-    existing = store.read_manifest()
+    store_root = directory / STORE_DIRNAME
+    pre_existing = store_root.exists() and any(store_root.iterdir())
 
-    if non_empty and existing is None:
+    store = TileStore(directory)
+    existing = store.read_manifest() if pre_existing else None
+
+    if pre_existing and existing is None:
         raise OSError(
-            f"scratch directory {directory} is not empty and is not a STEAM "
-            f"scratch store (no readable manifest.json). Refusing to touch it: "
-            f"this path may hold something else entirely, and a scratch "
-            f"directory is deleted on success. Empty it yourself, or point "
-            f"scratch_dir= somewhere else. (A corrupt manifest reports here "
-            f"too -- if this WAS a store, delete it deliberately.)")
+            f"{store_root} exists and is not a STEAM scratch store (no "
+            f"manifest.json carrying the {STORE_SCHEMA!r} stamp). Refusing to "
+            f"touch it, fresh=True included: a scratch store is deleted on "
+            f"success, and this may be something else entirely -- or one of ours "
+            f"whose manifest was corrupted mid-write, which is equally a reason "
+            f"to stop. Delete it deliberately, or point scratch_dir= elsewhere.")
 
     if existing is not None and not fresh:
         if existing.get('config_sha256') == manifest['config_sha256']:
@@ -1781,13 +1939,13 @@ def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False):
             # means. Adopt it and resume.
             return store, store.completed(), int(existing['seed'])
         raise OSError(
-            f"scratch directory {directory} holds a partial run of a DIFFERENT "
-            f"configuration (manifest {existing.get('config_sha256', '?')[:12]} "
-            f"against {manifest['config_sha256'][:12]}). Refusing to mix them. "
-            f"Pass fresh=True to discard it and start over, or point "
-            f"scratch_dir= somewhere else.")
+            f"{store_root} holds a partial run of a DIFFERENT configuration "
+            f"(manifest {existing.get('config_sha256', '?')[:12]} against "
+            f"{manifest['config_sha256'][:12]}). Refusing to mix them. Pass "
+            f"fresh=True to discard it and start over, or point scratch_dir= "
+            f"somewhere else.")
 
-    if non_empty:
+    if existing is not None:
         store.destroy()                 # a store, and fresh=True was asked for
         store = TileStore(directory)
     store.write_manifest(manifest)

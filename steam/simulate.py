@@ -1100,8 +1100,8 @@ def simulate(
     if stream_to_disk or _force_tiling is not None:
         from .streaming import (
             TileStore, available_memory_budget, build_manifest,
-            check_output_space, check_scratch_filesystem, check_scratch_space,
-            plan_tiling, prepare_scratch)
+            check_scratch_filesystem, check_space, plan_tiling,
+            prepare_scratch)
         budget = (memory_budget if memory_budget is not None
                   else available_memory_budget())
         plan = plan_tiling(grids, unit_turbulon.shape,
@@ -1125,7 +1125,6 @@ def simulate(
             # for the internal hook takes on the checks it skips; a caller
             # setting stream_to_disk=True gets them all.
             check_scratch_filesystem(scratch_root)
-        check_output_space(output_path, grids, save_for_refinement)
         # EVERYTHING that changes the answer. Assembled here rather than inside
         # build_manifest so that an omission is visible at the call site -- the
         # first version silently omitted H_h and lambda, which are module
@@ -1164,9 +1163,12 @@ def simulate(
         manifest = build_manifest(grids, plan, seed, fingerprint)
         store, resume_completed, adopted_seed = prepare_scratch(
             scratch_root, manifest, fresh=fresh, seed_was_none=seed_was_none)
-        # A resuming run already owns the bytes its store occupies.
-        check_scratch_space(scratch_root, plan.peak_scratch_bytes,
-                            already_owned=store.total_bytes())
+        # ONE check for scratch and output together: by default they share a
+        # filesystem, and scratch stays live until after the file is written, so
+        # their peak is concurrent. A resuming run is credited the bytes its
+        # store already occupies.
+        check_space(scratch_root, output_path, plan.peak_scratch_bytes, grids,
+                    save_for_refinement, already_owned=store.total_bytes())
         if adopted_seed is not None and adopted_seed != seed:
             # An unseeded run resuming: the earlier attempt's seed IS what this
             # command means, so take it and re-derive the per-class keys.
@@ -1179,7 +1181,8 @@ def simulate(
             print(f"Resuming streamed run from {scratch_root} "
                   f"({len(resume_completed)} phases already complete)")
         if save_for_refinement:
-            increment_store = TileStore(scratch_root / "increments")
+            increment_store = TileStore(
+                scratch_root, owned_root=store.root / "increments")
     else:
         # The helpful refusal. The planner already knows what the resident run
         # needs; a MemoryError naming the number and the flag is worth more than
@@ -1234,7 +1237,10 @@ def simulate(
                 min_distance_to_ground,
                 sparsity_factors,
                 child_seeds,
-                plan, store.directory,
+                # scratch_dir, NOT store.directory: the driver builds its own
+                # handle on the same owned root, and handing it the root would
+                # nest a second store inside the first.
+                plan, store.scratch_dir,
                 n_scale_classes_per_dyad=n_scale_classes_per_dyad,
                 turbulon_shape=turbulon_shape,
                 device=device,
