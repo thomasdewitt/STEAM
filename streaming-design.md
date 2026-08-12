@@ -397,7 +397,66 @@ the rounding floor, seam-binned difference statistics flat. Plus: tile count
 non-square tiles, domain-edge tiles wrapping the periodic boundary,
 save_for_refinement increments written correctly from streamed mode.
 
-### 4. Streamed composition, diagnostics, output  [delegated, after 3]
+### 4. Streamed composition, diagnostics, output  [IN PROGRESS 2026-08-12]
+
+**Landed: the I/O layout prerequisite, and items 1-3 of 5.**
+
+**Layout (prerequisite, found in review).** The store is now Z-MAJOR, stored as
+(nz, nx, ny) behind an (nx, ny, nz) view. On a C-ordered (nx, ny, nz) field the
+elements of one z-level are nz·4 bytes apart, so reading ONE level touches
+essentially every page; with the field larger than RAM each level re-reads the
+whole field. Measured (`tests/heavy/plane_pass_io.py`, 256³, nz=256, cold):
+
+| pass | (nx,ny,nz) | (nz,nx,ny) |
+|---|---|---|
+| **per-level** | **256.0×** (= nz) | **13.3×** |
+| tile+halo, y=128 | 2.4× | 4.0× |
+| tile+halo, y=64 | 5.5× | 16.0× |
+
+The 13.3× is pessimistic (an artifact of evicting between levels; a real plane
+pass is a sequential scan). Chosen over dual-layout-plus-transpose: one layout,
+no transpose passes, comparable totals. Tile access goes through the RAW buffer
+(`read_window`/`write_window`), not the transposed view — slicing the view is an
+element-by-element gather and cost 8× at toy scale, all of it strided-copy
+overhead. Numerically neutral: floor and seam ratios unchanged to the digit.
+
+Note for anyone measuring this: **/tmp is tmpfs on this box**, and a tmpfs file
+never reaches the block layer, so `read_bytes` sits at zero and the benchmark
+silently reports "1.0×, no problem". The benchmark now refuses to run there.
+
+**Item 1 — the flux finishes inside its class.** The rescale is applied in pass
+3, the true increment formed against the still-live entering buffer, the flux
+deficit accumulated, then the double buffer swapped. `pending_flux_rescale` and
+its end-of-run special case are gone; "the store always holds a fully advanced
+flux" is an invariant.
+
+**Item 2 — deficits** accumulated in the store, regridded with the state,
+allocated lazily at the first class with f != 1. Verified against the resident
+path at the states' own floor (2.4e-06 / 5.2e-07 / 3.2e-07) across every horizon
+and tiling.
+
+**Item 3 — increments** recorded per class into a second store and tested;
+writing them into the output file's `class_increments` group waits on the
+hyperslab writer below.
+
+**Bug worth recording, caught by the deficit comparison and located in the
+RESIDENT HEAD, not the tiles:** the head's `cascade_loop` was called without
+`comp_k`, so it computed the default from the finest class of the grids it was
+handed — compensating its classes as though the cascade stopped at the horizon.
+The states matched perfectly while the deficits were 11% out. An independent
+quantity is the only thing that could have shown this.
+
+**STILL TO DO (items 3-remainder, 4, 5):** the composition itself
+(`_compose_output`'s projection per plane, `_compose_flux_output`'s
+measure/apply), diagnostics, NetCDF hyperslab writing, `class_increments`
+wiring, and the end-to-end gate on the written file including
+refine-from-a-streamed-parent. The pieces below the store are in place: the
+plane-major layout makes the per-level projection cheap, the ledger already has
+`ProjectionLedger` / `FluxOutputLedger` slots from component 2, and the
+increments and deficits are recorded and verified.
+
+The original component description follows.
+
 
 _compose_output (deficit add + final per-level projection), the saturation
 adjustment / hydrostatic column solve (column-local), and NetCDF writing
