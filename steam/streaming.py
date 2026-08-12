@@ -146,8 +146,13 @@ def _interpolate_slab(slab, out_shape):
     return np.ascontiguousarray(out, dtype=np.float32)
 
 
-def regrid_window(source, target_shape, window, scale=None):
+def regrid_window(read_slab, source_shape, target_shape, window, scale=None):
     """Target cells ``window`` of ``zoom_trilinear(source, target_shape)``.
+
+    ``read_slab(x_lo, x_hi, y_lo, y_hi)`` returns that (wrapped) slab of the
+    source as a resident (nx, ny, nz) array -- a callable rather than an array
+    because the source lives in the store's z-major layout, and only the store
+    should know that.
 
     ``window`` is (x_lo, x_hi, y_lo, y_hi) in target cells; z is never tiled, so
     the whole z extent comes through and its non-periodic (clamped) end
@@ -159,13 +164,13 @@ def regrid_window(source, target_shape, window, scale=None):
     doing it in this order is what keeps the two paths in step.
     """
     x_lo, x_hi, y_lo, y_hi = window
-    nx_in, ny_in, nz_in = source.shape
+    nx_in, ny_in, nz_in = source_shape
     nx_out, ny_out, nz_out = target_shape
 
     src_x_lo, src_x_hi, crop_x, out_x = _axis_regrid_plan(nx_in, nx_out, x_lo, x_hi)
     src_y_lo, src_y_hi, crop_y, out_y = _axis_regrid_plan(ny_in, ny_out, y_lo, y_hi)
 
-    slab = _read_wrapped(source, src_x_lo, src_x_hi, src_y_lo, src_y_hi)
+    slab = read_slab(src_x_lo, src_x_hi, src_y_lo, src_y_hi)
     if scale is not None:
         slab = slab * np.float32(scale)
     resampled = _interpolate_slab(slab, (out_x, out_y, nz_out))
@@ -213,6 +218,27 @@ class TileStore:
     are flushed per tile rather than left to accumulate as dirty pages, which is
     what keeps a streamed class from quietly turning into a memory-resident one.
 
+    STORED Z-MAJOR, as (nz, nx, ny), while every caller sees the cascade's usual
+    (nx, ny, nz) through a transposed view. The reason is I/O amplification on
+    the per-level passes -- the bounded add's plane pass, and component 4's
+    projection and composition. On a C-ordered (nx, ny, nz) field the elements
+    of one z-level are nz * 4 bytes apart, so a 4 KiB page holds a handful of
+    them and reading ONE level touches essentially every page of the file; with
+    the field larger than RAM, as it is whenever streaming is worth doing, each
+    level then re-reads the whole field from disk. Measured on a 256^3 field at
+    nz = 256 with the cache cold (tests/heavy/plane_pass_io.py):
+
+        per-level pass, (nx, ny, nz):   256.0x amplification   <- exactly nz
+        per-level pass, (nz, nx, ny):    13.3x
+
+    and the 13.3x is itself pessimistic, an artifact of evicting between levels:
+    a real plane pass walks the file sequentially, which is the one pattern
+    readahead is built for. Z-major costs the tile reads a factor of ~2 at
+    moderate tile widths (4.0x against 2.4x at 128 cells) and nothing at
+    production widths, where a row-run is a page or more. That is the trade, and
+    it is the right way round: per-level passes outnumber tile passes once the
+    composition lands, and 256x is not a constant factor.
+
     Kept on failure, deleted on success: a crashed run's scratch is the only
     thing that makes it resumable, and the progress marker below is what a
     resume would read. (Resume itself is component 5's lifecycle work; the
@@ -222,22 +248,30 @@ class TileStore:
     def __init__(self, directory):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._open = {}
+        self._open = {}          # logical (nx, ny, nz) views
+        self._raw = {}           # the (nz, nx, ny) buffers they are views of
 
     def _path(self, class_index, name):
         return self.directory / f"c{class_index:02d}_{name}.npy"
 
     def create(self, class_index, name, shape, fill=None):
-        """Allocate a field on disk. ``fill`` writes a constant (the flux enters
-        the cascade at one; the perturbations at zero)."""
+        """Allocate a field on disk, given its LOGICAL (nx, ny, nz) shape.
+
+        Stored as (nz, nx, ny); the returned array is the (nx, ny, nz) view, so
+        callers never see the layout. ``fill`` writes a constant (the flux
+        enters the cascade at one; the perturbations at zero).
+        """
+        nx, ny, nz = (int(n) for n in shape)
         path = self._path(class_index, name)
-        array = np.lib.format.open_memmap(
-            path, mode='w+', dtype=np.float32, shape=tuple(int(n) for n in shape))
+        raw = np.lib.format.open_memmap(
+            path, mode='w+', dtype=np.float32, shape=(nz, nx, ny))
         if fill is not None:
-            array[...] = np.float32(fill)
-            array.flush()
-        self._open[(class_index, name)] = array
-        return array
+            raw[...] = np.float32(fill)
+            raw.flush()
+        self._raw[(class_index, name)] = raw
+        view = raw.transpose(1, 2, 0)
+        self._open[(class_index, name)] = view
+        return view
 
     def open(self, class_index, name):
         """The single memory map of one field.
@@ -251,17 +285,56 @@ class TileStore:
         key = (class_index, name)
         if key in self._open:
             return self._open[key]
-        array = np.load(self._path(class_index, name), mmap_mode='r+')
-        self._open[key] = array
-        return array
+        raw = np.load(self._path(class_index, name), mmap_mode='r+')
+        self._raw[key] = raw
+        view = raw.transpose(1, 2, 0)
+        self._open[key] = view
+        return view
+
+    def read_window(self, class_index, name, x_lo, x_hi, y_lo, y_hi):
+        """A tile plus halo as a contiguous (nx, ny, nz) array, x/y wrapped.
+
+        Reads through the RAW (nz, nx, ny) buffer, where the innermost axis is
+        y: a window is then one contiguous run per (level, x) rather than the
+        element-by-element gather that slicing the transposed view would be.
+        Measured at toy scale, going through the view instead cost 8x on the
+        tile passes -- all of it strided-copy overhead, none of it I/O.
+        """
+        raw = self.plane_array(class_index, name)
+        nx, ny = raw.shape[1], raw.shape[2]
+        x_runs = _runs(np.arange(x_lo, x_hi) % nx)
+        y_runs = _runs(np.arange(y_lo, y_hi) % ny)
+        columns = np.concatenate(
+            [np.concatenate([raw[:, x_start:x_stop, y_start:y_stop]
+                             for y_start, y_stop in y_runs], axis=2)
+             for x_start, x_stop in x_runs], axis=1)
+        return np.ascontiguousarray(columns.transpose(1, 2, 0))
+
+    def write_window(self, class_index, name, x_lo, x_hi, y_lo, y_hi, data):
+        """Write an (nx, ny, nz) tile back. No wrap: a tile's OWN region never
+        crosses the domain edge (only its halo does, and halos are discarded)."""
+        raw = self.plane_array(class_index, name)
+        raw[:, x_lo:x_hi, y_lo:y_hi] = data.transpose(2, 0, 1)
+
+    def plane_array(self, class_index, name):
+        """The raw (nz, nx, ny) array, whose ``[level]`` is ONE CONTIGUOUS plane.
+
+        This is the whole point of the z-major layout: a per-level pass reads
+        and writes nx*ny contiguous bytes per level instead of touching every
+        page of the field. Use it for anything that iterates over z; use
+        ``open`` for anything that works in tiles.
+        """
+        self.open(class_index, name)
+        return self._raw[(class_index, name)]
 
     def exists(self, class_index, name):
         return self._path(class_index, name).exists()
 
     def close(self, class_index, name):
-        array = self._open.pop((class_index, name), None)
-        if array is not None and hasattr(array, 'flush'):
-            array.flush()
+        self._open.pop((class_index, name), None)
+        raw = self._raw.pop((class_index, name), None)
+        if raw is not None and hasattr(raw, 'flush'):
+            raw.flush()
 
     def drop(self, class_index, name):
         """Delete a field once nothing will read it again -- what keeps peak
@@ -605,19 +678,32 @@ def streamed_cascade_loop(
               f'grid=({nx_k:4d},{ny_k:4d},{nz_k:4d}) '
               f'{tiles_x}x{tiles_y} tiles  regrid...', end='\r')
         for name in STATE_FIELDS:
-            source = store.open(previous, name)
-            target = store.create(index, name, world_shape)
+            source_shape = store.open(previous, name).shape
+            store.create(index, name, world_shape)
             scale = pending_flux_rescale if name == 'flux' else None
-            if source.shape == world_shape and scale is None:
-                target[...] = source
-            elif source.shape == world_shape:
-                target[...] = source * np.float32(scale)
+
+            def read_slab(x_lo, x_hi, y_lo, y_hi, _name=name):
+                return store.read_window(previous, _name, x_lo, x_hi,
+                                         y_lo, y_hi)
+
+            if source_shape == world_shape:
+                # Same grid (the first streamed class after a resident head):
+                # nothing to resample, so copy plane by plane.
+                source_planes = store.plane_array(previous, name)
+                target_planes = store.plane_array(index, name)
+                for level in range(nz_k):
+                    if scale is None:
+                        target_planes[level] = source_planes[level]
+                    else:
+                        target_planes[level] = (source_planes[level]
+                                                * np.float32(scale))
             else:
                 for x_lo, x_hi, y_lo, y_hi in windows:
-                    target[x_lo:x_hi, y_lo:y_hi] = regrid_window(
-                        source, world_shape, (x_lo, x_hi, y_lo, y_hi),
-                        scale=scale)
-            target.flush()
+                    store.write_window(
+                        index, name, x_lo, x_hi, y_lo, y_hi,
+                        regrid_window(read_slab, source_shape, world_shape,
+                                      (x_lo, x_hi, y_lo, y_hi), scale=scale))
+            store.plane_array(index, name).flush()
             store.close(index, name)
         for name in STATE_FIELDS:
             store.drop(previous, name)
@@ -631,9 +717,8 @@ def streamed_cascade_loop(
         def read_tile(name, window):
             """Tile plus halo, wrapped at the periodic domain edges."""
             x_lo, x_hi, y_lo, y_hi = window
-            return _read_wrapped(store.open(index, name),
-                                 x_lo - halo_x, x_hi + halo_x,
-                                 y_lo - halo_y, y_hi + halo_y)
+            return store.read_window(index, name, x_lo - halo_x, x_hi + halo_x,
+                                     y_lo - halo_y, y_hi + halo_y)
 
         def inner_of(window):
             x_lo, x_hi, y_lo, y_hi = window
@@ -748,7 +833,8 @@ def streamed_cascade_loop(
             flux_inner = flux_tile[inner]
             realized = realized + MeanReduction(
                 flux_inner.sum(dtype=np.float64), flux_inner.size)
-            flux_next[x_lo:x_hi, y_lo:y_hi] = flux_inner
+            store.write_window(index, 'flux_next', x_lo, x_hi,
+                               y_lo, y_hi, flux_inner)
             del flux_tile
 
             for (name, state_name, increment_name, mean_1d, C_k_i, b_i,
@@ -765,15 +851,15 @@ def streamed_cascade_loop(
                 W *= C_k_i
                 candidate = CONVOLVE(W, kernel, device=device)
                 del W, state, running_sum
-                target = store.open(index, increment_name)
-                target[x_lo:x_hi, y_lo:y_hi] = candidate[inner]
+                store.write_window(index, increment_name, x_lo, x_hi,
+                                   y_lo, y_hi, candidate[inner])
                 del candidate
             del S_k
-        flux_next.flush()
+        store.plane_array(index, 'flux_next').flush()
         store.drop(index, 'flux')
         store.rename(index, 'flux_next', 'flux')
         for name in CANDIDATE_FIELDS:
-            store.open(index, name).flush()
+            store.plane_array(index, name).flush()
 
         class_ledger.flux = FluxAdvanceLedger(entering, noise_abs, realized,
                                               n_clipped)
@@ -793,8 +879,8 @@ def streamed_cascade_loop(
               f'{tiles_x}x{tiles_y} tiles  planes... ', end='\r')
         for (name, state_name, increment_name, mean_1d, _, _, phi_min,
              phi_max) in scalars:
-            state_store = store.open(index, state_name)
-            candidate_store = store.open(index, increment_name)
+            state_planes = store.plane_array(index, state_name)
+            candidate_planes = store.plane_array(index, increment_name)
             solve = BoundedAddLedger(nz_k)
             for level in range(nz_k):
                 # The domain of a streamed run is the world, so an assembled
@@ -802,21 +888,21 @@ def streamed_cascade_loop(
                 # level -- same shape, same window (none), same solve. The
                 # levels are independent, so running them one at a time is the
                 # identical arithmetic rather than an approximation of it.
-                plane_state = np.ascontiguousarray(
-                    state_store[:, :, level:level + 1])
-                plane_candidate = np.ascontiguousarray(
-                    candidate_store[:, :, level:level + 1])
+                plane_state = np.array(
+                    state_planes[level], dtype=np.float32)[:, :, None]
+                plane_candidate = np.array(
+                    candidate_planes[level], dtype=np.float32)[:, :, None]
                 level_solve = _bounded_amplitude_add(
                     plane_state, mean_1d[level:level + 1], plane_candidate,
                     phi_min, phi_max, window=None, device=device,
                     record_applied=True)
-                state_store[:, :, level] = plane_state[:, :, 0]
+                state_planes[level] = plane_state[:, :, 0]
                 for field in ('a0', 'n_loop', 'n_scale', 'final_demean', 'mu'):
                     getattr(solve, field)[level] = getattr(level_solve, field)[0]
                 solve.demean[level] = level_solve.demean[0]
                 solve.scale[level] = level_solve.scale[0]
             class_ledger.bounded_add[name] = solve
-            state_store.flush()
+            store.plane_array(index, state_name).flush()
             store.drop(index, increment_name)
         store.mark(index, 'planes')
         print(f'Streamed {index + 1:3d}/{n_classes:3d}: '
@@ -829,7 +915,7 @@ def streamed_cascade_loop(
         for x_lo, x_hi, y_lo, y_hi in windows:
             flux_store[x_lo:x_hi, y_lo:y_hi] *= np.float32(
                 pending_flux_rescale)
-        flux_store.flush()
+        store.plane_array(n_classes - 1, 'flux').flush()
 
     final = n_classes - 1
     final_grid_info = {

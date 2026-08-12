@@ -159,10 +159,16 @@ def test_tiled_regrid_reproduces_the_full_resample(source_shape, target_shape,
     source = np.random.default_rng(0).normal(
         0, 1, source_shape).astype(np.float32)
     full = zoom_trilinear(source, target_shape)
+
+    def read_slab(x_lo, x_hi, y_lo, y_hi):
+        index_x = np.arange(x_lo, x_hi) % source.shape[0]
+        index_y = np.arange(y_lo, y_hi) % source.shape[1]
+        return source[np.ix_(index_x, index_y)]
+
     tiled = np.zeros_like(full)
     for window in tile_windows(target_shape[0], target_shape[1], *tiles):
         tiled[window[0]:window[1], window[2]:window[3]] = regrid_window(
-            source, target_shape, window)
+            read_slab, source.shape, target_shape, window)
     if exact:
         np.testing.assert_array_equal(tiled, full)
     else:
@@ -177,7 +183,14 @@ def test_regrid_window_applies_its_scale_before_interpolating():
     order that matches the resident path."""
     source = np.random.default_rng(1).normal(0, 1, (8, 8, 6)).astype(np.float32)
     window = (0, 16, 0, 16)
-    scaled = regrid_window(source, (16, 16, 10), window, scale=0.75)
+
+    def read_slab(x_lo, x_hi, y_lo, y_hi):
+        index_x = np.arange(x_lo, x_hi) % source.shape[0]
+        index_y = np.arange(y_lo, y_hi) % source.shape[1]
+        return source[np.ix_(index_x, index_y)]
+
+    scaled = regrid_window(read_slab, source.shape, (16, 16, 10), window,
+                           scale=0.75)
     expected = zoom_trilinear(source * np.float32(0.75), (16, 16, 10))
     np.testing.assert_array_equal(scaled, expected)
 
