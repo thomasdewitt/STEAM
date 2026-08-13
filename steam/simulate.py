@@ -631,6 +631,81 @@ def _f32_ulp(value):
     return float(np.spacing(np.float32(abs(value))))
 
 
+def check_regrid_ladder(grids, domain_x, outer_scale,
+                        n_scale_classes_per_dyad, sparsity_factors):
+    """Warn if the class-to-class regrid will pay for a wrapped pad.
+
+    The periodic resample between size classes pads the source with wrapped data
+    and crops the margin afterwards (utils._wrap_plan), and that pad is ONE
+    source cell only when each class's grid count is an exact multiple of the
+    previous one. It is exact when
+
+        2 * s * domain / outer_scale
+
+    is a dyadic rational, because the count at class i is
+    round(2 * s * domain / k_i) with k_i = outer_scale / 2**i -- a dyadic ratio
+    makes that an exact doubling, and anything else makes `round` drift so that
+    consecutive counts share little or no common factor. At worst they are
+    coprime and the working array is ~9x the target.
+
+    Why warn here rather than leave it to _wrap_plan: that guard fires only once
+    a target exceeds VOLUME_GUARD_CELLS, so a ladder can pay silently for ten
+    classes and then REFUSE at the eleventh -- which is what happened on
+    2026-08-13 with domain/outer_scale = 0.1 (204.8 km against 2048 km), where
+    nine of thirteen hops carried a 9x pad and only the first one big enough to
+    trip the guard was ever reported. Predicting it costs microseconds.
+
+    The test mirrors _wrap_plan's own, deliberately: factor AND absolute size.
+    A 1-cell axis regridding to 1 cell has factor 9 (1 + 2*1 per axis, twice)
+    and costs nothing, so factor alone cries wolf at every coarse clamped class.
+    """
+    import warnings
+    from .utils import VOLUME_GUARD_CELLS, wrap_pad_factor
+
+    n_classes = len(grids['k'])
+    doomed = []                 # hops _wrap_plan would actually refuse
+    worst_extra = (0, None)     # largest real overhead, in cells
+    for index in range(1, n_classes):
+        source = (int(grids['nx'][index - 1]), int(grids['ny'][index - 1]),
+                  int(grids['nz'][index - 1]))
+        target = (int(grids['nx'][index]), int(grids['ny'][index]),
+                  int(grids['nz'][index]))
+        volume = target[0] * target[1] * target[2]
+        factor = wrap_pad_factor(source, target)
+        extra = int(volume * (factor - 1.0))
+        if extra > worst_extra[0]:
+            worst_extra = (extra, (index - 1, index, source, target, factor))
+        if volume > VOLUME_GUARD_CELLS and factor > 1.25:
+            doomed.append((index - 1, index, source, target, factor, volume))
+
+    if not doomed:
+        return worst_extra
+
+    first, second, source, target, factor, volume = doomed[0]
+    ratio = outer_scale / domain_x if domain_x else 0.0
+    exponent = int(round(np.log2(ratio))) if ratio > 0 else 0
+    extra = ""
+    if n_scale_classes_per_dyad > 1:
+        extra = (f" n_scale_classes_per_dyad={n_scale_classes_per_dyad} also "
+                 f"contributes: a non-dyadic class LADDER cannot give exact "
+                 f"doublings at all.")
+    warnings.warn(
+        f"this configuration WILL FAIL mid-cascade at class {first}->{second}: "
+        f"the periodic regrid from {source} to {target} needs "
+        f"{factor:.2f}x the target volume in wrapped padding, and the target "
+        f"({volume / 1e6:.1f} M cells) is past the resample's volume guard. "
+        f"{len(doomed)} hop(s) affected. "
+        f"Cause: domain / outer_scale = {domain_x / outer_scale:.6g} is not a "
+        f"power of two, so the per-class cell counts do not double exactly and "
+        f"consecutive grids share little common factor. The class LADDER is "
+        f"fine -- it is the grid counts that drift.{extra} "
+        f"To fix, make the ratio a power of two: domain = "
+        f"{outer_scale / 2 ** exponent / 1000:.6g} km at this outer_scale, or "
+        f"outer_scale = {domain_x * 2 ** exponent / 1000:.6g} km at this domain.",
+        RuntimeWarning, stacklevel=3)
+    return worst_extra
+
+
 def _report_scratch_on_failure(store, resumable, remove_wrapper):
     """Retain-and-say-so, or delete-and-say-so, depending on `resumable`.
 
@@ -1024,6 +1099,11 @@ def simulate(
         spheroscale_profile, z_profile,
         anisotropy=anisotropy,
     )
+
+    # Before any cascade work: does the regrid ladder pay for wrapped padding?
+    # Cheap to answer, and the alternative is discovering it ten classes in.
+    check_regrid_ladder(grids, domain_x, outer_scale, n_scale_classes_per_dyad,
+                        sparsity_factors)
 
     # Local vertical outer scale k_z,L(z) from the local spheroscale, so the
     # normalization response (a vertical-gradient measure of the mean profile

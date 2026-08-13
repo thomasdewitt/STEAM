@@ -541,3 +541,24 @@ def zoom_bilinear(field, target_shape, periodic=(True, True)):
     and periodic on both axes by default for the same reason.
     """
     return _zoom(field, target_shape, periodic, "bilinear")
+
+
+def wrap_pad_factor(source_shape, target_shape, periodic=(True, True, False)):
+    """How much larger than the target a periodic resample's working array is.
+
+    The same arithmetic as _wrap_plan, without the guard: 1.0 means the wrapped
+    pad costs nothing (the grid ratio is an integer on every periodic axis), and
+    larger values are the multiple of the target volume the resample must
+    allocate. _wrap_plan REFUSES above 1.25x once the target passes
+    VOLUME_GUARD_CELLS, so this is what predicts that refusal before any work is
+    done -- see check_regrid_ladder.
+    """
+    padded = 1
+    target = 1
+    for n_in, n_out, per in zip(source_shape, target_shape, periodic):
+        target *= n_out
+        if not per or n_out < n_in:
+            padded *= n_out
+            continue
+        padded *= n_out + 2 * (n_out // gcd(n_in, n_out))
+    return padded / target if target else 1.0

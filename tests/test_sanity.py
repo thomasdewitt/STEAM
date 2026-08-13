@@ -1,5 +1,7 @@
 """Sanity check tests for STEAM."""
 
+import warnings
+
 import numpy as np
 import pytest
 import netCDF4
@@ -11,6 +13,7 @@ from steam.simulate import (
     _compute_all_grids,
     _turbulon_envelope,
     _keyed_sparse_levy,
+    check_regrid_ladder,
     NoiseRegion,
     _gradient_components,
 )
@@ -731,3 +734,110 @@ def test_compute_diagnostics_cuda_chunking_matches(tmp_path, simple_profiles):
             ds1.variables[name][:], ds2.variables[name][:],
             err_msg=f"{name} differs between chunk sizes on cuda")
     ds1.close(); ds2.close()
+
+
+# ---------------------------------------------------------------------------
+# The regrid ladder's wrapped-pad cost, checked before any cascade work
+# ---------------------------------------------------------------------------
+
+def _ladder_grids(domain_km, outer_km, n_per_dyad=1, dx=100.0,
+                  domain_height=20000.0, spheroscale=10.0):
+    outer = outer_km * 1e3
+    z = np.arange(400) * 50.0
+    profile = np.full(z.size, spheroscale)
+    gap = 2.0 ** (1.0 / n_per_dyad)
+    n = int(round(np.log(outer / (2 * dx)) / np.log(gap))) + 1
+    k = outer / gap ** np.arange(n)
+    grids = _compute_all_grids(k, domain_km * 1e3, domain_km * 1e3,
+                               domain_height, (1, 1, 1), profile, z)
+    return grids, domain_km * 1e3, outer
+
+
+def test_regrid_ladder_warns_on_a_non_dyadic_domain_ratio():
+    """Thomas's 2026-08-13 configuration, reproduced exactly.
+
+    domain 204.8 km against outer_scale 2048 km -- ratio 0.1, not a power of
+    two -- so round(2*domain/k_i) drifts and consecutive grid counts share
+    little common factor: 51 -> 102 -> 205, where gcd(102, 205) = 1 and the
+    wrapped pad is 9x the target volume. NINE of the thirteen hops carried that
+    pad; the run only FAILED at the first hop whose target passed the resample's
+    volume guard, ten classes in. This warning predicts that in microseconds.
+
+    The class LADDER is dyadic here (k halves exactly at every step), which is
+    why the resample's own error message -- "use a dyadic class ladder" -- points
+    at the wrong knob for this configuration.
+    """
+    grids, domain, outer = _ladder_grids(204.8, 2048)
+    with pytest.warns(RuntimeWarning, match="WILL FAIL mid-cascade") as caught:
+        check_regrid_ladder(grids, domain, outer, 1, (1, 1, 1))
+    message = str(caught[0].message)
+    # It must name the offending hop and the actual cause, not just complain.
+    assert "(102, 102, 144)" in message and "(205, 205, 211)" in message
+    assert "9.00x" in message
+    assert "not a power of two" in message
+    assert "class LADDER is fine" in message
+    # And it must say what to change, in the units the caller thinks in.
+    assert "256 km" in message or "1638.4 km" in message
+
+
+@pytest.mark.parametrize("domain_km,outer_km", [
+    (256, 2048),        # 1/8
+    (128, 2048),        # 1/16
+    (512, 2048),        # 1/4
+    (64, 2048),         # 1/32
+    (204.8, 1638.4),    # his domain, outer moved to make the ratio 1/8
+])
+def test_a_power_of_two_ratio_is_silent(domain_km, outer_km):
+    """The fix, verified: every hop's pad is one source cell, so no warning."""
+    grids, domain, outer = _ladder_grids(domain_km, outer_km)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        check_regrid_ladder(grids, domain, outer, 1, (1, 1, 1))
+
+
+def test_the_check_does_not_cry_wolf_on_clamped_coarse_classes():
+    """A 1-cell axis regridding to 1 cell has a pad FACTOR of 9 -- 1 + 2*1 per
+    axis, twice -- and costs nothing at all. The test therefore mirrors
+    _wrap_plan's own: factor AND absolute size. Factor alone would warn on
+    essentially every configuration, which is worse than not warning."""
+    from steam.utils import wrap_pad_factor
+
+    assert wrap_pad_factor((1, 1, 5), (1, 1, 7)) == pytest.approx(9.0)
+    # ... but a tiny target must not warn.
+    grids, domain, outer = _ladder_grids(256, 2048)
+    assert int(grids['nx'][0]) == 1          # the clamped coarse class exists
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        check_regrid_ladder(grids, domain, outer, 1, (1, 1, 1))
+
+
+def test_wrap_pad_factor_scales_with_the_grid_not_just_the_ratio():
+    """An exact doubling still pads TWO target cells per side, so its factor is
+    ((n + 4) / n)**2 -- 1.56 on a 16-cell axis and 1.004 at 2048. The overhead of
+    a well-behaved ladder is therefore negligible exactly where it would matter
+    (large grids) and irrelevant where it is large (small ones), which is why the
+    check has to weigh factor against absolute size rather than either alone."""
+    from steam.utils import wrap_pad_factor
+
+    small = wrap_pad_factor((8, 8, 6), (16, 16, 10))
+    large = wrap_pad_factor((1024, 1024, 100), (2048, 2048, 144))
+    assert small == pytest.approx((20 / 16) ** 2)      # 1.5625
+    assert large == pytest.approx((2052 / 2048) ** 2)  # 1.0039
+    assert large < 1.01
+
+    # Coprime counts on both periodic axes: the 9x case that actually bites.
+    assert wrap_pad_factor((102, 102, 144), (205, 205, 211)) > 8.9
+
+
+def test_a_toy_simulation_emits_no_regrid_warning(tmp_path):
+    """The configurations the rest of this suite uses must stay silent, or the
+    warning is noise and will be ignored when it matters."""
+    z = np.arange(28) * 30.0
+    h = 340e3 - 20e3 * (z / z.max())
+    qt = 0.018 - 0.016 * (z / z.max())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        simulate(h, qt, nx=16, ny=16, dx=125.0, dy=125.0,
+                 outer_scale=2000.0, spheroscale=100.0,
+                 domain_height=800.0, profile_dz=30.0,
+                 output_path=tmp_path / "quiet.nc", seed=1)
