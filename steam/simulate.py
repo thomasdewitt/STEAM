@@ -669,7 +669,7 @@ def simulate(
     h_max=355 * 1004,
     qt_min=0.0,
     qt_max=30 / 1000,
-    min_distance_to_ground=1,
+    min_distance_to_ground=0,
     turbulon_shape='mexican_hat',
     anisotropy='piecewise_isotropic_below_spheroscale',
     compress=None,
@@ -743,7 +743,9 @@ def simulate(
         water mixing ratio [kg/kg].
     min_distance_to_ground : int
         Turbulon centers are not placed within min_distance_to_ground × k_z
-        of the ground. Must be a non-negative integer.
+        of the ground or the domain top. Must be a non-negative integer.
+        Default 0: centers may sit anywhere on the grid, and boundary
+        turbulons are cut off by the vertical zero padding.
     compress : bool or None
         If True, 3D data variables in the output NetCDF are written with the
         ``steam.constants.output_compression`` filter. None (default) uses the
