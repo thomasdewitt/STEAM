@@ -744,7 +744,7 @@ def simulate(
     h_max=355 * 1004,
     qt_min=0.0,
     qt_max=30 / 1000,
-    min_distance_to_ground=0,
+    min_distance_to_ground=1,
     turbulon_shape='mexican_hat',
     anisotropy='piecewise_isotropic_below_spheroscale',
     compress=None,
