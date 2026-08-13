@@ -222,11 +222,11 @@ surface or of the domain top, corresponding to approximately $m\, \ell_z(\ell)$ 
 defined in Table \ref{tab:steam inputs}. At the default $m = 0$ no centers are
 excluded, and turbulons centered at the boundary cells are cut off by the
 vertical zero padding. The L\'evy noise is scaled by
-$c_\mathcal{F} = c\, n_c^{-1/\alpha}$ and shifted by the deterministic
-constant $c_\mathcal{F}^\alpha/(\alpha-1)$, which enforces $\langle
+$\varpi\, n_c^{-1/\alpha}$ and shifted by the deterministic
+constant $\varpi^\alpha/(n_c(\alpha-1))$, which enforces $\langle
 e^\gamma \rangle = 1$ exactly. This can be seen by writing $\gamma_0$ for the unscaled
-draw, $\ln\langle e^{c_\mathcal{F}\gamma_0} \rangle =
-c_\mathcal{F}^\alpha/(\alpha-1)$ in closed form, the $\alpha$-stable
+draw, $\ln\langle \exp(\varpi\, n_c^{-1/\alpha}\gamma_0) \rangle =
+\varpi^\alpha/(n_c(\alpha-1))$ in closed form, the $\alpha$-stable
 generalization of the lognormal $-\sigma^2/2$. The expectation is
 finite because $\beta = -1$ places the heavy tail on the side the
 exponential suppresses. 
@@ -328,7 +328,7 @@ the fields use the \verb|blosc-zstd filter| (byte-shuffled, compression level
 inputs are stored alongside the outputs and scalar attributes record the full configuration:
 grid dimensions and spacings, outer scale, domain height, bounds,
 sparsity factors, cascade density, surface pressure, random seed,
-$H_h$, $H_z$, $\vartheta$, the flux parameters $c$ and $\alpha$, and
+$H_h$, $H_z$, $\vartheta$, the flux parameters $\varpi$ and $\alpha$, and
 the envelope and anisotropy options. 
 
 If nested simulations are to be performed, the flag \texttt{save\_for\_refinement} is required, which additionally stores the cascade states and per-class increments: \texttt{h\_perturbation}, \texttt{qt\_perturbation}, \texttt{flux\_state}, and \texttt{class\_increments}. This allows nested simulations to continue the cascade without reading the final compensated fields. Compensation is only done at final output resolution and not mid-cascade.
@@ -520,7 +520,7 @@ with turbulons isotropic below it
 (\texttt{piecewise\_isotropic\_below\_spheroscale}); the Hurst
 exponents, $\vartheta$, the turbulon envelope, the cascade density, and
 the flux noise parameters $\alpha$ and $\beta$ are those of
-Sect.~\ref{ssect:steam algorithm spec}. The two values $c = 0.05$ and $c = 0.17$ are used for the flux noise amplitude throughout the comparison. The simulated depth is 20~km and
+Sect.~\ref{ssect:steam algorithm spec}. The three values $\varpi \in \{0.02, 0.05, 0.17\}$ are used for the flux noise amplitude throughout the comparison. The simulated depth is 20~km and
 the input profiles are sampled at 50~m. The run sets are listed in
 Table~\ref{tab:steam runs}.
 
@@ -531,27 +531,21 @@ Table~\ref{tab:steam runs}.
 \hline
 Set & Grid & $\Delta x$ & Extent & $L$ & Runs \\
 \hline
-Channel-matched & $1024\times 64$ & 6~km & $6144\times 384$~km$^2$ & 1536~km & 9 hosts $\times$ 2 amplitudes \\
-LES-matched & $1024^2$ & 200~m & $204.8\times 204.8$~km$^2$ & 102.4~km & 2 hosts $\times$ 2 amplitudes \\
-Square ensemble & $2048^2$ & 1~km & $2048\times 2048$~km$^2$ & 1024~km & 10 members $\times$ 2 amplitudes \\
+Channel-matched & $1024\times 64$ & 6~km & $6144\times 384$~km$^2$ & 384 or 6144~km & 9 hosts $\times$ 3 amplitudes $\times$ 2 outer scales \\
+LES-matched & $1024^2$ & 200~m & $204.8\times 204.8$~km$^2$ & 204.8~km & 2 hosts $\times$ 3 amplitudes $\times$ 5 members \\
+Square ensemble & $2048^2$ & 1~km & $2048\times 2048$~km$^2$ & 2048~km & 10 members $\times$ 3 amplitudes \\
 \quad nest A & $512^2$ & 62.5~m & $32\times 32$~km$^2$, full depth & --- & one per member \\
 \quad nest B & $1024^2$ & 7.8125~m & $8\times 8$~km$^2$, $z = 1$--5~km & --- & one per member \\
-Visualization & $2048\times 1024$ & 20~m & $40.96\times 20.48$~km$^2$ & 40.96~km & 3 amplitudes \\
-\quad nest & $512^2$ & 5~m & $2.56\times 2.56$~km$^2$, full depth & --- & one per amplitude \\
+Visualization & $2048\times 1024$ & 10~m & $20.48\times 10.24$~km$^2$ & 20.48~km & 3 amplitudes $\times$ 3 spheroscales \\
+\quad nest & $512\times 1024$ & 2.5~m & $1.28\times 2.56$~km$^2$, full depth & --- & one per run \\
 \hline
 \end{tabular}
 \caption{STEAM run sets of the comparison analysis. Nests continue
 their parent's cascade and have no outer scale of their own. The
-visualization runs add a third, weaker amplitude ($c = 0.02$) and
-reach only 5~km depth; their nest is the one simulation whose finest
-size class, $2\Delta x = 10$~m, reaches the spheroscale.}\label{tab:steam runs}
+visualization runs reach only 4~km depth; their nests are the only
+simulations whose finest size class, $2\Delta x = 5$~m, lies below the
+spheroscale.}\label{tab:steam runs}
 \end{table}
-% NOTE (Claude, 2026-08-06): H_h and lambda are read from
-% steam.constants at run time and are an active work area (the H_h
-% 0.45/0.5 sweep and the far-bounds lambda ledger); the mapping from c
-% to a realized C_1 was last fit 2026-07-28 under the superseded
-% in-cascade flux compensation -- refit before quoting C_1 values for
-% these runs.
 
 The scalar bounds are anchored to a 300~K sea surface, prescribed by the RCEMIP channel configuration, and
 applied to all hosts: $q_t \in [0,\
@@ -566,8 +560,8 @@ lower bound for $h$ allows a maximum temperature deficit of
 $\Delta T_{\max} = 10$~K below the coldest point of the mean profile.
 
 The square ensemble provides the cloud geometry statistics of Sect.~\ref{ssect:cloud geometry} using ten
-members per value for $c$, with mean profiles set by the UM RA1-T profile, which has the lowest cloud fraction of the hydrodynamic ensemble. The two flux amplitude sets share seeds
-member for member, so simulation pairs are created that differ only in $c$. For each square member, 
+members per value for $\varpi$, with mean profiles set by the UM RA1-T profile, which has the lowest cloud fraction of the hydrodynamic ensemble. The flux amplitude sets share seeds
+member for member, so simulation sets are created that differ only in $\varpi$. For each square member, 
 the two nested refinements of Table~\ref{tab:steam runs}
 (Sect.~\ref{sect:nested refinement}) are also simulated for visualization. The archived product per member is
 the condensate ($q_c$, $q_i$) of the parent and both nests, plus the
