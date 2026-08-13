@@ -1691,7 +1691,7 @@ def compose_and_write(store, increment_store, result, grids, plan,
 # Lifecycle: budgets, refusals, manifest, resume (component 5)
 # ---------------------------------------------------------------------------
 
-MEMORY_BUDGET_FRACTION = 0.8
+MEMORY_BUDGET_FRACTION = 0.95
 
 
 def available_memory_budget(fraction=MEMORY_BUDGET_FRACTION):
