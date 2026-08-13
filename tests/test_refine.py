@@ -321,7 +321,22 @@ def test_nest_flux_preserves_the_inherited_entering_mean(parent_nc):
     # SUPPORT_FACTOR 5 -> 3 truncation, whose convolution moves only 2.8e-7
     # but whose clip-and-renormalize amplifies that to a different
     # realization -- reshuffles which end of the spread this seed lands on.
-    np.testing.assert_allclose(nest_flux.mean(), inherited, rtol=1.5e-2)
+    #
+    # 2026-08-13, min_distance_to_ground default 1 -> 0: the same measurement
+    # over parent seeds 42-47 now gives +2.233, +0.814, -0.872, +0.677, +0.002,
+    # +0.064 percent -- max |drift| 2.233% against 0.465% before, so allowing
+    # centers at the ground and top widened the spread about fivefold rather
+    # than merely reshuffling it. Plausibly because a boundary turbulon is
+    # truncated by the vertical zero padding, and the nest's own z grid
+    # truncates it differently than the parent's did, so the inherited mean has
+    # more room to move across the regrid.
+    #
+    # rtol is therefore 5e-2, chosen against both bounds rather than to make
+    # this seed pass: 2.2x the widest drift measured, and still 3x below the
+    # ~15% error that "scrubbed back to one" would produce for this parent
+    # (inherited 1.175). The robust form of the claim, which needs no tolerance
+    # at all, is test_nest_flux_anomaly_is_not_scrubbed_to_one below.
+    np.testing.assert_allclose(nest_flux.mean(), inherited, rtol=5e-2)
     assert np.all(nest_flux >= 0.0)
 
 
