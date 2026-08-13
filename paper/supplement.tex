@@ -577,18 +577,12 @@ parent's two-dimensional vertically integrated optical depth
 \subsection{Profile statistics and distributions}
 \label{ssect:matched stats}
 
-Profiles and distributions are compared at matched resolution.
-Horizontally, the hydrodynamic host is block-averaged $2\times 2$ onto STEAM's
-spacing. Vertically, a per-level rule is
-applied to ensure consistent resolution. At each host level, whichever field is locally finer is
-block-averaged over the nearest integer number of its own levels that
-brings the two spacings closest together. The factor varies with
-height and can point at either field. For TWP-ICE and GATE, STEAM is
-the finer field everywhere and is averaged over one level near the
-surface and three through the free troposphere. For the channels the
-host is averaged near the surface and STEAM aloft. The residual
-mismatch left by the nearest integer stays within about $1.5\times$.
-Comparison levels are the host's own and are clipped to STEAM's uppermost stored level, just below the 20~km domain top.
+Profiles and distributions are compared at matched resolution. The
+hydrodynamic host fields are coarsened in $2\times 2\times 2$ blocks
+before any statistic is computed, and STEAM is configured so that its
+horizontal and vertical resolutions nearly match the coarsened host
+grids. Comparison levels are the coarsened host's own and are clipped
+to STEAM's uppermost stored level, just below the 20~km domain top.
 
 The per-level statistics are the horizontal standard deviations of
 $h$, $q_t$, $q_c$, and $q_i$, and cloud fraction, defined as the areal
