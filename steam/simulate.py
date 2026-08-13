@@ -631,6 +631,26 @@ def _f32_ulp(value):
     return float(np.spacing(np.float32(abs(value))))
 
 
+def _report_scratch_on_failure(store, resumable, remove_wrapper):
+    """Retain-and-say-so, or delete-and-say-so, depending on `resumable`.
+
+    Either way the user is TOLD. A retained directory nobody knows about is not
+    a feature, and a deleted one they expected to resume from is worse.
+    """
+    from .streaming import cleanup_scratch
+
+    if resumable:
+        print(f"\nStreamed run failed. Scratch RETAINED at {store.directory}"
+              f"\nRe-running the same command resumes from the last completed "
+              f"phase; pass fresh=True to start over instead.")
+        return
+    size = store.total_bytes()
+    cleanup_scratch(store, remove_wrapper=remove_wrapper)
+    print(f"\nStreamed run ended early. Scratch DELETED "
+          f"({size / 1024**3:.2f} GiB freed). Pass resumable=True to keep it "
+          f"and continue the run instead.")
+
+
 def simulate(
     h_profile,
     qt_profile,
@@ -662,6 +682,7 @@ def simulate(
     stream_to_disk=False,
     scratch_dir=None,
     memory_budget=None,
+    resumable=False,
     fresh=False,
     _force_tiling=None,
     _crash_hook=None,
@@ -800,20 +821,39 @@ def simulate(
         is refused rather than run. Prefer NVMe -- scratch I/O is this mode's
         cost driver.
 
-        Scratch is deleted on success and RETAINED on failure, together with a
-        per-(class, phase) progress log and a manifest of the configuration.
-        Re-running the same command resumes from the last completed phase; every
-        phase is written to be re-runnable from its start. A scratch directory
-        whose manifest does not match the current configuration is refused
-        rather than mixed with it -- pass ``fresh=True`` to discard it. The
-        resident classes above the tiling horizon are not resumable and simply
-        re-run, which is cheap by construction: they are the classes that fit in
-        memory.
+        Scratch is deleted on success, and by default on failure and Ctrl-C too
+        (see ``resumable``). When simulate() created the directory itself -- the
+        default beside-the-output path -- the wrapper directory is removed as
+        well; a directory the caller named is the caller's, so only the store
+        subdirectory inside it is ever removed.
+
+        With ``resumable=True`` an interrupted run retains its scratch, together
+        with a per-(class, phase) marker set and a manifest of the
+        configuration, and re-running the same command resumes from the last
+        completed phase; every phase is written to be re-runnable from its
+        start. A store whose manifest does not match is then refused rather than
+        mixed with -- pass ``fresh=True`` to discard it. The resident classes
+        above the tiling horizon are never resumable and simply re-run, which is
+        cheap by construction: they are the classes that fit in memory.
     memory_budget : int or None
         Bytes of RAM the run may use. None reads MemAvailable from
         /proc/meminfo and takes 80% of it.
+    resumable : bool
+        Whether an interrupted streamed run leaves its scratch behind so that
+        re-running the same command continues it. FALSE by default (Thomas's
+        ruling, 2026-08-12): scratch is deleted on success, on failure, and on
+        Ctrl-C, and a leftover store found at startup is discarded rather than
+        resumed or refused. Restartability costs disk -- tens of GiB per
+        interrupted case, which then counts against the next run's disk check --
+        so it is opt-in rather than the default.
+
+        With ``resumable=True`` an interrupted run RETAINS its scratch and
+        re-running the same command resumes from the last completed phase; see
+        ``scratch_dir`` and ``fresh``.
     fresh : bool
-        Discard any existing scratch directory instead of resuming from it.
+        With ``resumable=True``, discard an existing scratch store instead of
+        resuming from it. Ignored when not resumable, where a leftover is always
+        discarded.
     _force_tiling : (horizon, tiles_x, tiles_y) or None
         Internal: force the tiling plan instead of letting the planner choose,
         which is how the streamed path is exercised at toy scale where nothing
@@ -1101,7 +1141,7 @@ def simulate(
         from .streaming import (
             TileStore, available_memory_budget, build_manifest,
             check_output_outside_store, check_scratch_filesystem, check_space,
-            plan_tiling, prepare_scratch)
+            cleanup_scratch, plan_tiling, prepare_scratch)
         budget = (memory_budget if memory_budget is not None
                   else available_memory_budget())
         plan = plan_tiling(grids, unit_turbulon.shape,
@@ -1111,8 +1151,14 @@ def simulate(
         # Beside the OUTPUT file, not the system temp directory: /tmp is tmpfs
         # on most Linux distributions, so scratch there IS RAM and bounds
         # nothing. Checked rather than hoped for -- see check_scratch_filesystem.
+        # Whether WE created the wrapper directory. A directory the caller named
+        # is the caller's: only the store subtree inside it is ever removed. One
+        # we made beside the output file is ours to remove entirely, which is
+        # what stops a campaign leaving an empty .steam_scratch_* per case.
+        scratch_is_ours = scratch_dir is None
         scratch_root = Path(scratch_dir) if scratch_dir is not None else (
             Path(output_path).parent / f".steam_scratch_{Path(output_path).stem}")
+        scratch_pre_existed = scratch_root.exists()
 
         # EVERY check before any compute. A run that streams for hours and then
         # dies on a full filesystem is the failure this feature exists to
@@ -1166,7 +1212,8 @@ def simulate(
         }
         manifest = build_manifest(grids, plan, seed, fingerprint)
         store, resume_completed, adopted_seed = prepare_scratch(
-            scratch_root, manifest, fresh=fresh, seed_was_none=seed_was_none)
+            scratch_root, manifest, fresh=fresh, seed_was_none=seed_was_none,
+            resumable=resumable)
         # ONE check for scratch and output together: by default they share a
         # filesystem, and scratch stays live until after the file is written, so
         # their peak is concurrent. A resuming run is credited the bytes its
@@ -1254,10 +1301,12 @@ def simulate(
                 _crash_hook=_crash_hook,
             )
         except BaseException:
-            print(f"\nStreamed cascade failed. Scratch RETAINED at "
-                  f"{store.directory}\nRe-running the same command resumes "
-                  f"from the last completed phase; pass fresh=True to start "
-                  f"over.")
+            # KeyboardInterrupt included, deliberately: Ctrl-C is the common way
+            # a run ends early, and by default it should leave nothing behind
+            # (Thomas's ruling 2026-08-12). Restartability is opt-in.
+            _report_scratch_on_failure(store, resumable,
+                                       remove_wrapper=scratch_is_ours
+                                       and not scratch_pre_existed)
             raise
 
     # Construct final 3D fields
@@ -1377,21 +1426,17 @@ def simulate(
             if flux_output is not None:
                 run_ledger.flux_output = flux_output
         except BaseException:
-            # RETAINED on failure, and said so. A crashed run's scratch plus its
-            # progress log is the only thing that makes it resumable, so deleting
-            # it here would throw away the hours the run already spent. Printed
-            # rather than merely left behind, because a directory nobody knows
-            # about is not a feature.
-            print(f"\nStreamed run failed. Scratch RETAINED at {store.directory}"
-                  f"\nRe-running the same command resumes from the last "
-                  f"completed phase; pass fresh=True to start over.")
+            _report_scratch_on_failure(store, resumable,
+                                       remove_wrapper=scratch_is_ours
+                                       and not scratch_pre_existed)
             raise
         else:
-            # One destroy: the increments sub-store lives INSIDE this store's
-            # owned subtree, so removing the subtree removes it too. Calling its
-            # own destroy() as well would be the one caller relying on
-            # destroying a stampless directory.
-            store.destroy()
+            # One cleanup: the increments sub-store lives INSIDE this store's
+            # owned subtree, so removing the subtree removes it too. The wrapper
+            # goes as well when we made it, which is what stops a campaign
+            # leaving an empty .steam_scratch_* directory per case.
+            cleanup_scratch(store, remove_wrapper=scratch_is_ours
+                            and not scratch_pre_existed)
         return output_path
 
     write_netcdf(

@@ -1841,13 +1841,45 @@ def check_space(scratch_dir, output_path, scratch_bytes, grids,
                 f"both are live at once -- scratch is not cleaned up until after "
                 f"the file is written. Together they need "
                 f"{combined / 1024**3:.2f} GiB ("
-                f"{scratch_need / 1024**3:.2f} scratch + "
+                f"{scratch_need / 1024**3:.2f} scratch after crediting "
+                f"{int(already_owned) / 1024**3:.2f} already in the store + "
                 f"{output_need / 1024**3:.2f} output) but only "
-                f"{free / 1024**3:.2f} GiB is free. Point scratch_dir= at a "
-                f"different filesystem, or free space.")
+                f"{free / 1024**3:.2f} GiB is free."
+                + _occupancy_note(scratch_dir) +
+                f" Point scratch_dir= at a different filesystem, free space, or "
+                f"delete the leftover scratch.")
         return
     check_scratch_space(scratch_dir, scratch_bytes, already_owned=already_owned)
     _check_output_space(output_path, output_need)
+
+
+def _occupancy_note(scratch_dir):
+    """What is already sitting at the scratch path, for a refusal message.
+
+    A refusal that does not say what is there is a refusal the user cannot act
+    on -- and the thing that is there may be an ORPHAN from an older layout,
+    sitting in the wrapper directory rather than the store subtree, consuming
+    free space while contributing nothing to the credit. Reported so the next
+    occurrence is self-diagnosing rather than reading as "it will not clean up".
+    """
+    scratch_dir = Path(scratch_dir)
+    if not scratch_dir.exists():
+        return ""
+    total = sum(path.stat().st_size
+                for path in scratch_dir.rglob('*') if path.is_file())
+    if total == 0:
+        return ""
+    store_root = scratch_dir / STORE_DIRNAME
+    store_total = 0
+    if store_root.exists():
+        store_total = sum(path.stat().st_size
+                          for path in store_root.rglob('*') if path.is_file())
+    note = (f" {scratch_dir} already holds {total / 1024**3:.2f} GiB")
+    if store_total != total:
+        note += (f", of which only {store_total / 1024**3:.2f} GiB is a "
+                 f"recognised scratch store (the rest is not credited and may "
+                 f"be left over from an earlier run)")
+    return note + "."
 
 
 def _check_output_space(output_path, needed):
@@ -1962,7 +1994,8 @@ def build_manifest(grids, plan, seed, fingerprint_inputs):
     }
 
 
-def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False):
+def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False,
+                    resumable=True):
     """Validate, adopt or clear the scratch STORE inside ``directory``.
 
     Returns (store, completed_phases, adopted_seed). ``adopted_seed`` is not None
@@ -1996,6 +2029,17 @@ def prepare_scratch(directory, manifest, fresh=False, seed_was_none=False):
             f"success, and this may be something else entirely -- or one of ours "
             f"whose manifest was corrupted mid-write, which is equally a reason "
             f"to stop. Delete it deliberately, or point scratch_dir= elsewhere.")
+
+    if existing is not None and not resumable:
+        # NOT RESUMABLE (the default, Thomas's ruling 2026-08-12): a leftover
+        # store is scratch, not state. Discard it and start fresh rather than
+        # refusing on a configuration mismatch or resuming from a match --
+        # restartability is opt-in, and a user who did not ask for it should
+        # never be blocked by an old run's leavings.
+        store.destroy()
+        store = TileStore(directory)
+        store.write_manifest(manifest)
+        return store, set(), None
 
     if existing is not None and not fresh:
         if existing.get('config_sha256') == manifest['config_sha256']:
@@ -2031,3 +2075,25 @@ def scratch_hint(grids):
     """
     total = 11 * _field_bytes(grids, len(grids['k']) - 1)
     return f"{total / 1024**3:.1f} GiB"
+
+
+def cleanup_scratch(store, remove_wrapper):
+    """Remove a run's scratch: the store subtree, and the wrapper if it is ours.
+
+    ``remove_wrapper`` is true only when simulate() created the wrapper
+    directory itself (the default beside-the-output path). A directory the caller
+    named is the caller's -- only the store subtree inside it goes, never the
+    parent -- which is why this takes a flag rather than deciding for itself.
+
+    The wrapper is removed with rmdir, so it goes only if the store's departure
+    left it empty. Anything else in there keeps it alive, which is both the safe
+    behaviour and a visible signal that something unexpected was present.
+    """
+    wrapper = store.scratch_dir
+    store.destroy()
+    if not remove_wrapper:
+        return
+    try:
+        wrapper.rmdir()
+    except OSError:
+        pass        # not empty, or not there: leave it alone

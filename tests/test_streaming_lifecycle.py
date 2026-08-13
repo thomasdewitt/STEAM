@@ -54,6 +54,15 @@ def _kwargs(directory, name, **extra):
     return kwargs
 
 
+
+def _rkwargs(directory, name, **extra):
+    """_kwargs for the RESUME tests. resumable=True is now opt-in (Thomas's
+    ruling 2026-08-12): by default scratch is deleted on success, on failure
+    and on Ctrl-C, so a test about resuming has to ask for it.
+    """
+    extra.setdefault('resumable', True)
+    return _kwargs(directory, name, **extra)
+
 def _read(path, names=FIELDS):
     with netCDF4.Dataset(path, "r") as ds:
         return {name: np.asarray(ds.variables[name][:], dtype=np.float32)
@@ -269,13 +278,13 @@ def test_resume_is_bit_identical(tmp_path, target_phase, what):
     here would mean a pass is not idempotent, which is the property resume is
     built on.
     """
-    reference = _kwargs(tmp_path, "clean", _force_tiling=(2, 2, 2),
+    reference = _rkwargs(tmp_path, "clean", _force_tiling=(2, 2, 2),
                         save_for_refinement=True)
     simulate(**reference)
     expected = _read(reference["output_path"])
 
     scratch = tmp_path / "resume_scratch"
-    interrupted = _kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+    interrupted = _rkwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
                           save_for_refinement=True, scratch_dir=scratch,
                           _crash_hook=_crash_at(2, target_phase))
     with pytest.raises(Crash):
@@ -286,7 +295,7 @@ def test_resume_is_bit_identical(tmp_path, target_phase, what):
     assert (scratch / STORE_DIRNAME / "manifest.json").exists()
 
     # Re-run the same command: no crash hook this time.
-    resumed = _kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+    resumed = _rkwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
                       save_for_refinement=True, scratch_dir=scratch)
     simulate(**resumed)
     actual = _read(resumed["output_path"])
@@ -307,7 +316,7 @@ def test_resume_actually_skips_completed_work(tmp_path):
     finished" is a directory scan with nothing to parse and no append to tear.
     """
     scratch = tmp_path / "skip_scratch"
-    interrupted = _kwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
+    interrupted = _rkwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
                           scratch_dir=scratch,
                           _crash_hook=_crash_at(3, 'regrid_done'))
     with pytest.raises(Crash):
@@ -319,7 +328,7 @@ def test_resume_actually_skips_completed_work(tmp_path):
     # -- that is the work the resume is obliged to skip.
     assert "marker_c02_class" in markers, markers
 
-    simulate(**_kwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
+    simulate(**_rkwargs(tmp_path, "skip", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
     # The store is gone on success, which is itself the evidence that the second
     # run adopted this store rather than refusing it or starting elsewhere.
@@ -335,14 +344,14 @@ def test_mismatched_scratch_is_refused_and_fresh_clears_it(tmp_path):
     scratch directory whose manifest does not match is refused. fresh=True is
     the explicit way to discard it."""
     scratch = tmp_path / "mismatch"
-    first = _kwargs(tmp_path, "first", _force_tiling=(2, 2, 2),
+    first = _rkwargs(tmp_path, "first", _force_tiling=(2, 2, 2),
                     scratch_dir=scratch, _crash_hook=_crash_at(2, 'apply_done'))
     with pytest.raises(Crash):
         simulate(**first)
     assert (scratch / STORE_DIRNAME / "manifest.json").exists()
 
     # A different seed is a different realization, so the manifest must not match.
-    second = _kwargs(tmp_path, "second", _force_tiling=(2, 2, 2),
+    second = _rkwargs(tmp_path, "second", _force_tiling=(2, 2, 2),
                      scratch_dir=scratch)
     second['seed'] = SEED + 1
     with pytest.raises(OSError, match="DIFFERENT configuration"):
@@ -454,7 +463,7 @@ def test_scratch_is_destroyed_on_success(tmp_path):
 def test_scratch_is_retained_on_failure_with_a_message(tmp_path, capsys):
     scratch = tmp_path / "keep_me"
     with pytest.raises(Crash):
-        simulate(**_kwargs(tmp_path, "bad", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "bad", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch,
                            _crash_hook=_crash_at(2, 'apply_done')))
     assert scratch.exists() and any(scratch.iterdir())
@@ -498,7 +507,7 @@ def test_resume_after_a_marker_but_before_its_settle(tmp_path, monkeypatch,
     """
     from steam.streaming import TileStore
 
-    reference = _kwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
+    reference = _rkwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
     simulate(**reference)
     expected = _read(reference["output_path"])
 
@@ -506,11 +515,11 @@ def test_resume_after_a_marker_but_before_its_settle(tmp_path, monkeypatch,
     monkeypatch.setattr(TileStore, 'mark', patched)
     scratch = tmp_path / "settle_scratch"
     with pytest.raises(Crash):
-        simulate(**_kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch))
     monkeypatch.undo()
 
-    simulate(**_kwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
+    simulate(**_rkwargs(tmp_path, "resumed", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
     actual = _read(tmp_path / "resumed.nc")
     for name in expected:
@@ -529,7 +538,7 @@ def test_unseeded_run_can_resume(tmp_path):
     resume adopts it when everything else matches.
     """
     scratch = tmp_path / "unseeded"
-    interrupted = _kwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
+    interrupted = _rkwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
                           scratch_dir=scratch,
                           _crash_hook=_crash_at(2, 'apply_done'))
     interrupted['seed'] = None
@@ -540,7 +549,7 @@ def test_unseeded_run_can_resume(tmp_path):
     drawn = manifest['seed']
     assert drawn is not None
 
-    resumed = _kwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
+    resumed = _rkwargs(tmp_path, "unseeded", _force_tiling=(2, 2, 2),
                       scratch_dir=scratch)
     resumed['seed'] = None
     simulate(**resumed)
@@ -549,7 +558,7 @@ def test_unseeded_run_can_resume(tmp_path):
             "the resumed run must adopt the seed the first attempt drew")
 
     # And it equals a clean run with that seed explicitly.
-    reference = _kwargs(tmp_path, "explicit", _force_tiling=(2, 2, 2))
+    reference = _rkwargs(tmp_path, "explicit", _force_tiling=(2, 2, 2))
     reference['seed'] = drawn
     simulate(**reference)
     expected = _read(tmp_path / "explicit.nc")
@@ -581,26 +590,26 @@ def test_foreign_files_in_scratch_dir_are_never_touched(tmp_path):
         assert treasure.read_text() == "do not delete me"
 
     # 1. A successful run: the store subtree goes, the neighbour stays.
-    simulate(**_kwargs(tmp_path, "ok", _force_tiling=(2, 2, 2),
+    simulate(**_rkwargs(tmp_path, "ok", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
     intact()
 
     # 2. A crash (scratch retained), then a resume, then success.
     with pytest.raises(Crash):
-        simulate(**_kwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch,
                            _crash_hook=_crash_at(2, 'apply_done')))
     intact()
-    simulate(**_kwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
+    simulate(**_rkwargs(tmp_path, "crash", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
     intact()
 
     # 3. fresh=True discarding a mismatched store.
     with pytest.raises(Crash):
-        simulate(**_kwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch,
                            _crash_hook=_crash_at(2, 'apply_done')))
-    other = _kwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
+    other = _rkwargs(tmp_path, "again", _force_tiling=(2, 2, 2),
                     scratch_dir=scratch, fresh=True)
     other['seed'] = SEED + 7
     simulate(**other)
@@ -649,12 +658,12 @@ def test_a_corrupt_manifest_is_refused_not_destroyed(tmp_path):
     the right side to fail on: it might be a store mid-write, or not one."""
     scratch = tmp_path / "corrupt"
     with pytest.raises(Crash):
-        simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch,
                            _crash_hook=_crash_at(2, 'apply_done')))
     (scratch / STORE_DIRNAME / "manifest.json").write_text("{ this is not json")
     with pytest.raises(OSError, match="not a STEAM scratch store"):
-        simulate(**_kwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "corrupt", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch))
     assert (scratch / STORE_DIRNAME / "manifest.json").exists(), "refused, not destroyed"
 
@@ -773,7 +782,7 @@ def test_resume_recovers_from_a_write_failure_mid_phase(tmp_path, monkeypatch):
     and the result is bit-identical."""
     from steam.streaming import TileStore
 
-    reference = _kwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
+    reference = _rkwargs(tmp_path, "clean", _force_tiling=(2, 2, 2))
     simulate(**reference)
     expected = _read(reference["output_path"])
 
@@ -789,11 +798,11 @@ def test_resume_recovers_from_a_write_failure_mid_phase(tmp_path, monkeypatch):
     monkeypatch.setattr(TileStore, 'write_window', failing)
     scratch = tmp_path / "enospc"
     with pytest.raises(OSError, match="No space left"):
-        simulate(**_kwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
+        simulate(**_rkwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
                            scratch_dir=scratch))
     monkeypatch.undo()
 
-    simulate(**_kwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
+    simulate(**_rkwargs(tmp_path, "recovered", _force_tiling=(2, 2, 2),
                        scratch_dir=scratch))
     actual = _read(tmp_path / "recovered.nc")
     for name in expected:
@@ -966,3 +975,161 @@ def test_no_raw_durability_writes(tmp_path):
         "durability-critical writes must go through _atomic_write (which fsyncs "
         "the file AND its directory). Offending call sites:\n  "
         + "\n  ".join(offenders))
+
+
+# ---------------------------------------------------------------------------
+# Thomas's ruling 2026-08-12: not resumable by default
+# ---------------------------------------------------------------------------
+#
+# "I think by default when ctrl c is hit, it should delete all the temp dirs,
+# rather than being restartable. Restartable should need to be specifically
+# asked for by the user."
+#
+# Observed in the production campaign: every successful case left an empty
+# .steam_scratch_* wrapper behind, and an interrupted case retained tens of GiB
+# that then counted against the NEXT case's disk gate -- which reads to the user
+# as "it does not clean up", and is a fair reading.
+
+def test_default_success_leaves_nothing_at_all(tmp_path):
+    """Not one directory. The store subtree AND the wrapper simulate() created."""
+    output = tmp_path / "run.nc"
+    simulate(**_kwargs(tmp_path, "run", _force_tiling=(2, 2, 2)))
+    assert output.exists()
+    leftovers = [path for path in tmp_path.iterdir() if path.name != "run.nc"]
+    assert leftovers == [], f"scratch left behind: {leftovers}"
+
+
+def test_default_keyboard_interrupt_leaves_nothing(tmp_path):
+    """Ctrl-C is the common way a run ends early, and by default it must clean up
+    after itself. KeyboardInterrupt is a BaseException, so this also pins that
+    the cleanup path catches BaseException rather than Exception."""
+    def interrupt(index, phase):
+        if index == 2 and phase == 'apply_done':
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        simulate(**_kwargs(tmp_path, "interrupted", _force_tiling=(2, 2, 2),
+                           _crash_hook=interrupt))
+    leftovers = list(tmp_path.iterdir())
+    assert leftovers == [], f"scratch survived a Ctrl-C: {leftovers}"
+
+
+def test_default_failure_leaves_nothing_and_says_so(tmp_path, capsys):
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "failed", _force_tiling=(2, 2, 2),
+                           _crash_hook=_crash_at(2, 'apply_done')))
+    assert list(tmp_path.iterdir()) == []
+    printed = capsys.readouterr().out
+    assert "DELETED" in printed and "resumable=True" in printed, (
+        f"a deleted scratch must say so and name the opt-in: {printed[-300:]}")
+
+
+def test_default_startup_discards_a_leftover_store(tmp_path):
+    """A leftover from an interrupted resumable run must not block a later
+    default-mode run: no refusal, no resume, just start fresh. This is the
+    production symptom -- an interrupted case blocking the next invocation."""
+    scratch = tmp_path / "leftover"
+    with pytest.raises(Crash):
+        simulate(**_rkwargs(tmp_path, "first", _force_tiling=(2, 2, 2),
+                            scratch_dir=scratch,
+                            _crash_hook=_crash_at(2, 'apply_done')))
+    assert (scratch / STORE_DIRNAME / "manifest.json").exists(), (
+        "resumable=True should have retained it")
+
+    # A DIFFERENT configuration, default mode: neither refused nor resumed.
+    later = _kwargs(tmp_path, "second", _force_tiling=(2, 2, 2),
+                    scratch_dir=scratch)
+    later['seed'] = SEED + 3
+    simulate(**later)
+    assert (tmp_path / "second.nc").exists()
+    # The user's directory survives (they named it); the store inside is gone.
+    assert scratch.exists()
+    assert not (scratch / STORE_DIRNAME).exists() or not any(
+        (scratch / STORE_DIRNAME).iterdir())
+
+
+def test_an_explicit_scratch_dir_is_never_removed(tmp_path):
+    """A directory the caller named is the caller's: only the store subtree
+    inside it is removed, never the parent -- on success or on failure."""
+    scratch = tmp_path / "mine"
+    scratch.mkdir()
+    simulate(**_kwargs(tmp_path, "ok", _force_tiling=(2, 2, 2),
+                       scratch_dir=scratch))
+    assert scratch.exists(), "the caller's directory must survive success"
+
+    with pytest.raises(Crash):
+        simulate(**_kwargs(tmp_path, "bad", _force_tiling=(2, 2, 2),
+                           scratch_dir=scratch,
+                           _crash_hook=_crash_at(2, 'apply_done')))
+    assert scratch.exists(), "the caller's directory must survive failure too"
+    assert not any(scratch.iterdir()), "but the store inside it should be gone"
+
+
+def test_a_pre_existing_default_path_is_not_removed(tmp_path):
+    """Only a wrapper WE created goes. If the default path already existed --
+    someone else's directory that happens to collide -- leave the parent."""
+    output = tmp_path / "collide.nc"
+    wrapper = tmp_path / ".steam_scratch_collide"
+    wrapper.mkdir()
+    (wrapper / "not_ours.txt").write_text("hello")
+
+    simulate(**_kwargs(tmp_path, "collide", _force_tiling=(2, 2, 2)))
+    assert output.exists()
+    assert wrapper.exists() and (wrapper / "not_ours.txt").exists()
+    assert not (wrapper / STORE_DIRNAME).exists() or not any(
+        (wrapper / STORE_DIRNAME).iterdir())
+
+
+def test_the_disk_gate_credits_an_existing_matching_store(tmp_path):
+    """The production refusal: 554.69 GiB needed against 525.16 free, with ~30
+    GiB of matching scratch sitting there. Crediting what the store already owns
+    is the difference between refusing a resume and allowing it."""
+    import shutil as _shutil
+    from steam.simulate import _compute_all_grids
+    from steam.streaming import check_space, output_bytes
+
+    z = np.arange(PROFILE_NZ) * PROFILE_DZ
+    grids = _compute_all_grids(GRID['outer_scale'] / 2.0 ** np.arange(4),
+                               GRID['nx'] * GRID['dx'], GRID['ny'] * GRID['dy'],
+                               DOMAIN_HEIGHT, (1, 1, 1),
+                               np.full(PROFILE_NZ, 100.0), z)
+    free = _shutil.disk_usage(tmp_path).free
+    output_need = output_bytes(grids, False)
+    owned = 4 * 1024**3
+    # Needs slightly more than is free -- but owns more than the shortfall.
+    scratch_need = free - output_need + (owned // 2)
+
+    with pytest.raises(OSError, match="share a filesystem"):
+        check_space(tmp_path / "s", tmp_path / "out.nc", scratch_need, grids,
+                    False, already_owned=0)
+    # With the credit it fits.
+    check_space(tmp_path / "s", tmp_path / "out.nc", scratch_need, grids,
+                False, already_owned=owned)
+
+
+def test_a_disk_refusal_names_what_is_already_there(tmp_path):
+    """A refusal the user cannot act on is half a refusal. In particular it must
+    distinguish a recognised store (credited) from orphaned bytes (not), because
+    the latter is what made the production case look like a cleanup failure."""
+    import shutil as _shutil
+    from steam.simulate import _compute_all_grids
+    from steam.streaming import STORE_DIRNAME as SD
+    from steam.streaming import check_space
+
+    z = np.arange(PROFILE_NZ) * PROFILE_DZ
+    grids = _compute_all_grids(GRID['outer_scale'] / 2.0 ** np.arange(4),
+                               GRID['nx'] * GRID['dx'], GRID['ny'] * GRID['dy'],
+                               DOMAIN_HEIGHT, (1, 1, 1),
+                               np.full(PROFILE_NZ, 100.0), z)
+    scratch = tmp_path / "occupied"
+    (scratch / SD).mkdir(parents=True)
+    (scratch / SD / "field.npy").write_bytes(b"x" * 4096)
+    (scratch / "orphan.npy").write_bytes(b"y" * 8192)      # NOT in the store
+
+    free = _shutil.disk_usage(tmp_path).free
+    with pytest.raises(OSError) as info:
+        check_space(scratch, tmp_path / "out.nc", free * 2, grids, False)
+    message = str(info.value)
+    assert "already holds" in message
+    assert "not credited" in message, (
+        f"orphaned bytes must be called out as uncredited: {message}")
