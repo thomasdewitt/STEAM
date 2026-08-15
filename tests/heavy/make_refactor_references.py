@@ -30,6 +30,16 @@ attributed to the cascade or to the composition rather than just observed).
 
 Regenerating these is a deliberate act: it asserts that a realization change is
 intended. Component 1 changed realizations by ruling; component 2 must not.
+
+REGENERATION LOG
+  2026-08-15, --force, min_distance_to_ground. The fixtures do not pass m
+  explicitly, so they take simulate()'s default. d439998 set that default to 0
+  and regenerated here to match; b99da04 reverted it to 1 ("fractal metrics
+  suffered from m=0, looked like bad turbulon clipping") without regenerating,
+  which left all five pinned at m=0 against a model running m=1. Every one of
+  the five had been failing since. Regenerated at m=1, Thomas's call. No
+  refactor is being asserted correct by this -- the realization moved because
+  the default moved.
 """
 
 import sys
