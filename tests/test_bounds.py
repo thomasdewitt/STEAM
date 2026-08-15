@@ -254,7 +254,7 @@ def test_realized_norm_unit_level_mean_with_structure_zero_without(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_simulate_output_within_bounds(tmp_path):
-    nz = 50
+    nz = 101                 # 100 * 30 m spans the 3000 m domain
     z = np.arange(nz) * 30.0
     h = 340e3 - 20e3 * (z / z.max())
     qt = 0.018 - 0.016 * (z / z.max())
@@ -329,7 +329,7 @@ def test_compensation_profiles_switch_regime_below_spheroscale():
 
 def test_simulate_smoke_with_subspheroscale_classes(tmp_path):
     """A cascade crossing the spheroscale runs and respects bounds."""
-    nz = 50
+    nz = 175                 # 174 * 30 m spans the 5200 m domain
     z = np.arange(nz) * 30.0
     h = 340e3 - 20e3 * (z / z.max())
     qt = 0.018 - 0.016 * (z / z.max())

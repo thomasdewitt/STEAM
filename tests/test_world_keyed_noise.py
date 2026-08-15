@@ -235,7 +235,7 @@ def test_keyed_draws_reduce_to_the_gaussian_case_at_alpha_two():
 # End to end through refine()
 # ---------------------------------------------------------------------------
 
-PARENT_NZ = 50
+PARENT_NZ = 101      # 100 * 30 m spans the 3000 m parent domain
 PARENT_PROFILE_DZ = 30.0
 PARENT_DOMAIN_HEIGHT = 3000.0
 
