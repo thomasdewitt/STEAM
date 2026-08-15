@@ -9,6 +9,11 @@ import netCDF4
 import torch
 from . import constants
 from .output import compression_kwargs
+from .utils import (
+    available_memory_bytes,
+    MEMORY_HEADROOM_BYTES,
+    CUDA_MEMORY_HEADROOM_BYTES,
+)
 from .constants import (
     specific_heat_dry_air as cp,
     latent_heat_vaporization as Lv,
@@ -221,7 +226,64 @@ def _recover_diagnostics_cuda(h, qt, z_values, surface_pressure):
                             ("p", p))}
 
 
-def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
+DIAGNOSTICS_MAX_CHUNK_NX = 128     # tuned at nz=115; see _diagnostics_chunk_nx
+
+
+def _diagnostics_chunk_nx(nx, ny, nz, itemsize, n_workers, device):
+    """x-columns per diagnostics chunk that ``n_workers`` of them fit in memory.
+
+    A chunk is (chunk_nx, ny, nz), and each one in flight holds SEVEN arrays of
+    that shape: h and qt in, T/qv/qc/qi/p out. Everything the level loop
+    allocates on top of that is a 2D slab and does not scale with chunk_nx.
+    So the working set is 7 * chunk_nx * ny * nz * itemsize per worker, and the
+    number that has to fit is n_workers times that.
+
+    Sizing this from x-columns alone -- a fixed chunk_nx=128 -- is what the
+    default used to be, and it holds only at the nz it was tuned at. 128
+    columns of the 2048^2 x 115 production square is 115 MB per array, 1.6 GB
+    of VRAM for two workers, which is nothing. The same 128 columns of a
+    2048^2 x 835 demo field is 836 MiB per array and 11.4 GiB for two workers,
+    which does not fit on a 16 GiB card next to anything else and OOMed at the
+    seventh allocation. nz varies by a factor of seven across the cases this is
+    run on, so the column count cannot be the fixed quantity -- the bytes have
+    to be.
+
+    The chunk size is a pure partition of an embarrassingly parallel
+    calculation: every column is solved from its own h, qt and surface
+    pressure, reading nothing outside itself. So unlike the cascade's batch
+    sizes, this one does not enter the realization, and sizing it from
+    whatever VRAM is free at the moment cannot make the same seed give a
+    different field. test_compute_diagnostics_chunking_matches_full pins that.
+
+    Capped at DIAGNOSTICS_MAX_CHUNK_NX because the HDF5 chunkshape of the
+    diagnostic variables is derived from it -- a chunk sized to fill the card
+    would be a poor read granularity for everything downstream.
+    """
+    per_column = 7 * ny * nz * itemsize
+    if device == 'cuda':
+        torch.cuda.empty_cache()      # so mem_get_info sees the true free VRAM
+        free, _ = torch.cuda.mem_get_info()
+        budget = free - CUDA_MEMORY_HEADROOM_BYTES
+        where = f"{free / 1024**3:.1f} GiB free VRAM"
+    else:
+        available = available_memory_bytes()
+        if available is None:         # not Linux; no preflight, keep the cap
+            return min(nx, DIAGNOSTICS_MAX_CHUNK_NX)
+        budget = available - MEMORY_HEADROOM_BYTES
+        where = f"{available / 1024**3:.1f} GiB available RAM"
+    columns = int(budget // (n_workers * per_column))
+    if columns < 1:
+        raise MemoryError(
+            f"compute_diagnostics (device={device!r}) needs "
+            f"{n_workers * per_column / 1024**3:.1f} GiB for a single-column "
+            f"chunk of field shape {(nx, ny, nz)} across {n_workers} workers, "
+            f"but there is only {where}; refusing to risk OOM. Pass fewer "
+            f"n_workers, or free the device."
+        )
+    return min(nx, DIAGNOSTICS_MAX_CHUNK_NX, columns)
+
+
+def compute_diagnostics(nc_path, chunk_nx=None, group=None, compress=None,
                         n_workers=None, device='cpu'):
     """Compute T, qv, qc, qi, p from h/qt in a NetCDF file, writing in x-chunks.
 
@@ -233,8 +295,12 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
     ----------
     nc_path : str or Path
         Path to the NetCDF file produced by simulate().
-    chunk_nx : int
-        Number of x-columns to process at a time.
+    chunk_nx : int or None
+        Number of x-columns to process at a time. None (default) sizes the
+        chunk against free memory on the device actually being used, so that
+        ``n_workers`` chunks fit; see _diagnostics_chunk_nx for why a fixed
+        column count is the wrong unit. An explicit value is honoured as
+        given, with no memory check.
     group : str or None
         NetCDF group to operate on. None means the root group; pass e.g.
         "refinements/r0" to run diagnostics on a refinement group.
@@ -277,6 +343,17 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
     else:
         starting_pressure = float(grp.surface_pressure)
 
+    # Worker count first: the chunk has to be sized so that this many of them
+    # fit at once, and the count itself does not depend on the chunking except
+    # through the clamp to n_chunks below.
+    if n_workers is None:
+        n_workers = 2 if device == 'cuda' else min(8, os.cpu_count() or 1)
+    n_workers = max(1, int(n_workers))
+
+    if chunk_nx is None:
+        chunk_nx = _diagnostics_chunk_nx(
+            nx, ny, nz, grp.variables["h"].dtype.itemsize, n_workers, device)
+
     # Create output variables if they don't exist
     diag_names = {"T": ("K", "temperature"),
                   "qv": ("kg/kg", "water vapor mixing ratio"),
@@ -297,10 +374,7 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
 
     chunks = [(x0, min(x0 + chunk_nx, nx)) for x0 in range(0, nx, chunk_nx)]
     n_chunks = len(chunks)
-
-    if n_workers is None:
-        n_workers = 2 if device == 'cuda' else min(8, os.cpu_count() or 1)
-    n_workers = max(1, min(int(n_workers), n_chunks))
+    n_workers = min(n_workers, n_chunks)
 
     def _p_slice(x0, x1):
         if isinstance(starting_pressure, np.ndarray):
@@ -321,8 +395,8 @@ def compute_diagnostics(nc_path, chunk_nx=128, group=None, compress=None,
         rate = done / elapsed if elapsed > 0 else 0.0
         eta = (n_chunks - done) / rate if rate > 0 else 0.0
         print(f"  diagnostics: {done}/{n_chunks} chunks ({pct:5.1f}%) "
-              f"[{n_workers}w, {elapsed:5.1f}s elapsed, ~{eta:5.1f}s left]   ",
-              end="\r", flush=True)
+              f"[{n_workers}w x {chunk_nx}col, {elapsed:5.1f}s elapsed, "
+              f"~{eta:5.1f}s left]   ", end="\r", flush=True)
 
     if n_workers == 1:
         done = 0

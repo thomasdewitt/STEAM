@@ -612,6 +612,58 @@ def test_compute_diagnostics_chunking_matches_full(tmp_path, simple_profiles):
     ds1.close(); ds2.close()
 
 
+def test_diagnostics_chunk_nx_scales_with_nz(monkeypatch):
+    """The auto chunk is sized in BYTES, not x-columns.
+
+    The regression it guards is a real OOM: chunk_nx=128 was a fixed default
+    tuned at nz=115, and at the demo fields' nz=835 the same 128 columns is
+    7.3x the working set -- 11.4 GiB of VRAM for two workers, which does not
+    fit on a 16 GiB card. A tall field must come back with fewer columns than
+    a short one, and both must respect the cap.
+    """
+    import steam.thermodynamics as thermo
+    from steam.thermodynamics import (_diagnostics_chunk_nx,
+                                      DIAGNOSTICS_MAX_CHUNK_NX)
+
+    def cols(nz, budget_gib):
+        # Stand in for the host branch's /proc/meminfo reading, so the test
+        # asserts on the arithmetic rather than on the machine it runs on.
+        avail = int(budget_gib * 1024**3) + thermo.MEMORY_HEADROOM_BYTES
+        monkeypatch.setattr(thermo, "available_memory_bytes", lambda: avail)
+        return _diagnostics_chunk_nx(2048, 2048, nz, 4, 2, 'cpu')
+
+    # 10 GiB of budget: nz=115 is nowhere near it and takes the cap; nz=835
+    # does not fit at the cap and has to shrink.
+    short = cols(115, 10.0)
+    tall = cols(835, 10.0)
+    assert short == DIAGNOSTICS_MAX_CHUNK_NX
+    assert tall < short, f"nz=835 got {tall} columns, same as nz=115"
+    assert 2 * 7 * tall * 2048 * 835 * 4 <= 10.0 * 1024**3
+
+    # A budget too small for even one column (2 workers x 7 arrays x one
+    # 2048x835 column is 91 MiB) raises rather than proceeding.
+    with pytest.raises(MemoryError, match="single-column chunk"):
+        cols(835, 0.05)
+
+
+def test_compute_diagnostics_auto_chunk_matches_explicit(tmp_path, simple_profiles):
+    """chunk_nx=None is a partition choice, not a physics one."""
+    h, qt = simple_profiles
+    kw = dict(nx=16, ny=16, dx=500, dy=500, outer_scale=8000, spheroscale=100,
+              domain_height=3000, profile_dz=30, seed=42)
+    p_auto = simulate(h, qt, output_path=tmp_path / "auto.nc", **kw)
+    p_fixed = simulate(h, qt, output_path=tmp_path / "fixed.nc", **kw)
+    compute_diagnostics(p_auto)
+    compute_diagnostics(p_fixed, chunk_nx=3)
+    ds1 = netCDF4.Dataset(p_auto, "r")
+    ds2 = netCDF4.Dataset(p_fixed, "r")
+    for name in ("T", "qv", "qc", "qi", "p"):
+        np.testing.assert_array_equal(
+            ds1.variables[name][:], ds2.variables[name][:],
+            err_msg=f"{name} differs between auto and explicit chunk_nx")
+    ds1.close(); ds2.close()
+
+
 def test_compute_diagnostics_parallel_matches_serial(tmp_path, simple_profiles):
     h, qt = simple_profiles
     kw = dict(nx=16, ny=16, dx=500, dy=500, outer_scale=8000, spheroscale=100,
