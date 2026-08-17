@@ -1054,6 +1054,26 @@ def simulate(
 
     z_profile = np.arange(len(h_profile), dtype=np.float64) * profile_dz
 
+    # The profile has to span the domain. Past its top the interpolation onto
+    # the class grids clamps, holding h and qt at their last value, and
+    # constant h is a dry adiabat: T = (h - g z - Lv qv)/cp falls at 9.8 K/km
+    # with nothing to stop it. A profile ending at 20 km and -55 C carried to
+    # a 30 km domain arrives at -153 C, condensing what water is left into a
+    # uniform slab (measured at 0.0100 g/kg, mean equal to max). Equality
+    # passes: production configs set n = domain_height/profile_dz + 1.
+    profile_top = float(z_profile[-1])
+    if profile_top < domain_height:
+        raise ValueError(
+            f"the h/qt profile spans 0 to {profile_top:.1f} m "
+            f"({len(h_profile)} levels at profile_dz = {profile_dz} m), which "
+            f"does not reach domain_height ({domain_height} m). Above the "
+            f"profile top h and qt are held constant and T falls "
+            f"dry-adiabatically, so the domain would be filled with "
+            f"unstructured condensate. Extend the profile to at least "
+            f"{int(np.ceil(domain_height / profile_dz)) + 1} levels, or lower "
+            f"domain_height to {profile_top:.1f} m."
+        )
+
     # Scale classes: L, ..., 2*dx (finest).  The multiplicative gap between
     # adjacent classes is fully determined by n_scale_classes_per_dyad; the
     # class count is rounded so the finest class sits near 2*dx.

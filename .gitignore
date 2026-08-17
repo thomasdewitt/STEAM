@@ -24,3 +24,11 @@ scratch/
 # Deliberately versioned (the *.npz rule above would silently drop them --
 # which it did, caught in review 2026-08-12).
 !tests/reference/*.npz
+
+# The demo driving profiles. cm1 and twpice are copied from turbulon-analysis;
+# the kslc pair is built by make_sounding_profile.py from archived soundings.
+!demos/profiles/*.npz
+
+# Generated demo output. Not just the *.nc keepers: a streamed run keeps its
+# scratch store here as .npy, which no other rule catches.
+demos/fields/

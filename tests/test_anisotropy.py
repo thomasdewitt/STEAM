@@ -10,7 +10,7 @@ from steam.constants import hurst_vertical_anisotropy as H_z
 
 @pytest.fixture
 def profiles():
-    nz = 50
+    nz = 101                 # 100 * 30 m spans the 3000 m domains here
     z = np.arange(nz) * 30.0
     h = 340e3 - 20e3 * (z / z.max())
     qt = 0.018 - 0.016 * (z / z.max())

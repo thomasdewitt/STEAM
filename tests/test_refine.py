@@ -21,7 +21,7 @@ from steam.thermodynamics import compute_diagnostics
 from steam.utils import zoom_trilinear
 
 
-PARENT_NZ = 50
+PARENT_NZ = 101      # 100 * 30 m spans the 3000 m parent domain
 PARENT_PROFILE_DZ = 30.0
 PARENT_DOMAIN_HEIGHT = 3000.0
 
@@ -277,7 +277,12 @@ def test_nest_amplitude_ladder_continues_the_parent(parent_nc):
         predicted = anchor * (k / geometry['k_finest']) ** H_h
         # Levels where the mean profile is flat carry C ~ 0; their relative
         # error is meaningless, so compare where there is amplitude to compare.
-        structured = predicted > 0.02 * predicted.max()
+        # The nest's grid can reach one cell past the parent's top level
+        # (2944 m against 2880 m here), where np.interp clamps: the prediction
+        # is then the parent's last value held flat, so comparing against it
+        # measures the clamp rather than the ladder.
+        inside = nest_z <= parent_z[-1]
+        structured = (predicted > 0.02 * predicted.max()) & inside
         # The stored table passes through each class's own vertical grid on
         # the way out, so a coarse class picks up interpolation error against
         # this direct parent -> output-grid prediction; the level-mean ratio
