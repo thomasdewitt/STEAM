@@ -8,6 +8,7 @@
 \usepackage{lmodern}  % for bold teletype font
 \usepackage{xcolor}   % for \textcolor
 \usepackage{natbib}
+\usepackage{rotating}
 \lstset{
   basicstyle=\ttfamily,
   columns=fullflexible,
@@ -42,6 +43,7 @@ The inputs are listed in Table \ref{tab:steam inputs}.
 
 \begin{table}[t]
 \centering
+\small
 \begin{tabular}{lll}
 \hline
 Symbol & Input & Notes \\
@@ -333,9 +335,10 @@ the envelope and anisotropy options.
 
 If nested simulations are to be performed, the flag \texttt{save\_for\_refinement} is required, which additionally stores the cascade states and per-class increments: \texttt{h\_perturbation}, \texttt{qt\_perturbation}, \texttt{flux\_state}, and \texttt{class\_increments}. This allows nested simulations to continue the cascade without reading the final compensated fields. Compensation is only done at final output resolution and not mid-cascade.
 
-\begin{table}[t]
+\begin{sidewaystable}
 \centering
-\small
+\footnotesize
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{llll}
 \hline
 Variable & Dimensions & Units & Description \\
@@ -374,7 +377,7 @@ the mean profile not added; a nest continues from them, because the
 written fields, being composed, cannot be turned back into them.
 Every class's row of \texttt{C\_h\_k} and \texttt{C\_qt\_k} is
 interpolated onto the output $z$ grid before storage.}\label{tab:output file}
-\end{table}
+\end{sidewaystable}
 
 Nested refinements (next section) are stored as NetCDF groups inside
 the parent's file (e.g. \texttt{refinements/r0}) with the same layout.
@@ -517,16 +520,17 @@ $c_p T + g z + L_v r_v$ from the archived temperature.
 With the exception of the mean profiles, no STEAM inputs are
 calibrated to any individual host. The spheroscale is a constant 10~m,
 with turbulons isotropic below it
-(\texttt{piecewise\_isotropic\_below\_spheroscale}); the Hurst
+(\texttt{piecewise\_isotropic\allowbreak\_below\allowbreak\_spheroscale}); the Hurst
 exponents, $\vartheta$, the turbulon envelope, the cascade density, and
 the flux noise parameters $\alpha$ and $\beta$ are those of
 Sect.~\ref{ssect:steam algorithm spec}. The three values $\varpi \in \{0.02, 0.05, 0.17\}$ are used for the flux noise amplitude throughout the comparison. The simulated depth is 20~km and
 the input profiles are sampled at 50~m. The run sets are listed in
 Table~\ref{tab:steam runs}.
 
-\begin{table}[t]
+\begin{sidewaystable}
 \centering
 \small
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{llllll}
 \hline
 Set & Grid & $\Delta x$ & Extent & $L$ & Runs \\
@@ -545,7 +549,7 @@ their parent's cascade and have no outer scale of their own. The
 visualization runs reach only 4~km depth; their nests are the only
 simulations whose finest size class, $2\Delta x = 5$~m, lies below the
 spheroscale.}\label{tab:steam runs}
-\end{table}
+\end{sidewaystable}
 
 The scalar bounds are anchored to a 300~K sea surface, prescribed by the RCEMIP channel configuration, and
 applied to all hosts: $q_t \in [0,\
@@ -666,6 +670,61 @@ The stored L1B reflectance is $R\cos\theta_0$ where $R$ is reflectivity, and so 
 while cloud cover moves by up to a factor of 2.1. All granules have a solar zenith angle of at most $69^\circ$.
 
 We do not report exponents for cases failing the statistical validity criteria proposed by \citet{dewitt2024b,dewitt2026}. These cases are simply identified when \verb|objscale| emits warnings.
+
+\section{Computational cost}
+\label{sect:computational cost}
+
+This section compares the computational cost of STEAM to that of CM1, 
+measured on a single desktop machine
+(16-core AMD Ryzen 9950X with 64~GB memory). We consider the cost per independent snapshot.
+Because STEAM is not time-dependent, it generates independent snapshots directly, in contrast to
+a hydrodynamic model which must simulate a large number of intermediate states. For statistical analysis of cloud fields like what is shown in the main text, this is an advantage of STEAM rather than a limitation, because independent snapshots are most useful for computing statistics. For other cases such as weather forecasting, the fact that STEAM is not time-dependent becomes a limitation.
+
+
+CM1 serves as the reference
+host because its exact RCEMIP release is public. The measurement is
+archived in the analysis repository (\texttt{cm1-cost-comparison/})
+and reproduces from two scripts.
+The RCEMIP CM1 submission used CM1 release 19.6
+\citep{bryan2012,wing2020}. We build that release unmodified except
+for one patch, which uncomments the values for 
+insolation, the ozone profile, and trace gas concentrations that were used for RCEMIP
+\citep{wing2018}. The model is then configured as the
+\texttt{RCE\_large300} channel of Sect.~\ref{ssect:comparison data},
+following the archived CM1 model documentation: $2016 \times 134
+\times 74$ points at 3~km spacing, the \citet{wing2018} vertical
+grid, RRTMG radiation, Morrison microphysics, and the Bryan--Rotunno
+boundary-layer scheme. We integrate one model hour at a fixed 18~s
+time step, the measured average step of the production run (CM1 model documentation form, RCEMIP archive), on all 16 cores.
+
+One model hour of the channel takes 1058~s of wall time. This rate
+corresponds to 7.1~hours per model day, or $2.5\times 10^{6}$~s
+(29~days) for the 100-day production integration. The measurement
+starts from the quiescent analytic sounding, which favors CM1
+slightly given that clouds have yet to form. 
+Active microphysics in a convecting state would add a few
+percent to the per-timestep cost. Radiation is computed on a fixed model-time interval and contributes
+158~s per model hour independent of the time step.
+
+It is not clear whether the most fair comparison between CM1 and STEAM would
+be for matched horizontal resolutions. In the main text, we argued that hydrodynamic
+simulations should be first coarsened by at least a factor of 2 to account for 
+numerical artifacts, while STEAM does not. The matched STEAM configuration
+used in the main text ($1024 \times 64 \times 78$; Sect.~\ref{ssect:comparison data})
+takes 1.7~s on the same 16 cores. A realization instead simulated at the host's native
+3~km spacing ($2048 \times 128 \times 115$, more grid points than the
+CM1 grid itself) takes 3.4~s. Both figures are CPU-only. 
+
+We estimate the order-of-magnitude decorrelation timescale for RCEMIP by dividing the channel length by the mean wind speed at 10~km.
+For the three CM1 snapshots considered here, the 10~km mean for $u$ is $3.8$~m/s, indicating a decorrelation time of about 18 days. This timescale is generous given that \citet{wing2018} found that the largest convective clusters took approximately 40 days to develop.
+Assuming independent snapshots are separated by this timescale,
+the host cost comes to $4.6\times
+10^{5}$~s per independent field. Each STEAM realization is an independent field
+by construction. The resulting ratio is $2.6\times 10^{5}$ at the
+paper's matched resolution, or $1.4\times 10^{5}$ at the host's own
+grid spacing. These ratios double if the 40-day spinup period is used instead.
+Overall, we estimate the computational advantage per simulated independent snapshot to be between approximately
+$10^5$ and $10^6$.
 
 \bibliographystyle{plainnat}
 \bibliography{sources}

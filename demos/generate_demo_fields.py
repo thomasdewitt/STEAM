@@ -89,7 +89,7 @@ CASES = {
         profile="cm1",
     ),
     "stratified": dict(
-        nx=2048, ny=2048 , dx=50.0,   # 20.48 km square
+        nx=2048/2, ny=2048/2 , dx=100.0,   # 20.48 km square
         domain_height=15000.0,
         outer_scale=2048.0 * 50,
         spheroscale=10.0,
@@ -107,7 +107,7 @@ CASES = {
         profile="kslc",
     ),
     "desert-convection-coarse": dict(
-        nx=512, ny=512, dx=1000.0,      
+        nx=512, ny=512, dx=100.0,      
         domain_height=15000.0,
         outer_scale=51200.0,
         spheroscale=300.0,

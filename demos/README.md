@@ -4,8 +4,15 @@ Source fields for the STEAM group on cloudyview's soar rail.
 
 Everything here ends at a NetCDF. The demo spec — crop, sun angles, card copy,
 the volume packing, the still, `index.json` — lives in
-`cloudyview/tools/prebake_demos.py`, which reads these files out of
-`cloudyview/data/demos/`.
+`cloudyview/tools/prebake_demos.py`, which reads `demos/fields/` here directly
+(`STEAM_SRC` there, a sibling-repo path) rather than out of a copy under
+`cloudyview/data/demos/`. Regenerating a case is enough; there is nothing to
+copy across afterwards.
+
+The z crop is not specified there: STEAM specs carry `z="auto"` and prebake
+trims to the occupied band, which is what the browser and `witness` both do on
+load. That matters because a `--camera-position` is normalized to the domain
+box, so the band is the frame of reference for every camera in a spec.
 
 ## Scripts
 
