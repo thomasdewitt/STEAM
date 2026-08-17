@@ -141,9 +141,9 @@ ax.plot(x_chain[window], t_chain[window], color=LATE, lw=1.4, zorder=3,
 
 ax.axhline(0, color=RULE, lw=0.8, zorder=0)
 
-# cell-width dimension marker, with the label alongside rather than under
-# the arrow -- the span is only one cell wide, so a centered label sits on
-# top of its own arrowheads.
+# cell-width dimension marker. The label goes ABOVE the arrow: the span
+# is only one cell wide, so a centered label below it sits on top of its
+# own arrowheads, and the band above is empty.
 y_dim = -0.45
 ax.annotate('', xy=(-dx / 2, y_dim), xytext=(dx / 2, y_dim),
             arrowprops=dict(arrowstyle='<->', color=LABEL, lw=0.8,
@@ -151,8 +151,8 @@ ax.annotate('', xy=(-dx / 2, y_dim), xytext=(dx / 2, y_dim),
 for tick_x in (-dx / 2, dx / 2):
     ax.plot([tick_x, tick_x], [y_dim - 0.07, y_dim + 0.07], color=LABEL,
             lw=0.8, zorder=1)
-ax.text(dx / 2 + 0.09, y_dim, '$\\Delta x_\\ell = \\ell/2$', color=INK,
-        fontsize=FS_NOTE, ha='left', va='center')
+ax.text(0.0, y_dim + 0.10, '$\\Delta x_\\ell = \\ell/2$', color=INK,
+        fontsize=FS_NOTE, ha='center', va='bottom')
 
 # tap callouts
 ax.text(0.0, t_cells[m_max] + 0.10, f'${A_OPT:.3f}$', color=COARSE,
