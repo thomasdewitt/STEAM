@@ -78,7 +78,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import scaleinvariance as si
-from turblib import INK, RULE, LABEL, PALETTE, save
+from turblib import INK, RULE, LABEL, PALETTE, page_fontsize, save
 
 # ---------------------------------------------------------------- parameters
 FIELD_MODEL = 'fbm'   # 'fbm' (deposit-and-sum, like STEAM) or 'random_walk'
@@ -188,6 +188,11 @@ fig, (ax_a, ax_b) = plt.subplots(
     2, 1, figsize=(7.2, 5.6), sharex=True,
     gridspec_kw=dict(height_ratios=[1.35, 1.0], hspace=0.12))
 
+FS_TICK = page_fontsize(8.0, fig)
+FS_AXIS = page_fontsize(9.0, fig)
+FS_NOTE = page_fontsize(8.5, fig)
+FS_SMALL = page_fontsize(7.5, fig)
+
 # (a) the fluctuation functions themselves
 for name, _, _, _ in ENVELOPES:
     r = results[name]
@@ -202,8 +207,8 @@ ax_a.plot(guide_l, guide * 1.42, color=INK, lw=0.9, ls=(0, (4, 2.5)), zorder=3)
 tip_l = float(np.exp(0.62 * np.log(guide_l[-1] / guide_l[0])) * guide_l[0])
 tip_v = ref['values'][0] * 1.42 * (tip_l / ref['lags'][0]) ** H_TRUE
 ax_a.annotate(f'$\\ell^{{{H_TRUE:g}}}$ reference slope', xy=(tip_l, tip_v),
-              xytext=(0.70, 0.90), textcoords='axes fraction', color=LABEL,
-              fontsize=7.5, ha='right', va='center',
+              xytext=(0.70, 0.90), textcoords='axes fraction', color=INK,
+              fontsize=FS_SMALL, ha='right', va='center',
               arrowprops=dict(arrowstyle='->', color=LABEL, lw=0.7,
                               shrinkB=2,
                               connectionstyle='arc3,rad=-0.05'))
@@ -217,7 +222,7 @@ ax_b.axhspan(H_TRUE - EXPONENT_TOL, H_TRUE + EXPONENT_TOL, color=RULE,
              alpha=0.55, lw=0, zorder=0)
 ax_b.axhline(H_TRUE, color=INK, lw=0.9, ls=(0, (4, 2.5)), zorder=1)
 ax_b.text(results['structure_function']['lags'][-1], H_TRUE + 0.012,
-          f'$H = {H_TRUE:g}$', color=LABEL, fontsize=8.5, ha='right',
+          f'$H = {H_TRUE:g}$', color=INK, fontsize=FS_NOTE, ha='right',
           va='bottom')
 
 for name, _, _, _ in ENVELOPES:
@@ -252,7 +257,7 @@ if ANNOTATE_CROSSOVER:
         ax_b.plot([lc, lc], [H_TRUE - EXPONENT_TOL, depth + 0.04 * span],
                   color=r['color'], lw=0.8, ls=(0, (1.5, 1.8)), zorder=2)
         ax_b.text(lc, depth, f'$\\ell={lc:.0f}$', color=r['color'],
-                  fontsize=8, ha='center', va='top')
+                  fontsize=FS_TICK, ha='center', va='top')
         slot += 1
 ax_b.set_ylabel('$d\\log\\langle\\Delta f^q\\rangle\\,/\\,d\\log\\ell$')
 ax_b.set_xlabel('scale $\\ell$ (grid cells)')
@@ -271,7 +276,7 @@ if SHOW_WALK_INSET:
     walk_label = ('random walk $f(x)$' if FIELD_MODEL == 'random_walk'
                   else f'fBm $f(x)$, $H = {H_TRUE:g}$')
     ins_w.text(0.5, -0.04, walk_label, transform=ins_w.transAxes,
-               color=LABEL, fontsize=7.5, ha='center', va='top')
+               color=INK, fontsize=FS_SMALL, ha='center', va='top')
 
 # lower-right inset: the three envelopes at one nominal l, on a common cell axis
 if SHOW_KERNEL_INSET:
@@ -297,29 +302,29 @@ if SHOW_KERNEL_INSET:
     for side in ins.spines:
         ins.spines[side].set_visible(False)
     ins.text(0.5, -0.04, f'$\\mathfrak{{T}}_\\ell$ at $\\ell={INSET_LAG}$',
-             transform=ins.transAxes, color=LABEL, fontsize=7.5, ha='center',
+             transform=ins.transAxes, color=INK, fontsize=FS_SMALL, ha='center',
              va='top')
 
 # ------------------------------------------------------------------- styling
 for ax, tag in ((ax_a, '(a)'), (ax_b, '(b)')):
-    ax.text(0.0, 1.0, tag, transform=ax.transAxes, color=LABEL, fontsize=9,
-            ha='left', va='bottom')
-    ax.tick_params(colors=LABEL, labelsize=8, length=3, width=0.8,
+    ax.text(0.0, 1.0, tag, transform=ax.transAxes, color=INK,
+            fontsize=FS_AXIS, ha='left', va='bottom')
+    ax.tick_params(colors=INK, labelsize=FS_TICK, length=3, width=0.8,
                    which='both')
-    ax.xaxis.label.set_color(LABEL)
-    ax.yaxis.label.set_color(LABEL)
-    ax.xaxis.label.set_fontsize(9)
-    ax.yaxis.label.set_fontsize(9)
+    ax.xaxis.label.set_color(INK)
+    ax.yaxis.label.set_color(INK)
+    ax.xaxis.label.set_fontsize(FS_AXIS)
+    ax.yaxis.label.set_fontsize(FS_AXIS)
     for side in ('top', 'right'):
         ax.spines[side].set_visible(False)
     for side in ('left', 'bottom'):
         ax.spines[side].set_color(RULE)
         ax.spines[side].set_linewidth(0.8)
 
-leg = ax_b.legend(frameon=False, fontsize=8.5, loc='lower right',
+leg = ax_b.legend(frameon=False, fontsize=FS_NOTE, loc='lower right',
                   handlelength=1.6, borderaxespad=0.4)
 for text in leg.get_texts():
-    text.set_color(LABEL)
+    text.set_color(INK)
 
 fig.savefig('wavelet_discretization_hires.png', dpi=300, bbox_inches='tight',
             pad_inches=0.05, transparent=True)

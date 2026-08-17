@@ -2,7 +2,8 @@
 
 Three figures explaining the turbulon concept (locked 2026-07-23):
 
-- **w7_quincunx_asym** — what a turbulon is: polar-wireframe sombreros for
+- **turbulon_figure** (was `w7_quincunx_asym`) — what a turbulon is:
+  polar-wireframe sombreros for
   each field (T, p', h, q_t) with signed amplitudes, center shows all four
   superimposed with an asymmetric cutout whose face-on wall carries the
   radial profile fan.
@@ -91,21 +92,31 @@ Supplement figures:
   envelope and same A_opt as s1, but against the *linear interpolant*
   through the k/2 samples rather than the piecewise-constant
   representation. The first regrid replaces the envelope by the chord
-  polygon through its samples; the second shortcuts that polygon's own
-  kinks; from the third regrid on the field is an exact fixed point of the
-  interpolation operator (verified: peak frozen at 2.6152 for m >= 2 at
-  every grid size tried, 7 to 513 cells). This is the figure for the
+  polygon through its samples and cuts its corners, the peak most
+  visibly, from 2.968 to 2.262; the peak is then held exactly, because
+  the cell-consistent regrid leaves a flat plateau across the center that
+  every later sampling reproduces. The remaining kinks keep being shaved
+  slightly per hop — the 1-3% per octave the supplement reports. This is
+  the figure for the
   "interpolation does not preserve the mean absolute value" paragraph.
 
 Notes:
+- Styling is shared through `turblib`: text is typeset by LaTeX itself in
+  the manuscript's Computer Modern (needs latex + dvipng on PATH), and
+  annotation text is black, with grey reserved for rules, leaders and
+  arrows. Figures are drawn wider than they appear on the page
+  (`\includegraphics[width=12cm]`), so set font sizes through
+  `turblib.page_fontsize(pt, fig)`, which takes the size the text should
+  have *in print*.
 - Envelope drawn with the 1D-form Mexican hat 2(1-a)e^(-a/2)
   (deeper negative lobe than the true 2D form — a deliberate
   visualization choice); circular domain truncated at R = 1.10 where the
   lobe has decayed.
 - Regenerate: `python <name>.py` (needs numpy + matplotlib; PDFs are
-  transparent-background vector). wavelet_discretization additionally
-  needs scaleinvariance >= 0.15 — run it with `../../.venv/bin/python`.
-  v10c/v11c accept `--seed N` for
+  transparent-background vector), plus latex + dvipng for the text.
+  wavelet_discretization additionally needs scaleinvariance >= 0.14. Both
+  are in the `calibration` dependency group: `uv run --group calibration
+  python <name>.py`. v10c/v11c accept `--seed N` for
   exploration; locked seeds are the defaults.
 - `turblib.py` = palette/amplitudes/projection/ridgeline machinery;
   `wirelib.py` = circular polar wireframe, cutout wall, axis triads.

@@ -20,9 +20,8 @@ def triad(ax, x0, y0, zlabel, zcolor, scale=0.30, lw=0.7,
           label_color=None, fontsize=7.5):
     """Small unit-vector glyph: x, y (oblique projected), z labeled with
     the field name."""
-    from turblib import LABEL
     if label_color is None:
-        label_color = LABEL
+        label_color = INK
     dirs = {'x': (1.0, 0.0), 'y': (0.32, 0.55), 'z': (0.0, 1.0)}
     # register the glyph's extent in the data limits (annotations don't)
     ax.plot([x0 - 0.05, x0 + scale * 1.15], [y0 - 0.05, y0 + scale * 1.15],
@@ -36,10 +35,10 @@ def triad(ax, x0, y0, zlabel, zcolor, scale=0.30, lw=0.7,
                                     shrinkB=0), zorder=4,
                     annotation_clip=False)
         if name == 'x':
-            ax.text(x0 + ex + 0.05, y0 + ey - 0.02, 'x', ha='left',
+            ax.text(x0 + ex + 0.05, y0 + ey - 0.02, '$x$', ha='left',
                     va='center', color=label_color, fontsize=fontsize)
         elif name == 'y':
-            ax.text(x0 + ex + 0.04, y0 + ey + 0.02, 'y', ha='left',
+            ax.text(x0 + ex + 0.04, y0 + ey + 0.02, '$y$', ha='left',
                     va='bottom', color=label_color, fontsize=fontsize)
         else:
             ax.text(x0 + ex + 0.04, y0 + ey + 0.05, zlabel, ha='right',

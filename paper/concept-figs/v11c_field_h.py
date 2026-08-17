@@ -14,7 +14,8 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from turblib import (envelope as env2d, draw_ridges, draw_wireframe,
-                     project, clean_axes, save, PALETTE, LABEL, INK)
+                     project, clean_axes, save, page_fontsize,
+                     PALETTE, LABEL, INK)
 from wirelib import wire_polar, triad
 
 OCHRE = PALETTE['h']
@@ -71,6 +72,7 @@ print(f'seed {args.seed}: strong A={strong[3]:+.2f} at '
 
 def render(stem, field_style):
     fig, ax = plt.subplots(figsize=(11, 6))
+    fs_note = page_fontsize(8.5, fig)
     x_off = -3.1
     if field_style == 'ridge':
         draw_ridges(ax, X, Y, 0.30 * field, color=INK, lw=0.4, step=3,
@@ -103,7 +105,8 @@ def render(stem, field_style):
             tips.append(tuple(pts[np.argmax(pts[:, 0])]))
         else:              # negative: anchor bottommost crown point
             tips.append(tuple(pts[np.argmin(pts[:, 1])]))
-    triad(ax, x_off - 4.55, -1.5, '$h$', OCHRE, scale=0.36, lw=0.9)
+    triad(ax, x_off - 4.55, -1.5, '$h$', OCHRE, scale=0.36, lw=0.9,
+          fontsize=fs_note)
 
     # ---- right: the two extracted turbulons
     amps_rel = {'strong': 1.0, 'weak': weak[3] / strong[3]}
@@ -116,7 +119,7 @@ def render(stem, field_style):
                    lw=0.32, alpha=0.9, n_rings=7, n_spokes=14, scale=sc)
         ax.text(x_off2 + .65+xoff, y0 - 0.55,
                 f'$A = {amps_rel[name]:.1f}$', ha='left', va='center',
-                color=OCHRE, fontsize=8.5)
+                color=OCHRE, fontsize=fs_note)
     # connectors (teal); the negative one arcs BELOW the field
     routes = {'strong': (0.25, 0.0, -0.12, .9), 'weak': (0.1, -0.25, 0.33,1.5)}
     for (tx, ty), name in zip(tips, ('strong', 'weak')):

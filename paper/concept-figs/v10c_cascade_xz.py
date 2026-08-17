@@ -11,7 +11,7 @@
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from turblib import clean_axes, save, INK
+from turblib import clean_axes, save, page_fontsize, INK
 
 TEAL = '#1F6E6B'
 HZ = 5.0 / 9.0
@@ -93,6 +93,7 @@ keep, _ = build(seed)
 print('seed =', seed)
 
 fig, ax = plt.subplots(figsize=(10, 4.4))
+FS_NOTE = page_fontsize(9.0, fig)
 
 
 def ellipse(cx, cz, kh, kv, **kw):
@@ -113,7 +114,7 @@ for zz in (mz - mk_kv / 2, mz + mk_kv / 2):
     ax.plot([mx + adx - 0.12, mx + adx + 0.12], [zz, zz], color=TEAL,
             lw=0.7, zorder=5)
 ax.text(mx + adx + 0.24, mz, '$\\ell_s$', ha='left', va='center',
-        color=TEAL, fontsize=10, zorder=5)
+        color=TEAL, fontsize=FS_NOTE, zorder=5)
 
 ax.set_xlim(-0.3, W + 0.3)
 ax.set_ylim(-0.3, Hd + 0.3)

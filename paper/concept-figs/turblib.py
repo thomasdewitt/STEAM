@@ -7,15 +7,44 @@ zero-mean over 2D space (admissibility), negative skirt included.
 Rendering: manual oblique/axonometric projection of a height surface,
 drawn as thin ridgelines (y-slices) with optional painter's-algorithm
 hidden-line removal. No mpl3d.
+
+Text is typeset by LaTeX itself (text.usetex), so figure annotation is in
+the same Computer Modern as the manuscript rather than matplotlib's
+DejaVu -- copernicus.cls loads no font package, so the document is plain
+CM. This needs a working latex + dvipng on PATH, the same requirement as
+building the paper at all.
+
+Annotation text is INK (black), matching the body text it sits next to.
+Grey (LABEL) is kept for structure that is not reading matter: rules,
+leader lines, arrows, spines, ticks.
+
+Figures are drawn several inches wider than they appear on the page
+(\\includegraphics[width=12cm] throughout main.tex), so a font size set
+here lands smaller in print. Use page_fontsize() to set sizes in the
+points they will actually have on the page.
 """
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+matplotlib.rcParams.update({
+    'text.usetex': True,
+    'font.family': 'serif',
+    'font.serif': ['Computer Modern Roman'],
+    'text.latex.preamble': r'\usepackage{amsmath,amssymb}',
+})
+
 INK = '#111111'
 RULE = '#e3e3e3'
 LABEL = '#7a7a7a'
+
+PAGE_WIDTH_IN = 12 / 2.54       # \includegraphics[width=12cm] in main.tex
+
+
+def page_fontsize(pt, fig):
+    """Font size to set so that text renders at `pt` on the printed page."""
+    return pt * fig.get_size_inches()[0] / PAGE_WIDTH_IN
 
 # palette: field -> color  (earth-adjacent, tuned for white background)
 PALETTE = {
