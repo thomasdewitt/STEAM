@@ -199,8 +199,7 @@ def main():
         fig.text(col_x(j) + CW / 2, y - 0.023, r"$\vdots$",
                  fontsize=FS_BODY * 1.3, color=INK, ha="center",
                  va="center")
-    fig.text(RX - 0.014, y - 0.023, "9 more classes,\ndown to "
-             r"$\ell = 20$ m", fontsize=FS_SMALL, color=LABEL, ha="right",
+    fig.text(RX - 0.014, y - 0.023, "11 classes,\n20.48 km to 20 m", fontsize=FS_SMALL, color=LABEL, ha="right",
              va="center")
     y -= 0.050
     # sum rule, then the full fields
