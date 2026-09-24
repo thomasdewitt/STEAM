@@ -336,7 +336,7 @@ For both STEAM and the giga-LES volumes, simulated albedo fields are constructed
 \end{align}
 where the liquid and ice water paths $\mathrm{LWP}$ and $\mathrm{IWP}$ are obtained by vertically integrating the condensate fields within each column, $\rho_w$ is the density of liquid water, and the assumed effective radii are $r_{e,\mathrm{liq}} = 10\,\unit{\mu m}$ and $r_{e,\mathrm{ice}} = 30\,\unit{\mu m}$. The liquid term is the geometric optics relationship from \citet[Eq. 7.86 of][]{petty2006} and the ice term is the visible-band ice parameterization of \citet{ebert1992}, with $a = 3.448\times10^{-3}\,\unit{m^2\,g^{-1}}$ and $b = 2.431\,\unit{\mu m\, m^2\,g^{-1}}$ for water paths in $\unit{g\,m^{-2}}$. 
 
-From the column optical depth, visual albedo is computed using the two-stream solution for the reflectivity of a nonabsorbing cloud layer \citep[Eq. 5.51 of][]{bohren2006}:
+From the column optical depth, visual albedo is computed using the two-stream solution for the reflectivity of a nonabsorbing cloud layer \citep[Eq. 5.51 of][]{bohren2008}:
 \begin{align}
   A = \frac{(1-g)\,\tau_c}{(1-g)\,\tau_c + 2}, \label{eq:two stream albedo}
 \end{align}
